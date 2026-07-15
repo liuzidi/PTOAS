@@ -1,0 +1,60 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=PIPE --implicit-check-not=pto.vecscope
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=pto.vmi.
+// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --enable-vmi=false --emit-vpto %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOVMI
+// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --enable-op-fusion --emit-vpto %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOFUSION
+
+module {
+  func.func @ptodsl_vmi_tileop_provider() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
+    pto.tadd
+      ins(%a, %b
+          : !pto.tile_buf<vec, 32x256xf32>,
+            !pto.tile_buf<vec, 32x256xf32>)
+      outs(%c : !pto.tile_buf<vec, 32x256xf32>)
+    pto.texp
+      ins(%c : !pto.tile_buf<vec, 32x256xf32>)
+      outs(%d : !pto.tile_buf<vec, 32x256xf32>)
+    return
+  }
+}
+
+// PIPE: IR Dump After ExpandTileOp
+// PIPE: call {{.*}}__pto_ptodsl_vmi_a5_tadd
+// PIPE: call {{.*}}__pto_ptodsl_vmi_a5_texp
+// PIPE: func.func private {{.*}}__pto_ptodsl_vmi_a5_tadd
+// PIPE-SAME: pto.tileop.instance = "ptodsl-vmi"
+// PIPE: pto.vmi.create_mask
+// PIPE: scf.for
+// PIPE: pto.vmi.vload
+// PIPE: pto.vmi.vadd
+// PIPE: pto.vmi.vstore
+// PIPE: func.func private {{.*}}__pto_ptodsl_vmi_a5_texp
+// PIPE: pto.vmi.vexp
+// PIPE: IR Dump After PTOInlineLibCall
+// PIPE: func.func @ptodsl_vmi_tileop_provider
+// PIPE: pto.vmi.create_mask
+// PIPE: scf.for
+// PIPE: pto.vmi.vadd
+// PIPE: pto.vmi.vexp
+
+// FINAL-LABEL: func.func @ptodsl_vmi_tileop_provider
+// FINAL: pto.vecscope
+// FINAL: scf.for
+// FINAL: pto.vlds
+// FINAL: pto.vadd
+// FINAL: pto.vsts
+// FINAL: pto.vexp
+
+// NOVMI: --tile-lib-backend=ptodsl-vmi requires --enable-vmi=true
+// NOFUSION: --tile-lib-backend=ptodsl-vmi cannot use the legacy --enable-op-fusion pipeline

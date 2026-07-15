@@ -57,6 +57,10 @@ static bool isTilelangTemplateFunc(func::FuncOp fn) {
   return fn->hasAttr("pto.tilelang.instance") && fn.isPrivate();
 }
 
+static bool isTileOpProviderFunc(func::FuncOp fn) {
+  return fn->hasAttr("pto.tileop.instance") && fn.isPrivate();
+}
+
 static bool isInlineableBackendHelperFunc(func::FuncOp fn) {
   return isTileOpHelperFunc(fn);
 }
@@ -67,7 +71,7 @@ static bool isInlineableLibFunc(func::FuncOp fn) {
   // TileLang inline_proc helpers that only become meaningful after ExpandTileOp.
   if (isInstanceFunc(fn) || isTilelangInlineProcFunc(fn))
     return true;
-  return isTilelangTemplateFunc(fn);
+  return isTilelangTemplateFunc(fn) || isTileOpProviderFunc(fn);
 }
 
 static Value maybeUnwrapCastToExpected(Value operand, Type expectedType) {

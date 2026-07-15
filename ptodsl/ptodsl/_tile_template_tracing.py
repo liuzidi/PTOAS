@@ -15,6 +15,7 @@ an AST-capture frontend.
 Current scope:
 - bare ``Tile`` parameters with static 2D specializations
 - ``dst.element_type`` / ``dst.valid_shape``
+- explicit ``ir_level="vpto"`` or ``ir_level="vmi"`` template selection
 - optional `with pto.vecscope():`
 - explicit structured `with pto.for_(...) as ...:`
 - optional named loop-carried state via ``state={...}``
@@ -23,6 +24,7 @@ Current scope:
 - ``vlds(tile[row, col:])``
 - ``vadd(lhs, rhs, mask)``
 - ``vsts(vec, tile[row, col:], mask)``
+- fixed-shape VMI logical-block helpers for ``vload/vadd/vexp/vstore``
 
 The current goal is to keep a narrow tile-template tracing path that already
 builds real MLIR Python objects, while keeping its scope explicit and aligned
@@ -34,8 +36,8 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from . import scalar as _scalar
 from ._surface_types import Tile
+from ._surface_values import unwrap_surface_value
 from ._tracing import (
     KernelModuleSpec,
     ModuleArtifact,
@@ -43,6 +45,7 @@ from ._tracing import (
     TracingRuntime,
     require_active_runtime,
 )
+from ._vmi_namespace import vmi as _vmi
 from ._types import (
     _resolve,
     float16 as _float16,
@@ -86,6 +89,7 @@ class TileSpec:
     shape: tuple[int, int]
     dtype: ScalarType
     memory_space: str = "ub"
+    b_layout: str = "row_major"
 
     def __post_init__(self):
         if len(self.shape) != 2:
@@ -94,6 +98,8 @@ class TileSpec:
             raise ValueError("TileSpec.shape must contain positive integers")
         if self.memory_space != "ub":
             raise ValueError("TileSpec currently only supports ub tiles")
+        if self.b_layout not in {"row_major", "col_major"}:
+            raise ValueError("TileSpec.b_layout must be 'row_major' or 'col_major'")
 
     def mlir_type(self):
         rows, cols = self.shape
@@ -101,7 +107,7 @@ class TileSpec:
             [rows, cols],
             _scalar_descriptor(self.dtype),
             [rows, cols],
-            blayout="RowMajor",
+            blayout="RowMajor" if self.b_layout == "row_major" else "ColMajor",
             address_space=self.memory_space,
             slayout="NoneBox",
             fractal_size=512,
@@ -151,6 +157,133 @@ class _TileSlice:
     tile: "_TileProxy"
     row: int | _Value
     col: int | _Value
+
+
+@dataclass(frozen=True)
+class CanonicalBlockMap:
+    """Static mapping contract for one flat logical-block loop.
+
+    The first VMI TileLib slice intentionally supports only full logical blocks:
+    each row must contain an integral number of ``logical_lanes`` blocks.
+    """
+
+    shape: tuple[int, int]
+    logical_lanes: int
+
+    def __post_init__(self):
+        if len(self.shape) != 2:
+            raise ValueError("CanonicalBlockMap requires a rank-2 shape")
+        rows, cols = self.shape
+        if any(not isinstance(dim, int) or dim <= 0 for dim in self.shape):
+            raise ValueError("CanonicalBlockMap shape must contain positive integers")
+        if not isinstance(self.logical_lanes, int) or self.logical_lanes <= 0:
+            raise ValueError("CanonicalBlockMap logical_lanes must be a positive integer")
+        if cols % self.logical_lanes != 0:
+            raise ValueError(
+                "CanonicalBlockMap currently requires each row to contain full logical blocks; "
+                f"got cols={cols}, logical_lanes={self.logical_lanes}"
+            )
+
+    @classmethod
+    def from_tile(cls, tile: "_TileProxy", *, logical_lanes: int | None = None):
+        if not isinstance(tile, _TileProxy):
+            raise TypeError("CanonicalBlockMap.from_tile(...) expects a traced Tile argument")
+        lanes = tile.element_type.lanes if logical_lanes is None else logical_lanes
+        return cls(tile._spec.shape, lanes)
+
+    @property
+    def rows(self) -> int:
+        return self.shape[0]
+
+    @property
+    def cols(self) -> int:
+        return self.shape[1]
+
+    @property
+    def blocks_per_row(self) -> int:
+        return self.cols // self.logical_lanes
+
+    @property
+    def logical_block_count(self) -> int:
+        return self.rows * self.blocks_per_row
+
+    def coordinate(self, logical_block) -> "CanonicalBlockCoordinate":
+        if isinstance(logical_block, int):
+            if logical_block < 0 or logical_block >= self.logical_block_count:
+                raise IndexError(
+                    f"logical block {logical_block} is outside [0, {self.logical_block_count})"
+                )
+            return CanonicalBlockCoordinate(self, logical_block)
+
+        trace = require_active_runtime("CanonicalBlockMap.coordinate", expected_type=_TraceBuilder)
+        block = trace._coerce_index(logical_block)
+        if block.is_const and (
+            block.const_value < 0 or block.const_value >= self.logical_block_count
+        ):
+            raise IndexError(
+                f"logical block {block.const_value} is outside [0, {self.logical_block_count})"
+            )
+        return CanonicalBlockCoordinate(self, block)
+
+
+class CanonicalBlockCoordinate:
+    """One lazily materialized logical-block coordinate."""
+
+    def __init__(self, block_map: CanonicalBlockMap, logical_block: int | _Value):
+        self.block_map = block_map
+        self.logical_block = logical_block
+        self._cache: dict[str, int | _Value] = {}
+
+    def _cached(self, name: str, build):
+        if name not in self._cache:
+            self._cache[name] = build()
+        return self._cache[name]
+
+    def _binary(self, op_name: str, lhs, rhs):
+        if isinstance(lhs, int) and isinstance(rhs, int):
+            if op_name == "mul":
+                return lhs * rhs
+            if op_name == "floordiv":
+                return lhs // rhs
+            if op_name == "mod":
+                return lhs % rhs
+            raise ValueError(f"unsupported coordinate operation {op_name!r}")
+        trace = require_active_runtime(
+            f"CanonicalBlockCoordinate.{op_name}", expected_type=_TraceBuilder
+        )
+        return trace.index_binary(op_name, lhs, rhs)
+
+    @property
+    def row(self):
+        return self._cached(
+            "row",
+            lambda: self._binary("floordiv", self.logical_block, self.block_map.blocks_per_row),
+        )
+
+    @property
+    def block_in_row(self):
+        return self._cached(
+            "block_in_row",
+            lambda: self._binary("mod", self.logical_block, self.block_map.blocks_per_row),
+        )
+
+    @property
+    def col_start(self):
+        return self._cached(
+            "col_start",
+            lambda: self._binary("mul", self.block_in_row, self.block_map.logical_lanes),
+        )
+
+    @property
+    def linear_offset(self):
+        return self._cached(
+            "linear_offset",
+            lambda: self._binary("mul", self.logical_block, self.block_map.logical_lanes),
+        )
+
+    @property
+    def active_lanes(self) -> int:
+        return self.block_map.logical_lanes
 
 
 class _TileProxy:
@@ -282,26 +415,43 @@ class _ForCM:
 
 
 class _TraceBuilder(TracingRuntime):
-    def __init__(self, descriptor: "TileTemplate", tile_specs: dict[str, TileSpec]):
+    def __init__(
+        self,
+        descriptor: "TileTemplate",
+        parameter_specs: dict[str, TileSpec | ScalarType],
+    ):
+        is_vmi = descriptor.ir_level == "vmi"
         super().__init__(
             KernelModuleSpec(
                 function_name=descriptor.name,
                 target_arch=descriptor.target,
                 kernel_kind="vector",
+                backend="vpto",
+                entry=not is_vmi,
                 mode="auto",
-                module_style=ModuleStyle.NESTED,
-                source_file=inspect.getsourcefile(descriptor.py_fn) or inspect.getfile(descriptor.py_fn),
+                module_style=(
+                    ModuleStyle.BACKEND_PARTITIONED if is_vmi else ModuleStyle.NESTED
+                ),
+                source_file=(
+                    inspect.getsourcefile(descriptor.py_fn)
+                    or inspect.getfile(descriptor.py_fn)
+                ),
                 source_line=getattr(descriptor.py_fn.__code__, "co_firstlineno", None),
             )
         )
         self.descriptor = descriptor
-        self.tile_specs = tile_specs
+        self.parameter_specs = parameter_specs
+        self.tile_specs = {
+            name: spec
+            for name, spec in parameter_specs.items()
+            if isinstance(spec, TileSpec)
+        }
         self._const_cache: dict[tuple[int, str], _Value] = {}
         self._tile_ptr_cache: dict[int, _Value] = {}
         self._row_offset_cache: dict[tuple[str, str], _Value] = {}
         self._loop_stack: list[dict] = []
         self._inside_vecscope = False
-        self._ordered_specs: list[tuple[str, TileSpec]] = []
+        self._ordered_specs: list[tuple[str, TileSpec | ScalarType]] = []
         signature = inspect.signature(self.descriptor.py_fn)
         self._signature_parameters = tuple(signature.parameters.items())
 
@@ -309,23 +459,39 @@ class _TraceBuilder(TracingRuntime):
         arg_types = []
         ordered_specs = []
         for param_name, param in self._signature_parameters:
-            if not _is_tile_annotation(param.annotation):
-                raise TypeError(
-                    "tile-template tracing currently only supports Tile parameters; "
-                    f"parameter {param_name!r} uses {param.annotation!r}"
-                )
-            spec = self.tile_specs.get(param_name)
+            spec = self.parameter_specs.get(param_name)
             if spec is None:
-                raise ValueError(f"missing specialization for Tile parameter {param_name!r}")
+                raise ValueError(f"missing specialization for parameter {param_name!r}")
+            if _is_tile_annotation(param.annotation):
+                if not isinstance(spec, TileSpec):
+                    raise TypeError(
+                        f"parameter {param_name!r} is annotated as Tile but uses {spec!r}"
+                    )
+                arg_type = spec.mlir_type()
+            else:
+                annotation_dtype = _scalar_type_from_annotation(param.annotation)
+                if annotation_dtype is None:
+                    raise TypeError(
+                        "tile-template tracing supports Tile or scalar dtype parameters; "
+                        f"parameter {param_name!r} uses {param.annotation!r}"
+                    )
+                if not isinstance(spec, ScalarType) or spec != annotation_dtype:
+                    raise TypeError(
+                        f"parameter {param_name!r} expects scalar {annotation_dtype}, got {spec!r}"
+                    )
+                arg_type = _resolve(_scalar_descriptor(spec))
             ordered_specs.append((param_name, spec))
-            arg_types.append(spec.mlir_type())
+            arg_types.append(arg_type)
         self._ordered_specs = ordered_specs
         return arg_types
 
     def bind_entry_arguments(self, entry_arguments):
         args = []
         for arg_value, (_, spec) in zip(entry_arguments, self._ordered_specs):
-            args.append(_TileProxy(self, arg_value, spec))
+            if isinstance(spec, TileSpec):
+                args.append(_TileProxy(self, arg_value, spec))
+            else:
+                args.append(_Value(arg_value))
         return tuple(args)
 
     def trace_entry(self, *args):
@@ -387,6 +553,31 @@ class _TraceBuilder(TracingRuntime):
     def scalar_const(self, value: int, dtype: ScalarType) -> _Value:
         return self._const(value, _resolve(_scalar_descriptor(dtype)))
 
+    def index_binary(self, op_name: str, lhs, rhs) -> _Value:
+        lhs_val = self._coerce_index(lhs)
+        rhs_val = self._coerce_index(rhs)
+        if lhs_val.is_const and rhs_val.is_const:
+            if op_name == "add":
+                result = lhs_val.const_value + rhs_val.const_value
+            elif op_name == "mul":
+                result = lhs_val.const_value * rhs_val.const_value
+            elif op_name == "floordiv":
+                result = lhs_val.const_value // rhs_val.const_value
+            elif op_name == "mod":
+                result = lhs_val.const_value % rhs_val.const_value
+            else:
+                raise ValueError(f"unsupported index operation {op_name!r}")
+            return self.index_const(result)
+        op_cls = {
+            "add": arith.AddIOp,
+            "mul": arith.MulIOp,
+            "floordiv": arith.FloorDivSIOp,
+            "mod": arith.RemSIOp,
+        }.get(op_name)
+        if op_cls is None:
+            raise ValueError(f"unsupported index operation {op_name!r}")
+        return _Value(op_cls(lhs_val.value, rhs_val.value).result)
+
     def _const(self, value: int, mlir_type) -> _Value:
         cache_key = (value, str(mlir_type))
         cached = self._const_cache.get(cache_key)
@@ -414,7 +605,7 @@ class _TraceBuilder(TracingRuntime):
             return self.index_const(row.const_value * cols + col.const_value)
         row_stride = self.index_const(cols)
         row_off = self._materialize_row_offset(row, row_stride)
-        return _Value(_scalar.addi(row_off.value, col.value))
+        return _Value(arith.AddIOp(row_off.value, col.value).result)
 
     def _enter_vecscope(self):
         if self._inside_vecscope:
@@ -502,7 +693,7 @@ class _TraceBuilder(TracingRuntime):
         cached = self._row_offset_cache.get(cache_key)
         if cached is not None:
             return cached
-        result = _Value(_scalar.muli(row.value, row_stride.value))
+        result = _Value(arith.MulIOp(row.value, row_stride.value).result)
         self._row_offset_cache[cache_key] = result
         return result
 
@@ -535,24 +726,42 @@ class TileTemplate:
     op: str
     name: str
     source_label: str
+    ir_level: str
 
-    def specialize(self, **tile_specs: TileSpec) -> "SpecializedTileTemplate":
-        return SpecializedTileTemplate(self, tile_specs)
+    def specialize(
+        self, **parameter_specs: TileSpec | ScalarType
+    ) -> "SpecializedTileTemplate":
+        return SpecializedTileTemplate(self, parameter_specs)
 
 
 class SpecializedTileTemplate(ModuleArtifact):
-    def __init__(self, descriptor: TileTemplate, tile_specs: dict[str, TileSpec]):
+    def __init__(
+        self,
+        descriptor: TileTemplate,
+        parameter_specs: dict[str, TileSpec | ScalarType],
+    ):
         super().__init__(
             descriptor.name,
-            module_factory=lambda: _TraceBuilder(descriptor, tile_specs).build_module(),
+            module_factory=lambda: _TraceBuilder(descriptor, parameter_specs).build_module(),
         )
         self.descriptor = descriptor
-        self.tile_specs = tile_specs
+        self.parameter_specs = parameter_specs
+        self.tile_specs = {
+            name: spec for name, spec in parameter_specs.items() if isinstance(spec, TileSpec)
+        }
 
 
-def tile_template(*, target: str = "a5", op: str, name: str | None = None):
+def tile_template(
+    *,
+    target: str = "a5",
+    op: str,
+    name: str | None = None,
+    ir_level: str = "vpto",
+):
     if target != "a5":
         raise ValueError("tile-template tracing currently only supports target='a5'")
+    if ir_level not in {"vpto", "vmi"}:
+        raise ValueError("tile-template tracing ir_level must be 'vpto' or 'vmi'")
 
     def decorator(fn):
         source_path = Path(inspect.getsourcefile(fn) or "<unknown>")
@@ -563,6 +772,7 @@ def tile_template(*, target: str = "a5", op: str, name: str | None = None):
             op=op,
             name=descriptor_name,
             source_label=f"{source_path}:{fn.__name__}",
+            ir_level=ir_level,
         )
 
     return decorator
@@ -590,6 +800,18 @@ def scalar_const(value: int, dtype: ScalarType) -> _Value:
     return require_active_runtime("scalar_const", expected_type=_TraceBuilder).scalar_const(value, dtype)
 
 
+def index_add(lhs, rhs) -> _Value:
+    return require_active_runtime("index_add", expected_type=_TraceBuilder).index_binary(
+        "add", lhs, rhs
+    )
+
+
+def index_mul(lhs, rhs) -> _Value:
+    return require_active_runtime("index_mul", expected_type=_TraceBuilder).index_binary(
+        "mul", lhs, rhs
+    )
+
+
 def make_mask(dtype: ScalarType, remained) -> tuple[_MaskValue, _Value]:
     trace = require_active_runtime("make_mask", expected_type=_TraceBuilder)
     remained_val = trace._coerce_value(remained)
@@ -609,7 +831,7 @@ def make_mask(dtype: ScalarType, remained) -> tuple[_MaskValue, _Value]:
         )
     plt_op = op_cls(mask_ty, scalar_ty, remained_val.value)
     lanes = trace.scalar_const(dtype.lanes, _scalar_type_for_mask(dtype))
-    next_value = _Value(_scalar.subi(remained_val.value, lanes.value))
+    next_value = _Value(arith.SubIOp(remained_val.value, lanes.value).result)
     return _MaskValue(plt_op.mask, dtype), next_value
 
 
@@ -644,12 +866,287 @@ def vsts(vec: _VectorValue, tile_slice: _TileSlice, mask: _MaskValue) -> None:
     _pto.VstsOp(None, vec.value, ptr_value.value, offset.value, mask.value)
 
 
+def _require_vmi_trace(operation: str) -> _TraceBuilder:
+    trace = require_active_runtime(operation, expected_type=_TraceBuilder)
+    if trace.descriptor.ir_level != "vmi":
+        raise RuntimeError(f"{operation} requires tile_template(..., ir_level='vmi')")
+    return trace
+
+
+def _validate_vmi_block_access(
+    tile: _TileProxy,
+    coordinate: CanonicalBlockCoordinate,
+    *,
+    operation: str,
+) -> None:
+    if not isinstance(tile, _TileProxy):
+        raise TypeError(f"{operation} expects a traced Tile argument")
+    if not isinstance(coordinate, CanonicalBlockCoordinate):
+        raise TypeError(f"{operation} expects a CanonicalBlockCoordinate")
+    if tile._spec.shape != coordinate.block_map.shape:
+        raise ValueError(
+            f"{operation} tile shape {tile._spec.shape} does not match "
+            f"CanonicalBlockMap shape {coordinate.block_map.shape}"
+        )
+
+
+def vmi_create_mask(block_map: CanonicalBlockMap, dtype: ScalarType) -> _MaskValue:
+    if not isinstance(block_map, CanonicalBlockMap):
+        raise TypeError("vmi_create_mask expects a CanonicalBlockMap")
+    return vmi_create_mask_lanes(
+        block_map.logical_lanes, block_map.logical_lanes, dtype
+    )
+
+
+def vmi_create_mask_lanes(
+    active_lanes: int, vector_lanes: int, dtype: ScalarType
+) -> _MaskValue:
+    trace = _require_vmi_trace("vmi_create_mask_lanes")
+    if not isinstance(dtype, ScalarType):
+        raise TypeError("vmi_create_mask_lanes expects a tile-template ScalarType")
+    if not 0 < active_lanes <= vector_lanes:
+        raise ValueError("active_lanes must be in the range [1, vector_lanes]")
+    active = trace.index_const(active_lanes)
+    result = _vmi.create_mask(active.value, size=vector_lanes)
+    return _MaskValue(unwrap_surface_value(result), dtype)
+
+
+def vmi_prepare_tile_access(*tiles: _TileProxy) -> None:
+    trace = _require_vmi_trace("vmi_prepare_tile_access")
+    if not tiles:
+        raise ValueError("vmi_prepare_tile_access requires at least one Tile")
+    for tile in tiles:
+        if not isinstance(tile, _TileProxy):
+            raise TypeError("vmi_prepare_tile_access expects traced Tile arguments")
+        trace.ensure_tile_ptr(tile)
+
+
+def vmi_vload(tile: _TileProxy, coordinate: CanonicalBlockCoordinate) -> _VectorValue:
+    trace = _require_vmi_trace("vmi_vload")
+    _validate_vmi_block_access(tile, coordinate, operation="vmi_vload")
+    ptr_value = trace.ensure_tile_ptr(tile)
+    offset = trace._coerce_index(coordinate.linear_offset)
+    result = _vmi.vload(
+        ptr_value.value,
+        offset.value,
+        size=coordinate.block_map.logical_lanes,
+    )
+    return _VectorValue(unwrap_surface_value(result), tile.element_type)
+
+
+def vmi_vload_linear(tile: _TileProxy, offset, *, lanes: int) -> _VectorValue:
+    trace = _require_vmi_trace("vmi_vload_linear")
+    if not isinstance(tile, _TileProxy):
+        raise TypeError("vmi_vload_linear expects a traced Tile argument")
+    if not isinstance(lanes, int) or lanes <= 0:
+        raise ValueError("vmi_vload_linear lanes must be a positive integer")
+    ptr_value = trace.ensure_tile_ptr(tile)
+    offset_value = trace._coerce_index(offset)
+    result = _vmi.vload(ptr_value.value, offset_value.value, size=lanes)
+    return _VectorValue(unwrap_surface_value(result), tile.element_type)
+
+
+def _vmi_binary(
+    operation: str,
+    lhs: _VectorValue,
+    rhs: _VectorValue,
+    mask: _MaskValue,
+) -> _VectorValue:
+    _require_vmi_trace(operation)
+    if lhs.dtype != rhs.dtype or lhs.dtype != mask.dtype:
+        raise TypeError(f"{operation} operands and mask must use the same dtype")
+    emitter = getattr(_vmi, operation.removeprefix("vmi_"))
+    result = emitter(lhs.value, rhs.value, mask.value)
+    return _VectorValue(unwrap_surface_value(result), lhs.dtype)
+
+
+def vmi_vadd(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    return _vmi_binary("vmi_vadd", lhs, rhs, mask)
+
+
+def vmi_vsub(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    return _vmi_binary("vmi_vsub", lhs, rhs, mask)
+
+
+def vmi_vmul(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    return _vmi_binary("vmi_vmul", lhs, rhs, mask)
+
+
+def vmi_vdiv(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    return _vmi_binary("vmi_vdiv", lhs, rhs, mask)
+
+
+def vmi_vmax(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    return _vmi_binary("vmi_vmax", lhs, rhs, mask)
+
+
+def _vmi_vec_scalar(
+    operation: str,
+    source: _VectorValue,
+    scalar: _Value,
+    mask: _MaskValue,
+) -> _VectorValue:
+    _require_vmi_trace(operation)
+    if source.dtype != mask.dtype:
+        raise TypeError(f"{operation} source and mask must use the same dtype")
+    expected_scalar = str(_resolve(_scalar_descriptor(source.dtype)))
+    if scalar.type_text != expected_scalar:
+        raise TypeError(
+            f"{operation} scalar must use {expected_scalar}, got {scalar.type_text}"
+        )
+    emitter = getattr(_vmi, operation.removeprefix("vmi_"))
+    result = emitter(source.value, scalar.value, mask.value)
+    return _VectorValue(unwrap_surface_value(result), source.dtype)
+
+
+def vmi_vadds(
+    source: _VectorValue, scalar: _Value, mask: _MaskValue
+) -> _VectorValue:
+    return _vmi_vec_scalar("vmi_vadds", source, scalar, mask)
+
+
+def vmi_vmuls(
+    source: _VectorValue, scalar: _Value, mask: _MaskValue
+) -> _VectorValue:
+    return _vmi_vec_scalar("vmi_vmuls", source, scalar, mask)
+
+
+def vmi_vmaxs(
+    source: _VectorValue, scalar: _Value, mask: _MaskValue
+) -> _VectorValue:
+    return _vmi_vec_scalar("vmi_vmaxs", source, scalar, mask)
+
+
+def vmi_vmins(
+    source: _VectorValue, scalar: _Value, mask: _MaskValue
+) -> _VectorValue:
+    return _vmi_vec_scalar("vmi_vmins", source, scalar, mask)
+
+
+def vmi_vexp(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    _require_vmi_trace("vmi_vexp")
+    if source.dtype != mask.dtype:
+        raise TypeError("vmi_vexp source and mask must use the same dtype")
+    result = _vmi.vexp(source.value, mask.value)
+    return _VectorValue(unwrap_surface_value(result), source.dtype)
+
+
+def vmi_vbroadcast(source: _VectorValue, *, lanes: int) -> _VectorValue:
+    _require_vmi_trace("vmi_vbroadcast")
+    if not isinstance(lanes, int) or lanes <= 0:
+        raise ValueError("vmi_vbroadcast lanes must be a positive integer")
+    result_type = _pto.VMIVRegType.get(
+        lanes, _resolve(_scalar_descriptor(source.dtype))
+    )
+    result = _vmi.vbrc(source.value, result_type=result_type)
+    return _VectorValue(unwrap_surface_value(result), source.dtype)
+
+
+def vmi_vbroadcast_scalar(scalar: _Value, *, like: _VectorValue) -> _VectorValue:
+    _require_vmi_trace("vmi_vbroadcast_scalar")
+    expected_scalar = str(_resolve(_scalar_descriptor(like.dtype)))
+    if scalar.type_text != expected_scalar:
+        raise TypeError(
+            "vmi_vbroadcast_scalar scalar must use "
+            f"{expected_scalar}, got {scalar.type_text}"
+        )
+    result = _vmi.vbrc(scalar.value, result_type=like.value.type)
+    return _VectorValue(unwrap_surface_value(result), like.dtype)
+
+
+def vmi_vreduce_max(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    _require_vmi_trace("vmi_vreduce_max")
+    if source.dtype != mask.dtype:
+        raise TypeError("vmi_vreduce_max source and mask must use the same dtype")
+    result_type = _pto.VMIVRegType.get(
+        1, _resolve(_scalar_descriptor(source.dtype))
+    )
+    result = _vmi.vcmax(source.value, mask.value, result_type=result_type)
+    return _VectorValue(unwrap_surface_value(result), source.dtype)
+
+
+def vmi_vreduce_add(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
+    _require_vmi_trace("vmi_vreduce_add")
+    if source.dtype != mask.dtype:
+        raise TypeError("vmi_vreduce_add source and mask must use the same dtype")
+    result_type = _pto.VMIVRegType.get(
+        1, _resolve(_scalar_descriptor(source.dtype))
+    )
+    result = _vmi.vcadd(
+        source.value,
+        mask.value,
+        result_type=result_type,
+        reassoc=True,
+    )
+    return _VectorValue(unwrap_surface_value(result), source.dtype)
+
+
+def vmi_vcvt(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValue:
+    _require_vmi_trace("vmi_vcvt")
+    if not isinstance(dst_dtype, ScalarType):
+        raise TypeError("vmi_vcvt expects a tile-template destination ScalarType")
+    source_type = _pto.VMIVRegType(source.value.type)
+    result_type = _pto.VMIVRegType.get(
+        source_type.element_count,
+        _resolve(_scalar_descriptor(dst_dtype)),
+    )
+    result = _vmi.vcvt(source.value, result_type=result_type)
+    return _VectorValue(unwrap_surface_value(result), dst_dtype)
+
+
+def vmi_vstore(
+    vec: _VectorValue,
+    tile: _TileProxy,
+    coordinate: CanonicalBlockCoordinate,
+    mask: _MaskValue,
+) -> None:
+    trace = _require_vmi_trace("vmi_vstore")
+    _validate_vmi_block_access(tile, coordinate, operation="vmi_vstore")
+    if vec.dtype != tile.element_type or vec.dtype != mask.dtype:
+        raise TypeError("vmi_vstore value, destination, and mask must use the same dtype")
+    ptr_value = trace.ensure_tile_ptr(tile)
+    offset = trace._coerce_index(coordinate.linear_offset)
+    _vmi.vstore(vec.value, ptr_value.value, offset.value, mask.value)
+
+
+def vmi_vstore_linear(
+    vec: _VectorValue,
+    tile: _TileProxy,
+    offset,
+    mask: _MaskValue,
+) -> None:
+    trace = _require_vmi_trace("vmi_vstore_linear")
+    if not isinstance(tile, _TileProxy):
+        raise TypeError("vmi_vstore_linear expects a traced Tile destination")
+    if vec.dtype != tile.element_type or vec.dtype != mask.dtype:
+        raise TypeError("vmi_vstore_linear value, destination, and mask must use the same dtype")
+    ptr_value = trace.ensure_tile_ptr(tile)
+    offset_value = trace._coerce_index(offset)
+    _vmi.vstore(vec.value, ptr_value.value, offset_value.value, mask.value)
+
+
 def _is_tile_annotation(annotation) -> bool:
     if annotation is Tile:
         return True
     if isinstance(annotation, str):
         return annotation == "Tile" or annotation.endswith(".Tile")
     return getattr(annotation, "__name__", None) == "Tile"
+
+
+def _scalar_type_from_annotation(annotation) -> ScalarType | None:
+    if isinstance(annotation, ScalarType):
+        return annotation
+    if isinstance(annotation, str):
+        token = annotation.rsplit(".", 1)[-1]
+        return {
+            "f32": f32,
+            "f16": f16,
+            "bf16": bf16,
+            "i32": i32,
+            "i16": i16,
+            "i8": i8,
+        }.get(token)
+    return None
 
 
 def _is_index_like(value) -> bool:
@@ -698,6 +1195,8 @@ __all__ = [
     "TileSpec",
     "TileTemplate",
     "SpecializedTileTemplate",
+    "CanonicalBlockMap",
+    "CanonicalBlockCoordinate",
     "ScalarType",
     "f32",
     "f16",
@@ -711,8 +1210,32 @@ __all__ = [
     "yield_",
     "get_lanes",
     "scalar_const",
+    "index_add",
+    "index_mul",
     "make_mask",
     "vlds",
     "vadd",
     "vsts",
+    "vmi_create_mask",
+    "vmi_create_mask_lanes",
+    "vmi_prepare_tile_access",
+    "vmi_vload",
+    "vmi_vload_linear",
+    "vmi_vadd",
+    "vmi_vsub",
+    "vmi_vmul",
+    "vmi_vdiv",
+    "vmi_vmax",
+    "vmi_vadds",
+    "vmi_vmuls",
+    "vmi_vmaxs",
+    "vmi_vmins",
+    "vmi_vexp",
+    "vmi_vbroadcast",
+    "vmi_vbroadcast_scalar",
+    "vmi_vreduce_max",
+    "vmi_vreduce_add",
+    "vmi_vcvt",
+    "vmi_vstore",
+    "vmi_vstore_linear",
 ]
