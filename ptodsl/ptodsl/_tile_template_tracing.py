@@ -161,10 +161,11 @@ class _TileSlice:
 
 @dataclass(frozen=True)
 class CanonicalBlockMap:
-    """Static mapping contract for one flat logical-block loop.
+    """Static mapping contract for one logical block per tile row.
 
-    The first VMI TileLib slice intentionally supports only full logical blocks:
-    each row must contain an integral number of ``logical_lanes`` blocks.
+    The canonical VMI Fusion contract requires the physical inner tile extent
+    to equal the candidate's logical lane count. Dynamic valid lanes may later
+    mask a tail inside that block, but a row never contains multiple blocks.
     """
 
     shape: tuple[int, int]
@@ -178,9 +179,9 @@ class CanonicalBlockMap:
             raise ValueError("CanonicalBlockMap shape must contain positive integers")
         if not isinstance(self.logical_lanes, int) or self.logical_lanes <= 0:
             raise ValueError("CanonicalBlockMap logical_lanes must be a positive integer")
-        if cols % self.logical_lanes != 0:
+        if cols != self.logical_lanes:
             raise ValueError(
-                "CanonicalBlockMap currently requires each row to contain full logical blocks; "
+                "CanonicalBlockMap requires exactly one logical VL block per row; "
                 f"got cols={cols}, logical_lanes={self.logical_lanes}"
             )
 
@@ -727,10 +728,27 @@ class TileTemplate:
     name: str
     source_label: str
     ir_level: str
+    context_constraints: tuple[tuple[str, tuple[object, ...]], ...]
+
+    def validate_context_attrs(self, context_attrs=None) -> None:
+        attrs = dict(context_attrs or {})
+        if not attrs:
+            return
+
+        supported = dict(self.context_constraints)
+        if any(
+            key not in supported or value not in supported[key]
+            for key, value in attrs.items()
+        ):
+            raise ValueError(
+                f"tile template {self.name!r} does not support context attrs {attrs!r}; "
+                f"supported constraints are {supported!r}"
+            )
 
     def specialize(
-        self, **parameter_specs: TileSpec | ScalarType
+        self, context_attrs=None, **parameter_specs: TileSpec | ScalarType
     ) -> "SpecializedTileTemplate":
+        self.validate_context_attrs(context_attrs)
         return SpecializedTileTemplate(self, parameter_specs)
 
 
@@ -757,11 +775,16 @@ def tile_template(
     op: str,
     name: str | None = None,
     ir_level: str = "vpto",
+    context_constraints: dict[str, tuple[object, ...]] | None = None,
 ):
     if target != "a5":
         raise ValueError("tile-template tracing currently only supports target='a5'")
     if ir_level not in {"vpto", "vmi"}:
         raise ValueError("tile-template tracing ir_level must be 'vpto' or 'vmi'")
+
+    normalized_context_constraints = tuple(
+        (key, tuple(values)) for key, values in (context_constraints or {}).items()
+    )
 
     def decorator(fn):
         source_path = Path(inspect.getsourcefile(fn) or "<unknown>")
@@ -773,6 +796,7 @@ def tile_template(
             name=descriptor_name,
             source_label=f"{source_path}:{fn.__name__}",
             ir_level=ir_level,
+            context_constraints=normalized_context_constraints,
         )
 
     return decorator

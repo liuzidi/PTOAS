@@ -13,18 +13,18 @@
 
 module {
   func.func @ptodsl_vmi_tileop_provider() {
-    %a = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %b = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %c = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %d = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
     pto.tadd
       ins(%a, %b
-          : !pto.tile_buf<vec, 32x256xf32>,
-            !pto.tile_buf<vec, 32x256xf32>)
-      outs(%c : !pto.tile_buf<vec, 32x256xf32>)
+          : !pto.tile_buf<vec, 32x64xf32>,
+            !pto.tile_buf<vec, 32x64xf32>)
+      outs(%c : !pto.tile_buf<vec, 32x64xf32>)
     pto.texp
-      ins(%c : !pto.tile_buf<vec, 32x256xf32>)
-      outs(%d : !pto.tile_buf<vec, 32x256xf32>)
+      ins(%c : !pto.tile_buf<vec, 32x64xf32>)
+      outs(%d : !pto.tile_buf<vec, 32x64xf32>)
     return
   }
 }

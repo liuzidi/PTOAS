@@ -42,7 +42,7 @@ from ptodsl.vmi_tilelib import (
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
 
 
-TILE_SHAPE = (32, 256)
+TILE_SHAPE = (32, 64)
 
 
 @tile_template(op="tadd", name="legacy_vpto_tadd")
@@ -86,20 +86,25 @@ def specialize_texp(dtype=f32, shape=TILE_SHAPE):
 
 def check_canonical_block_map() -> None:
     block_map = CanonicalBlockMap(TILE_SHAPE, logical_lanes=64)
-    expect(block_map.blocks_per_row == 4, "[32,256]xf32 should contain four blocks per row")
-    expect(block_map.logical_block_count == 128, "[32,256]xf32 should contain 128 blocks")
+    expect(block_map.blocks_per_row == 1, "[32,64]xf32 should contain one block per row")
+    expect(block_map.logical_block_count == 32, "[32,64]xf32 should contain 32 blocks")
 
-    coordinate = block_map.coordinate(67)
-    expect(coordinate.row == 16, "logical block 67 should map to row 16")
-    expect(coordinate.block_in_row == 3, "logical block 67 should be block 3 in its row")
-    expect(coordinate.col_start == 192, "logical block 67 should start at column 192")
-    expect(coordinate.linear_offset == 4288, "logical block 67 should start at linear offset 4288")
-    expect(coordinate.active_lanes == 64, "the initial f32 contract should activate 64 lanes")
+    coordinate = block_map.coordinate(17)
+    expect(coordinate.row == 17, "logical block 17 should map directly to row 17")
+    expect(coordinate.block_in_row == 0, "each row should contain only block 0")
+    expect(coordinate.col_start == 0, "the row-local block should start at column 0")
+    expect(coordinate.linear_offset == 1088, "logical block 17 should start at offset 1088")
+    expect(coordinate.active_lanes == 64, "the f32 contract should activate 64 lanes")
 
     expect_raises(
-        lambda: CanonicalBlockMap((32, 250), logical_lanes=64),
+        lambda: CanonicalBlockMap((32, 128), logical_lanes=64),
         ValueError,
-        "full logical blocks",
+        "exactly one logical VL block per row",
+    )
+    expect_raises(
+        lambda: CanonicalBlockMap((32, 32), logical_lanes=64),
+        ValueError,
+        "exactly one logical VL block per row",
     )
 
 
@@ -109,7 +114,7 @@ def check_candidate_ir() -> tuple[str, str]:
     tadd_text = tadd.mlir_text()
     expect("pto.vecscope" not in tadd_text, "VMI templates must remain scope-free")
     expect(tadd_text.count("scf.for") == 1, "tadd candidate should contain one flat loop")
-    expect("arith.constant 128 : index" in tadd_text, "tadd should iterate over 128 blocks")
+    expect("arith.constant 32 : index" in tadd_text, "tadd should iterate once per row")
     expect(tadd_text.count("pto.vmi.vload") == 2, "tadd should issue two VMI loads")
     expect(tadd_text.count("pto.vmi.vadd") == 1, "tadd should issue one VMI add")
     expect(tadd_text.count("pto.vmi.vstore") == 1, "tadd should issue one VMI store")
@@ -134,12 +139,12 @@ def check_candidate_ir() -> tuple[str, str]:
     expect_raises(
         lambda: specialize_tadd(dtype=f16).mlir_text(),
         ValueError,
-        "require an f32 logical block",
+        "require exactly one 64-lane f32 VL per row",
     )
     expect_raises(
-        lambda: specialize_texp(shape=(32, 250)).mlir_text(),
+        lambda: specialize_texp(shape=(32, 128)).mlir_text(),
         ValueError,
-        "full logical blocks",
+        "exactly one logical VL block per row",
     )
     return tadd_text, texp_text
 
@@ -154,12 +159,17 @@ def check_provider_helper() -> None:
         registered_tadd[0] is vmi_tadd_block64,
         "the registered tadd template must be the exported canonical implementation",
     )
+    expect(
+        dict(vmi_texp_block64.context_constraints)
+        == {"precisionType": ("default",)},
+        "texp must declare its supported context attrs on the candidate",
+    )
 
     raw_tile_spec = {
         "kind": "tile",
         "dtype": "f32",
-        "shape": [32, 256],
-        "valid_shape": [32, 256],
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
         "memory_space": "ub",
         "config": {
             "b_layout": "row_major",
@@ -190,6 +200,17 @@ def check_provider_helper() -> None:
         "pto.vmi.vexp" in exp_artifact.mlir_text(),
         "provider helper should accept the default texp precision contract",
     )
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tadd",
+            operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={"precisionType": "default"},
+        ),
+        ValueError,
+        "does not support context attrs",
+    )
 
     tmul_artifact = instantiate_candidate(
         target="a5",
@@ -205,14 +226,17 @@ def check_provider_helper() -> None:
         "shape": [1, 32],
         "valid_shape": [1, 32],
     }
-    compact_add = instantiate_candidate(
-        target="a5",
-        op_name="pto.tadd",
-        operand_specs=[compact_tile_spec, compact_tile_spec, compact_tile_spec],
-        provider_module="ptodsl.vmi_tilelib",
-        context_attrs={},
-    ).mlir_text()
-    expect("!pto.vmi.vreg<32xf32>" in compact_add, "compact state should use 32 lanes")
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tadd",
+            operand_specs=[compact_tile_spec, compact_tile_spec, compact_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ).mlir_text(),
+        ValueError,
+        "exactly one logical VL block per row",
+    )
 
     scalar_spec = {"kind": "scalar", "dtype": "f32"}
     tmuls = instantiate_candidate(
@@ -275,7 +299,7 @@ def check_provider_helper() -> None:
         context_attrs={},
     ).mlir_text()
     expect(rowmax.count("scf.for") == 1, "rowmax should emit only one runtime loop")
-    expect(rowmax.count("pto.vmi.vcmax") == 4, "rowmax should statically unroll four VL blocks")
+    expect(rowmax.count("pto.vmi.vcmax") == 1, "rowmax should reduce one VL per row")
     expect("!pto.vmi.vreg<1xf32>" in rowmax, "rowmax should produce 1-lane reductions")
 
     row_expand = instantiate_candidate(

@@ -15,75 +15,75 @@
 module {
   func.func @ptodsl_vmi_softmax_compute_ops() {
     %scale = arith.constant 1.250000e-01 : f32
-    %src = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %data = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %workspace = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf32>
-    %packed = pto.alloc_tile : !pto.tile_buf<vec, 32x256xf16>
-    %row0 = pto.alloc_tile : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
-    %row1 = pto.alloc_tile : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
-    %row2 = pto.alloc_tile : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
+    %src = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %data = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %workspace = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %packed = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf16>
+    %row0 = pto.alloc_tile : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
+    %row1 = pto.alloc_tile : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
+    %row2 = pto.alloc_tile : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
 
     pto.trowmax
       ins(%src, %workspace
-          : !pto.tile_buf<vec, 32x256xf32>,
-            !pto.tile_buf<vec, 32x256xf32>)
-      outs(%row0 : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>)
+          : !pto.tile_buf<vec, 64x64xf32>,
+            !pto.tile_buf<vec, 64x64xf32>)
+      outs(%row0 : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>)
     pto.trowexpandsub
       ins(%src, %row0
-          : !pto.tile_buf<vec, 32x256xf32>,
-            !pto.tile_buf<vec, 32x1xf32, blayout=col_major>)
-      outs(%data : !pto.tile_buf<vec, 32x256xf32>)
+          : !pto.tile_buf<vec, 64x64xf32>,
+            !pto.tile_buf<vec, 64x1xf32, blayout=col_major>)
+      outs(%data : !pto.tile_buf<vec, 64x64xf32>)
     pto.tmuls
-      ins(%data, %scale : !pto.tile_buf<vec, 32x256xf32>, f32)
-      outs(%data : !pto.tile_buf<vec, 32x256xf32>)
+      ins(%data, %scale : !pto.tile_buf<vec, 64x64xf32>, f32)
+      outs(%data : !pto.tile_buf<vec, 64x64xf32>)
     pto.texp
-      ins(%data : !pto.tile_buf<vec, 32x256xf32>)
-      outs(%data : !pto.tile_buf<vec, 32x256xf32>)
+      ins(%data : !pto.tile_buf<vec, 64x64xf32>)
+      outs(%data : !pto.tile_buf<vec, 64x64xf32>)
     pto.trowsum
       ins(%data, %workspace
-          : !pto.tile_buf<vec, 32x256xf32>,
-            !pto.tile_buf<vec, 32x256xf32>)
-      outs(%row1 : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>)
+          : !pto.tile_buf<vec, 64x64xf32>,
+            !pto.tile_buf<vec, 64x64xf32>)
+      outs(%row1 : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>)
     pto.tcvt
       ins(%data {
         rmode = #pto<round_mode CAST_RINT>,
         satmode = #pto<saturation_mode OFF>
-      } : !pto.tile_buf<vec, 32x256xf32>)
-      outs(%packed : !pto.tile_buf<vec, 32x256xf16>)
+      } : !pto.tile_buf<vec, 64x64xf32>)
+      outs(%packed : !pto.tile_buf<vec, 64x64xf16>)
 
     %row0_r = pto.treshape %row0
-      : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
-        -> !pto.tile_buf<vec, 1x32xf32>
+      : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
+        -> !pto.tile_buf<vec, 1x64xf32>
     %row1_r = pto.treshape %row1
-      : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
-        -> !pto.tile_buf<vec, 1x32xf32>
+      : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
+        -> !pto.tile_buf<vec, 1x64xf32>
     %row2_r = pto.treshape %row2
-      : !pto.tile_buf<vec, 32x1xf32, blayout=col_major>
-        -> !pto.tile_buf<vec, 1x32xf32>
+      : !pto.tile_buf<vec, 64x1xf32, blayout=col_major>
+        -> !pto.tile_buf<vec, 1x64xf32>
 
     pto.tsub
       ins(%row0_r, %row1_r
-          : !pto.tile_buf<vec, 1x32xf32>,
-            !pto.tile_buf<vec, 1x32xf32>)
-      outs(%row2_r : !pto.tile_buf<vec, 1x32xf32>)
+          : !pto.tile_buf<vec, 1x64xf32>,
+            !pto.tile_buf<vec, 1x64xf32>)
+      outs(%row2_r : !pto.tile_buf<vec, 1x64xf32>)
     pto.tmax
       ins(%row2_r, %row0_r
-          : !pto.tile_buf<vec, 1x32xf32>,
-            !pto.tile_buf<vec, 1x32xf32>)
-      outs(%row2_r : !pto.tile_buf<vec, 1x32xf32>)
+          : !pto.tile_buf<vec, 1x64xf32>,
+            !pto.tile_buf<vec, 1x64xf32>)
+      outs(%row2_r : !pto.tile_buf<vec, 1x64xf32>)
     pto.tmul
       ins(%row2_r, %row1_r
-          : !pto.tile_buf<vec, 1x32xf32>,
-            !pto.tile_buf<vec, 1x32xf32>)
-      outs(%row2_r : !pto.tile_buf<vec, 1x32xf32>)
+          : !pto.tile_buf<vec, 1x64xf32>,
+            !pto.tile_buf<vec, 1x64xf32>)
+      outs(%row2_r : !pto.tile_buf<vec, 1x64xf32>)
     pto.tadd
       ins(%row2_r, %row1_r
-          : !pto.tile_buf<vec, 1x32xf32>,
-            !pto.tile_buf<vec, 1x32xf32>)
-      outs(%row2_r : !pto.tile_buf<vec, 1x32xf32>)
+          : !pto.tile_buf<vec, 1x64xf32>,
+            !pto.tile_buf<vec, 1x64xf32>)
+      outs(%row2_r : !pto.tile_buf<vec, 1x64xf32>)
     pto.tmov
-      ins(%row2_r : !pto.tile_buf<vec, 1x32xf32>)
-      outs(%row0_r : !pto.tile_buf<vec, 1x32xf32>)
+      ins(%row2_r : !pto.tile_buf<vec, 1x64xf32>)
+      outs(%row0_r : !pto.tile_buf<vec, 1x64xf32>)
     return
   }
 }

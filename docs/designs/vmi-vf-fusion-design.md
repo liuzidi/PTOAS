@@ -19,17 +19,19 @@ cost model 或 autotuning。
 2. Expand 和 Inline 后，从真实 VMI IR 中识别由 TileLib 产生的独立 fusion unit。
 3. 保守合并结构兼容的相邻 VMI 循环。
 4. 在融合后通过 VMI mem2reg 消除可证明安全的中间 UB store-load。
-5. VMI 模板和 Fusion 保持 scope-free；`VMIToVPTO` 后由现有
+5. 利用 1VL inner contract，把同一 row 的 Reduce -> Broadcast -> Elementwise ->
+   Reduce/Convert phases 合并进一个 row runtime loop，支撑 FA/Online Softmax 深融合。
+6. VMI 模板和 Fusion 保持 scope-free；`VMIToVPTO` 后由现有
    `PTOInferVPTOVecScope` 统一推断物理 VPTO vecscope。
-6. 任何分析失败均保持原独立实现，不能改变程序语义。
+7. 任何分析失败均保持原独立实现，不能改变程序语义。
 
 ### 2.2 非目标
 
 - 不优化任意用户手写 VMI 或任意用户控制流。
 - 不为一个 TileOp 注册多个 schedule candidate。
 - 不做 candidate selection、candidate locking 或 region-aware specialization。
-- 不做 2VL/4VL unroll 选择、RowMax/ColMax 选择、代价模型或自动调优。
-- 不要求首期打通 FA/Online Softmax 中 trip count 不同的 Reduce/Broadcast 深融合。
+- 不做多 VL inner schedule、RowMax/ColMax 选择、代价模型或自动调优。
+- 不要求首期支持 physical inner 非 1VL 或动态 tail 的 Reduce/Broadcast 深融合。
 - 不替换 VMI layout assignment、物理 vreg 分配或 VMI-to-VPTO lowering。
 
 ## 3. 当前基础与缺口
@@ -48,7 +50,7 @@ TileOp
 ```
 
 现有 canonical VMI TileLib 已能让静态 Softmax compute harness 中的一组基础 TileOp
-独立 lower，并已打通静态 `[32,32]xf32` FlashAttention 多项式样例。该样例不包含标准
+独立 lower，并已打通静态 `[64,64]xf32` FlashAttention 多项式样例。该样例不包含标准
 Softmax 的 RowReduce 归一化，尚不代表完整 FA/Online Softmax 已覆盖。Expand + Inline
 后每个 TileOp 仍有自己的循环。例如 `tadd -> texp` 会得到：
 
@@ -99,16 +101,28 @@ lower 到 VPTO。Fusion 只能删除已证明冗余的控制和访存，不能�
 
 ### 4.3 单主循环与 1VL 调度
 
-一个 canonical fusion unit 应具有一个主 `scf.for`。主循环的每次迭代处理一个逻辑
-VMI block，block lane 数不超过当前 dtype 的一个物理 VL；vector 轴不再生成第二层
-运行时循环。
+一个 canonical fusion unit 应具有一个主 `scf.for`。用户切分的 dense vector Tile
+必须满足物理 inner extent 等于 candidate iteration contract 的一个 VL；f32 主链即
+`cols=64`。每个 row 只有一个 logical block，因此模板只生成 row 主循环，不生成
+`for col`，也不把多 VL inner tile 平坦化为更多 logical blocks：
 
-对于 `[32, 256]xf32`，当前模板可将其映射为 `32 * 4 = 128` 个 64-lane logical
-blocks，并生成一个 `0..128` 的平坦主循环。这里的“1VL”约束是每轮处理一个 VL，
-并不要求用户可见 Tile 的 `cols` 字段只能等于 64。
+```text
+physicalInner = logicalLanes
+blocksPerRow = 1
+logicalBlockCount = rows
+```
 
-允许在主循环体内对固定数量的 row blocks 做模板期静态展开，但它会形成不同的
-access pattern 和 trip count。首期只有循环域和访问模式兼容的 unit 才会融合。
+物理 inner 固定为 1VL 不等于所有 lane 必须有效。后续动态支持允许
+`0 < validInner <= physicalInner`，并在同一个 block 内使用 tail mask；当前实现仍只
+支持静态 `validInner == physicalInner`。`cols < VL` 和 `cols > VL` 都不属于首期
+canonical candidate，前端应按 1VL 重新切 Tile。
+
+Reduce 的 `[rows,1]` compact 结果是辅助 Tile，不是 dense iteration Tile；Convert
+沿用源 iteration contract，例如 `64xf32 -> 64xf16` 仍是同一个 logical block，不能
+按目标 dtype 的物理容量重新拆分。后续性能优化只能 unroll outer rows，不能恢复多 VL
+inner schedule。若 BR 小于 VL，compact state reshape 后的 `[1,BR]` 必须使用显式
+compact-domain candidate，或 pad 到 1VL 并携带 valid mask；通用 dense candidate
+不能因此放宽为接受任意 `cols<VL`。
 
 ### 4.4 不暴露物理 layout
 
@@ -377,12 +391,10 @@ VPTO fusion。新 passes
 部分融合示例：
 
 ```text
-tadd(loop=128) + texp(loop=128) + trowmax(loop=32) + tsub(loop=128)
+tadd(loop=rows) + texp(loop=rows) + trowmax(loop=rows, reduce phase)
 
 首期结果：
-  [tadd + texp] fused
-  [trowmax] standalone
-  [tsub] standalone
+  依赖和 mask 兼容时，[tadd + texp + trowmax] 合并到同一个 row loop
 ```
 
 这不是错误，而是 RFC 保守闭环的预期行为。
@@ -394,6 +406,7 @@ tadd(loop=128) + texp(loop=128) + trowmax(loop=32) + tsub(loop=128)
 - 两个相邻 elementwise canonical loops 合并为一个 `scf.for`。
 - 三个 elementwise loops 连续合并且保持 op 顺序。
 - 同 location、同 offset 的中间 `vstore -> vload` 被 mem2reg 消除。
+- 1VL RowMax -> Broadcast -> Exp -> RowSum/Convert 在同一个 row loop 内完成。
 - 动态 upper bound 使用同一 SSA 时可融合。
 - VMI Fusion 输出不包含显式 `pto.vecscope`，最终 VPTO emission 自动推断合法 scope。
 - 最终 VMI-to-VPTO 编译通过且不残留 `pto.vmi.*`。
@@ -406,23 +419,25 @@ tadd(loop=128) + texp(loop=128) + trowmax(loop=32) + tsub(loop=128)
 - MayAlias、WAW/WAR 无法证明时不融合。
 - mask/pmode 不兼容时不做 mem2reg。
 - 中间 Tile 有 group 外用户时保留必要 store。
+- dense Tile 的 physical inner 小于或大于 1VL 时拒绝 canonical candidate。
 
 ### 12.3 端到端基线
 
 - 现有 PTODSL VMI TileTemplate Python test 保持通过。
 - composite provider 和 no-vector-fallback lit tests 保持通过。
 - 静态 Softmax compute-op coverage harness 完成 Expand、Inline、VMI-to-VPTO。
-- 静态 `[32,32]xf32` FlashAttention 多项式样例完成 Expand、Inline、VMI-to-VPTO。
-- 完整 FA/Online Softmax 用例在补齐动态 mask、Convert 变体和缺失算术模板后纳入验收。
-- 首期只要求其中结构兼容的 elementwise 子链融合，不以完整算法深融合为门槛。
+- 静态 `[64,64]xf32` FlashAttention 多项式样例完成 Expand、Inline、VMI-to-VPTO。
+- 固定 1VL inner 的 FA/Online Softmax 用例补齐 compact-state candidate 后纳入 M3 验收。
+- M3 要求 RowMax -> Broadcast -> Exp -> RowSum/Convert 关键链在同一 row loop 内深融合；
+  动态 tail 和任意 Shape 泛化不作为门槛。
 
 ## 13. 后续迭代
 
 基本闭环稳定后，再分别设计和评审：
 
-1. 带 `iter_args` 的 Reduce/accumulator loop fusion。
-2. Reduce -> Broadcast -> Elementwise 的跨形状深融合。
+1. 超出 canonical 1VL row 模式的 `iter_args` Reduce/accumulator loop fusion。
+2. 非 canonical Shape 的 Reduce -> Broadcast -> Elementwise 泛化。
 3. 动态 valid shape 和 tail mask 完整覆盖。
 4. 多 canonical schedule candidate 与 region-aware selection。
-5. 2VL/4VL unroll、重读/保活选择和 physical vreg pressure cost。
+5. outer-row unroll、重读/保活选择和 physical vreg pressure cost。
 6. FA/Softmax 专项 schedule、cost model 和性能验收。

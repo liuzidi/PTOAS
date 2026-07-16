@@ -61,6 +61,7 @@ def canonical_vmi_template(
     target: str = "a5",
     op: str,
     name: str | None = None,
+    context_constraints: dict[str, tuple[object, ...]] | None = None,
 ):
     """Register one canonical VMI implementation in this provider module."""
 
@@ -71,6 +72,7 @@ def canonical_vmi_template(
             op=normalized_op,
             name=name,
             ir_level="vmi",
+            context_constraints=context_constraints,
         )(fn)
         VMI_TILELIB_REGISTRY.register(descriptor)
         return descriptor
@@ -90,7 +92,7 @@ def emit_elementwise_vmi(
     if not sources:
         raise ValueError("emit_elementwise_vmi requires at least one source tile")
     if logical_lanes is None:
-        logical_lanes = min(dst.element_type.lanes, dst._spec.shape[1])
+        logical_lanes = dst.element_type.lanes
     _validate_elementwise_tiles(dst, sources, logical_lanes=logical_lanes)
     block_map = CanonicalBlockMap.from_tile(dst, logical_lanes=logical_lanes)
 
@@ -111,9 +113,9 @@ def _validate_elementwise_tiles(
 ) -> None:
     if not isinstance(dst, _TileProxy):
         raise TypeError("elementwise VMI candidate destination must be a traced Tile")
-    if dst.element_type != f32 or not 0 < logical_lanes <= f32.lanes:
+    if dst.element_type != f32 or logical_lanes != f32.lanes:
         raise ValueError(
-            "VMI elementwise candidates require an f32 logical block no wider than 64 lanes"
+            "VMI elementwise candidates require exactly one 64-lane f32 VL per row"
         )
     if dst._spec.b_layout != "row_major":
         raise ValueError("VMI elementwise candidates require row-major tiles")
@@ -196,8 +198,8 @@ def _validate_row_reduce_tiles(
     rows, cols = src._spec.shape
     if dst._spec.shape != (rows, 1) or dst._spec.b_layout != "col_major":
         raise ValueError("row-reduce destination must be a col-major [rows, 1] tile")
-    if cols % f32.lanes != 0:
-        raise ValueError("row-reduce source columns must contain full f32 VL blocks")
+    if cols != f32.lanes:
+        raise ValueError("row-reduce source rows must contain exactly one f32 VL block")
     return CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
 
 
@@ -247,8 +249,8 @@ def emit_row_expand_sub_vmi(
         or row_values._spec.b_layout != "col_major"
     ):
         raise ValueError("trowexpandsub row values must be a col-major [rows, 1] tile")
-    if cols % f32.lanes != 0:
-        raise ValueError("trowexpandsub columns must contain full f32 VL blocks")
+    if cols != f32.lanes:
+        raise ValueError("trowexpandsub rows must contain exactly one f32 VL block")
     block_map = CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
 
     vmi_prepare_tile_access(src, row_values, dst)
@@ -296,6 +298,7 @@ def vmi_tadd_block64(src0: Tile, src1: Tile, dst: Tile):
     target="a5",
     op="texp",
     name="vmi_texp_block64",
+    context_constraints={"precisionType": ("default",)},
 )
 def vmi_texp_block64(src: Tile, dst: Tile):
     emit_elementwise_vmi(dst, (src,), _exp)
@@ -357,7 +360,12 @@ def vmi_tmins(src: Tile, scalar: f32, dst: Tile):
     )
 
 
-@canonical_vmi_template(target="a5", op="tdivs", name="vmi_tdivs")
+@canonical_vmi_template(
+    target="a5",
+    op="tdivs",
+    name="vmi_tdivs",
+    context_constraints={"precisionType": ("default",)},
+)
 def vmi_tdivs(src: Tile, scalar: f32, dst: Tile):
     emit_elementwise_vmi(
         dst,
@@ -385,7 +393,12 @@ def vmi_trowexpandsub(src: Tile, row_values: Tile, dst: Tile):
     emit_row_expand_sub_vmi(src, row_values, dst)
 
 
-@canonical_vmi_template(target="a5", op="tcvt", name="vmi_tcvt_f32_f16")
+@canonical_vmi_template(
+    target="a5",
+    op="tcvt",
+    name="vmi_tcvt_f32_f16",
+    context_constraints={"round_mode": ("RINT",)},
+)
 def vmi_tcvt_f32_f16(src: Tile, dst: Tile):
     emit_convert_vmi(src, dst)
 

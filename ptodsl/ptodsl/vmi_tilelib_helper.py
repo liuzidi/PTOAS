@@ -63,18 +63,6 @@ def _parse_context_attrs(spec_text: str | None) -> dict[str, object]:
     return attrs
 
 
-def _validate_candidate_context(op_name: str, attrs: dict[str, object]) -> None:
-    if not attrs:
-        return
-    if op_name in {"texp", "tdivs"} and attrs == {"precisionType": "default"}:
-        return
-    if op_name == "tcvt" and attrs == {"round_mode": "RINT"}:
-        return
-    raise ValueError(
-        f"initial PTODSL VMI candidate for {op_name!r} does not support context attrs {attrs!r}"
-    )
-
-
 def _parse_dtype(raw: dict, index: int):
     dtype_name = raw.get("dtype")
     dtype = _DTYPE_MAP.get(dtype_name)
@@ -173,7 +161,6 @@ def instantiate_candidate(
 ):
     module = importlib.import_module(provider_module)
     normalized_op = _normalize_op_name(op_name)
-    _validate_candidate_context(normalized_op, dict(context_attrs or {}))
     candidates = _find_candidates(module, target=target, op_name=normalized_op)
     if not candidates:
         raise LookupError(
@@ -199,7 +186,10 @@ def instantiate_candidate(
         name: _parse_parameter_spec(raw_spec, index)
         for index, (name, raw_spec) in enumerate(zip(parameters, operand_specs))
     }
-    return candidate.specialize(**parameter_specs)
+    return candidate.specialize(
+        context_attrs=context_attrs or {},
+        **parameter_specs,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
