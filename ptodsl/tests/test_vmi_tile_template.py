@@ -21,6 +21,7 @@ from ptodsl._tile_template_tracing import (
     CanonicalBlockMap,
     Tile,
     TileSpec,
+    bf16,
     f16,
     f32,
     for_,
@@ -37,6 +38,10 @@ from ptodsl.tilelib.registry import TileTemplateRegistry
 from ptodsl.vmi_tilelib import (
     VMI_TILELIB_REGISTRY,
     vmi_tadd_block64,
+    vmi_tcolmax,
+    vmi_tcolsum,
+    vmi_tcolexpandsub,
+    vmi_tcvt,
     vmi_texp_block64,
 )
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
@@ -375,6 +380,238 @@ def check_provider_helper() -> None:
         del sys.modules[duplicate_module.__name__]
 
 
+def check_col_reduce_candidate() -> tuple[str, str, str]:
+    """ColReduce (tcolmax / tcolsum) candidates must lower to one runtime
+    ``scf.for`` carrying a VL-wide accumulator as a ``vreg`` iter_arg — mirroring
+    the pto-isa ``TColReduceInstr_NoPostUpdate`` repeat loop — and must NOT
+    statically unroll one merge per row.
+
+    Each candidate runs over a single-VL-block column tile: src is
+    [rows, VL] row-major, dst is [1, VL] row-major (the surviving column axis).
+    """
+    col_tile_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    reduced_col_spec = {
+        **col_tile_spec,
+        "shape": [1, 64],
+        "valid_shape": [1, 64],
+    }
+
+    colmax = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmax",
+        operand_specs=[col_tile_spec, reduced_col_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect("pto.vecscope" not in colmax, "colmax template must remain scope-free")
+    expect(colmax.count("scf.for") == 1, "colmax should emit one runtime reduce loop")
+    expect(colmax.count("scf.yield") == 1, "colmax should yield the merged accumulator")
+    expect(
+        "iter_args" in colmax and "!pto.vmi.vreg<64xf32>" in colmax,
+        "colmax should carry a VL-wide vreg accumulator through the loop",
+    )
+    expect(colmax.count("pto.vmi.vmax") == 1, "colmax should issue one VMI max inside the loop")
+    expect(
+        colmax.count("pto.vmi.vload") == 1,
+        "colmax should load exactly one row per iteration inside the loop "
+        "(the accumulator seed is a vbr of the identity, not a dummy vload — a "
+        "vload carries a Read memory effect and cannot be DCE'd, so a dummy "
+        "load would duplicate the row-0 read)",
+    )
+    expect(colmax.count("pto.vmi.vstore") == 1, "colmax should store the reduced result once")
+    expect("pto.vmi.vcmax" not in colmax, "colmax must not collapse to a 1-lane vcmax")
+    expect("pto.vmi.vreduce_max" not in colmax, "colmax must not collapse to a 1-lane vreduce")
+
+    colsum = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolsum",
+        operand_specs=[col_tile_spec, reduced_col_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(colsum.count("scf.for") == 1, "colsum should emit one runtime reduce loop")
+    expect(
+        "iter_args" in colsum and "!pto.vmi.vreg<64xf32>" in colsum,
+        "colsum should carry a VL-wide vreg accumulator through the loop",
+    )
+    expect(colsum.count("pto.vmi.vadd") == 1, "colsum should issue one VMI add inside the loop")
+
+    # A non-binary colsum must not accept the binary 3-operand form (it has no
+    # fallback path); the two-operand form is the only supported lowering.
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tcolsum",
+            operand_specs=[col_tile_spec, reduced_col_spec, reduced_col_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ),
+        ValueError,
+        "expects 2 operands, got 3",
+    )
+    return colmax, colsum, reduced_col_spec
+
+
+def check_col_expand_candidate() -> None:
+    """ColExpandBinary (tcolexpandsub/add/mul/div) broadcasts a [1, VL] column
+    result across every row of a [rows, VL] tile, mirroring pto-isa
+    ``TColExpandBinOp`` (reload the same VL block per row, not a 1-lane vbrc).
+    """
+    col_tile_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    reduced_col_spec = {
+        **col_tile_spec,
+        "shape": [1, 64],
+        "valid_shape": [1, 64],
+    }
+    binops = {
+        "pto.tcolexpandsub": "pto.vmi.vsub",
+        "pto.tcolexpandadd": "pto.vmi.vadd",
+        "pto.tcolexpandmul": "pto.vmi.vmul",
+        "pto.tcolexpanddiv": "pto.vmi.vdiv",
+    }
+    for op_name, expected_op in binops.items():
+        # tcolexpanddiv is the only ColExpandBinary op that ExpandTileOp
+        # decorates with a `precisionType` context attr (even at default). Real
+        # TileOp -> PTODSL VMI provider selection passes that attr; a candidate
+        # that didn't declare it under context_constraints would be rejected by
+        # validate_context_attrs. Instantiate with the real attr here so the
+        # candidate is exercised through the same path.
+        ctx_attrs = (
+            {"precisionType": "default"} if op_name == "pto.tcolexpanddiv" else {}
+        )
+        text = instantiate_candidate(
+            target="a5",
+            op_name=op_name,
+            operand_specs=[col_tile_spec, reduced_col_spec, col_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs=ctx_attrs,
+        ).mlir_text()
+        expect(text.count("scf.for") == 1, f"{op_name} should emit one runtime row loop")
+        expect(expected_op in text, f"{op_name} should lower to {expected_op}")
+        expect("pto.vmi.vbrc" not in text, f"{op_name} must reload the VL block, not 1-lane vbrc")
+        expect(
+            text.count("pto.vmi.vload") == 2,
+            f"{op_name} should load one source row plus the broadcast VL block",
+        )
+        # The broadcast VL block is loop-invariant (col_values is [1, VL]); it
+        # must be hoisted out of the row loop so a later mem2reg can forward the
+        # ColMax result straight to the consumer without a per-row reload. So
+        # exactly one vload precedes scf.for (the broadcast) and one sits inside
+        # (the source row).
+        for_pos = text.find("scf.for")
+        expect(
+            for_pos > 0 and text[:for_pos].count("pto.vmi.vload") == 1,
+            f"{op_name} should hoist the broadcast vload out of the row loop",
+        )
+        expect(
+            text[for_pos:].count("pto.vmi.vload") == 1,
+            f"{op_name} should keep only the source-row vload inside the loop",
+        )
+
+
+def check_tcvt_bf16_candidate() -> None:
+    """tcvt covers both f32->f16 and f32->bf16 cast on the canonical path."""
+    raw_tile_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    f16_dst_spec = {**raw_tile_spec, "dtype": "f16"}
+    bf16_dst_spec = {**raw_tile_spec, "dtype": "bf16"}
+    f16_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcvt",
+        operand_specs=[raw_tile_spec, f16_dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"round_mode": "RINT"},
+    ).mlir_text()
+    expect("pto.vmi.vcvt" in f16_text, "tcvt f32->f16 should lower to VMI conversion")
+    expect("vreg<64xf16>" in f16_text, "tcvt f32->f16 should target the f16 vreg type")
+
+    bf16_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcvt",
+        operand_specs=[raw_tile_spec, bf16_dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"round_mode": "RINT"},
+    ).mlir_text()
+    expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
+    expect("vreg<64xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
+
+
+def check_col_reduce_vmi_to_vpto_lowering() -> None:
+    """The vreg-carrying ColReduce loop must survive VMI->VPTO lowering as a
+    real physical ``scf.for iter_args(%acc = ...) -> !pto.vreg<...>`` (the seed
+    loaded once before the loop, one vlds+vmax per iteration), proving the
+    pto-isa reduce loop shape reaches the physical layer."""
+    col_tile_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    reduced_col_spec = {
+        **col_tile_spec,
+        "shape": [1, 64],
+        "valid_shape": [1, 64],
+    }
+    colmax = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmax",
+        operand_specs=[col_tile_spec, reduced_col_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    colsum = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolsum",
+        operand_specs=[col_tile_spec, reduced_col_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    check_vmi_to_vpto_lowering("vmi_tcolmax", colmax, "pto.vmax")
+    check_vmi_to_vpto_lowering("vmi_tcolsum", colsum, "pto.vadd")
+
+
 def check_legacy_vpto_compatibility() -> None:
     spec = TileSpec(TILE_SHAPE, f32)
     artifact = legacy_vpto_tadd.specialize(src0=spec, src1=spec, dst=spec)
@@ -423,6 +660,10 @@ def main() -> None:
     tadd_text, texp_text = check_candidate_ir()
     check_vmi_to_vpto_lowering("vmi_tadd_block64", tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
+    check_col_reduce_candidate()
+    check_col_expand_candidate()
+    check_tcvt_bf16_candidate()
+    check_col_reduce_vmi_to_vpto_lowering()
     print("ptodsl_vmi_tile_template: PASS")
 
 

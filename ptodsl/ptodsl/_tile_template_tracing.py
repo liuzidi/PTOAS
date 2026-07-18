@@ -62,7 +62,7 @@ from ._types import (
 )
 
 from ptoas.mlir.dialects import arith, pto as _pto, scf
-from ptoas.mlir.ir import InsertionPoint, IntegerType, Type
+from ptoas.mlir.ir import FloatAttr, InsertionPoint, IntegerType, Type
 
 
 @dataclass(frozen=True)
@@ -346,17 +346,27 @@ class _LoopHandle:
         iv: _Value,
         iter_args: tuple[_Value, ...],
         state_names: tuple[str, ...] = (),
+        iter_arg_templates: tuple = (),
     ):
         self._trace = trace
         self._for_op = for_op
         self.iv = iv
         self.iter_args = iter_args
         self._state_names = state_names
+        self._iter_arg_templates = iter_arg_templates
         self.state = _LoopStateView(state_names, iter_args) if state_names else None
         self.results: tuple[_Value, ...] = ()
 
     def _finalize(self) -> None:
-        self.results = tuple(_Value(result) for result in self._for_op.results)
+        if self._iter_arg_templates:
+            self.results = tuple(
+                self._trace._rewrap_state_value(tpl, result)
+                for tpl, result in zip(
+                    self._iter_arg_templates, self._for_op.results
+                )
+            )
+        else:
+            self.results = tuple(_Value(result) for result in self._for_op.results)
 
     def yield_state(self, **kwargs) -> None:
         if not self._state_names:
@@ -641,8 +651,12 @@ class _TraceBuilder(TracingRuntime):
         state_names = tuple(name for name, _ in state_items)
         if state_names:
             iter_arg_vals = tuple(self._coerce_value(arg) for _, arg in state_items)
+            # Preserve the authored surface templates (carry dtype for vreg/mask
+            # state) so inner_iter_args can be re-wrapped for the loop body.
+            iter_arg_templates = tuple(arg for _, arg in state_items)
         else:
             iter_arg_vals = tuple(self._coerce_value(arg) for arg in iter_args)
+            iter_arg_templates = tuple(iter_args)
         for_op = scf.ForOp(
             start_val.value,
             stop_val.value,
@@ -652,8 +666,18 @@ class _TraceBuilder(TracingRuntime):
         loop_ip = InsertionPoint(for_op.body)
         loop_ip.__enter__()
         iv = _Value(for_op.induction_variable)
-        inner_iter_args = tuple(_Value(arg) for arg in for_op.inner_iter_args)
-        handle = _LoopHandle(self, for_op, iv, inner_iter_args, state_names=state_names)
+        inner_iter_args = tuple(
+            self._rewrap_state_value(tpl, arg)
+            for tpl, arg in zip(iter_arg_templates, for_op.inner_iter_args)
+        )
+        handle = _LoopHandle(
+            self,
+            for_op,
+            iv,
+            inner_iter_args,
+            state_names=state_names,
+            iter_arg_templates=iter_arg_templates,
+        )
         self._loop_stack.append(
             {
                 "kind": "for",
@@ -704,9 +728,29 @@ class _TraceBuilder(TracingRuntime):
             raise TypeError(f"expected index value, got {coerced.type_text}")
         return coerced
 
+    def _rewrap_state_value(self, template, mlir_value):
+        """Re-wrap an scf.for inner_iter_arg / result using the same authored
+        surface contract as the loop-carried *template* value.
+
+        For scalar (index) state the template is a plain _Value and is returned
+        unchanged (after wrapping the MLIR value). For VMI vector/mask state the
+        template carries a dtype that _vmi_binary/_vmi_vec_scalar etc. consume,
+        so the inner iter_arg must be handed back as _VectorValue/_MaskValue."""
+        if isinstance(template, _VectorValue):
+            return _VectorValue(mlir_value, template.dtype)
+        if isinstance(template, _MaskValue):
+            return _MaskValue(mlir_value, template.dtype)
+        return _Value(mlir_value)
+
     def _coerce_value(self, value) -> _Value:
         if isinstance(value, _Value):
             return value
+        # VMI vector/mask values carry a dtype alongside their MLIR value; wrap
+        # the MLIR value in a plain _Value so scf.for iter_args / yields (which
+        # only consume .value) accept them. The dtype is re-attached by
+        # _rewrap_state_value when handing the inner iter_arg back to the body.
+        if isinstance(value, (_VectorValue, _MaskValue)):
+            return _Value(value.value)
         if isinstance(value, int):
             return self.index_const(value)
         if hasattr(value, "type"):
@@ -1066,16 +1110,48 @@ def vmi_vbroadcast(source: _VectorValue, *, lanes: int) -> _VectorValue:
     return _VectorValue(unwrap_surface_value(result), source.dtype)
 
 
-def vmi_vbroadcast_scalar(scalar: _Value, *, like: _VectorValue) -> _VectorValue:
+def vmi_scalar_constant(value: float, dtype: ScalarType) -> _Value:
+    """Materialize a scalar constant of ``value`` with element type ``dtype``.
+
+    General-purpose literal construction (not reduce-specific): callers choose
+    the value. For a reduce accumulator init, the caller picks the op's
+    identity element (max->-inf, min->+inf, add->0, prod->1, matching pto-isa
+    ``InstrOp::InitVal``), then broadcasts it with ``vmi_vbroadcast_scalar``.
+    """
+    _require_vmi_trace("vmi_scalar_constant")
+    elem_type = _resolve(_scalar_descriptor(dtype))
+    return _Value(arith.ConstantOp(elem_type, FloatAttr.get(elem_type, value)).result)
+
+
+def vmi_vbroadcast_scalar(
+    scalar: _Value, *, like: _VectorValue | None = None, dtype: ScalarType | None = None
+) -> _VectorValue:
+    """Broadcast a scalar into a VL vreg.
+
+    The result element type / lanes come either from an existing vreg
+    (``like=some_vreg``) or directly from a dtype (``dtype=f32`` etc.) — use
+    ``dtype`` when you only need the type and would otherwise have to emit a
+    throwaway load just to obtain it (that load has a Read memory effect and
+    cannot be DCE'd).
+    """
     _require_vmi_trace("vmi_vbroadcast_scalar")
-    expected_scalar = str(_resolve(_scalar_descriptor(like.dtype)))
+    if like is None and dtype is None:
+        raise TypeError("vmi_vbroadcast_scalar requires like= or dtype=")
+    ref_dtype = like.dtype if like is not None else dtype
+    expected_scalar = str(_resolve(_scalar_descriptor(ref_dtype)))
     if scalar.type_text != expected_scalar:
         raise TypeError(
             "vmi_vbroadcast_scalar scalar must use "
             f"{expected_scalar}, got {scalar.type_text}"
         )
-    result = _vmi.vbrc(scalar.value, result_type=like.value.type)
-    return _VectorValue(unwrap_surface_value(result), like.dtype)
+    if like is not None:
+        result_type = like.value.type
+    else:
+        # Build a vreg type from the dtype's lanes + element type.
+        elem = _resolve(_scalar_descriptor(dtype))
+        result_type = _pto.VMIVRegType.get(dtype.lanes, elem)
+    result = _vmi.vbrc(scalar.value, result_type=result_type)
+    return _VectorValue(unwrap_surface_value(result), ref_dtype)
 
 
 def vmi_vreduce_max(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
