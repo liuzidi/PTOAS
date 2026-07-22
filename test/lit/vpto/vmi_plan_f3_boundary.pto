@@ -1,0 +1,71 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root directory of the software repository for the full text of the License.
+
+// F3 boundary regression test for VMIUBDisjointStrategyEngine (the
+// fusion-strategy=vmi-ub-disjoint path of PTOFusionPlan) + PTOFusionRegionGen.
+// Replaces the deleted vmi_plan_boundary.pto / vmi_plan_inter_region_sync.pto
+// which targeted the removed PTOPlanVmiFusionRegion pass.
+//
+// The engine's ONLY group-break rule is F3 adjacency: a non-plannable op
+// (anything outside getFusionOpSemantics' compute whitelist — sync/DMA/
+// treshape/tmov/...) sitting between two plannable compute nodes closes the
+// current group. This is the whitelist-based counterpart of the deleted pass's
+// sync-op blacklist: an op is a boundary here because it is Unknown to
+// getFusionComputeFamily, not because it is named in a boundary list. See the
+// CONTRACT comment in FusionOpSemantics.cpp.
+//
+//   MERGE  - two adjacent pto.tadd, no op between them -> ONE fusion_region,
+//            empty yield (nothing escapes).
+//   BREAK  - a pto.tmov (HardBoundary: not in the compute whitelist) between
+//            two pto.tadd -> TWO fusion_regions, tmov stays between them. The
+//            first region's tadd result escapes to the tmov, so it is promoted
+//            to a region result with a non-empty pto.yield — the escape-value
+//            promotion path in PTOFusionRegionGen that replaces the deleted
+//            pass's hasEmptyYield guard.
+
+// RUN: pto-test-opt %s --pass-pipeline='builtin.module(func.func(pto-pre-fusion-analysis,pto-fusion-plan{fusion-strategy=vmi-ub-disjoint},pto-op-scheduling,pto-fusion-region-gen))' | FileCheck %s --check-prefix=PLAN
+
+module {
+  // PLAN-LABEL: func.func @merge_two_adjacent
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_two_adjacent() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%c, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  // PLAN-LABEL: func.func @break_on_tmov_boundary
+  // First region: tadd result escapes to tmov -> promoted to region result.
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.yield({{%[0-9]+}}) : (!pto.tile_buf<vec, 64x64xf32>) -> ()
+  // PLAN: pto.tmov
+  // Second region, separate group_id.
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN: return
+  func.func @break_on_tmov_boundary() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tmov ins(%c : !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+}

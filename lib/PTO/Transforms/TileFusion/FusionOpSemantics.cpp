@@ -24,8 +24,12 @@ static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
       .Case("texpands", FusionComputeFamily::ScalarExpand)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv",
              FusionComputeFamily::RowBroadcastBinary)
+      .Cases("tcolexpandsub", "tcolexpandadd", "tcolexpandmul",
+             "tcolexpanddiv",
+             FusionComputeFamily::ColBroadcastBinary)
       .Cases("trowsum", "trowmax", "trowmin", FusionComputeFamily::ReduceRow)
       .Cases("tcolsum", "tcolmax", "tcolmin", FusionComputeFamily::ReduceCol)
+      .Case("tcvt", FusionComputeFamily::Convert)
       .Default(FusionComputeFamily::Unknown);
 }
 
@@ -76,6 +80,22 @@ FailureOr<FusionOpSemantics> getFusionOpSemantics(Operation *op) {
     return semantics;
   }
 
+  // Whitelist-based compute classification. Any op NOT in
+  // getFusionComputeFamily's whitelist is a HardBoundary, which means it is
+  // excluded from computeNodes by FusionAnalysis and, in the
+  // VMIUBDisjointStrategyEngine, appears as the "preceded-by-non-plannable"
+  // F3 boundary that closes the current fusion group. This is what keeps
+  // sync/DMA/unknown ops (wait_flag, mem_bar, tload/tstore, tmov, ...) from
+  // being merged across — they fall through here because they are Unknown, not
+  // because they are listed.
+  //
+  // CONTRACT: adding a new plannable TileOp compute op REQUIRES registering it
+  // in getFusionComputeFamily above. Forgetting to do so silently turns it
+  // into a HardBoundary, and VMIUBDisjointStrategyEngine will then wrongly
+  // split the two adjacent groups it was supposed to join. This is the inverse
+  // of the deleted PTOPlanVmiFusionRegion pass, which used a sync-op blacklist:
+  // there, adding a compute op was safe by default; here, it is unsafe by
+  // default. See test/lit/vpto/vmi_plan_f3_boundary.pto.
   semantics.computeFamily = getFusionComputeFamily(semantics.opName);
   if (semantics.computeFamily == FusionComputeFamily::Unknown) {
     semantics.kind = FusionOpKind::HardBoundary;

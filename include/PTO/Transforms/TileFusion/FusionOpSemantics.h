@@ -31,6 +31,8 @@ enum class FusionComputeFamily {
   RowBroadcastBinary,
   ReduceRow,
   ReduceCol,
+  ColBroadcastBinary,
+  Convert,
 };
 
 struct FusionOpSemantics {

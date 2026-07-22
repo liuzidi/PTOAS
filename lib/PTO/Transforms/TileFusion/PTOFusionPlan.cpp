@@ -550,6 +550,84 @@ public:
   }
 };
 
+// VMI F3-adjacency strategy: every plannable compute node (already filtered
+// into computeNodes by PreFusionAnalysis via getFusionOpSemantics' whitelist)
+// is wrapped into a fusion group. This engine's ONLY group-break rule is F3
+// adjacency: if a non-plannable op (tload/tstore DMA, wait_flag/mem_bar sync,
+// any op outside the compute whitelist) sits between two plannable nodes in
+// block order, it closes the current group so the merge never crosses a
+// sync/DMA boundary. Adjacent plannable nodes always join the same group.
+//
+// This layer does NOT do UB-overlap (MustAlias/NoAlias/partial-alias)
+// checking, unlike the deleted PTOPlanVmiFusionRegion pass. At this
+// tile-native PTO IR layer a tile_buf is a single SSA value with one fixed
+// type, so partial-alias (same address, different type) cannot arise — it
+// only becomes possible after PlanMemory binds addresses, which is
+// downstream of this pass. The reduce-final "stuck" case (a ColReduce whose
+// result is read by a later elementwise loop — a producer/consumer
+// dependency that loop-fusion refuses to fold into one iteration even though
+// the two nodes share a region) is deliberately handled downstream by
+// PTOVmiLoopFusion, which can see the scf.for-level SSA/UB def-use that this
+// compute-node layer cannot. A fusion_region assigned here is a container,
+// not a fusion mandate: same group does not force the inner scf.for ops to
+// fuse.
+//
+// Unlike the Conservative* engines this one ignores iteration-domain class,
+// direct dependency, and cost. Single-node groups are kept (not dropped) so
+// every plannable compute TileOp gets a fusion_region.
+class VMIUBDisjointStrategyEngine final : public StrategyEngine {
+public:
+  SmallVector<PlannedFusionGroup, 8>
+  planBlock(const PlanningContext &ctx,
+            const CostModel &costModel) const override {
+    const pto::FusionBlockAnalysis &block = ctx.blockAnalysis;
+    if (block.computeNodes.empty())
+      return {};
+
+    // Map node id -> whether the op immediately preceding it in block order
+    // is NOT a plannable compute node (i.e. a DMA/sync/unknown op sits between
+    // it and the previous plannable node). Such a node closes the open group.
+    DenseMap<unsigned, bool> precededByNonPlannable;
+    Operation *prevOp = nullptr;
+    DenseMap<Operation *, unsigned> nodeIdByOp;
+    for (const pto::FusionComputeNode &n : block.computeNodes)
+      nodeIdByOp[n.op] = n.id;
+    for (Operation &op : *block.block) {
+      auto it = nodeIdByOp.find(&op);
+      if (it != nodeIdByOp.end()) {
+        precededByNonPlannable[it->second] =
+            prevOp != nullptr && !nodeIdByOp.count(prevOp);
+      }
+      prevOp = &op;
+    }
+
+    SmallVector<PlannedFusionGroup, 8> groups;
+    SmallVector<const pto::FusionComputeNode *, 8> curMembers;
+    auto flushCurrent = [&]() {
+      if (curMembers.empty())
+        return;
+      PlannedFusionGroup group;
+      group.members = buildStableInGroupOrder(curMembers);
+      groups.push_back(std::move(group));
+      curMembers.clear();
+    };
+
+    for (const pto::FusionComputeNode &node : block.computeNodes) {
+      // F3 boundary: a non-plannable op sits between the previous plannable
+      // node and this one — close the open group so the merge does not cross
+      // a sync/DMA boundary. See the class doc comment for why no UB-overlap
+      // check applies at this layer (it is deferred to PTOVmiLoopFusion).
+      auto precIt = precededByNonPlannable.find(node.id);
+      if (precIt != precededByNonPlannable.end() && precIt->second)
+        flushCurrent();
+
+      curMembers.push_back(&node);
+    }
+    flushCurrent();
+    return groups;
+  }
+};
+
 static void clearPlanningAttrs(func::FuncOp func) {
   func.walk([](Operation *op) {
     op->removeAttr(kFusionGroupIdAttr);
@@ -607,12 +685,36 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     MLIRContext *ctx = &getContext();
     int64_t nextGroupId = 0;
     ConservativeDAGGreedyCostModel costModel;
-    ConservativeDAGGreedyStrategyEngine strategyEngine;
+    // Strategy selection. Only these two enumerated values are accepted; any
+    // other string (including typos) fails the pass instead of silently
+    // falling back, so a misconfigured --fusion-strategy cannot quietly change
+    // compilation behavior. The legacy a5 path uses ConservativeDAGGreedy; the
+    // VMI path uses VMIUBDisjoint, which groups plannable compute nodes by
+    // F3 adjacency (a non-plannable op between two plannable nodes closes the
+    // group) and keeps single-node groups so every compute TileOp gets a
+    // fusion_region. It does NOT judge UB disjointness, DFG dependency,
+    // iteration-domain class, or cost here — the resulting fusion_region is a
+    // *container* for downstream VMI analysis, not a proof that its inner
+    // scf.for loops can be fused (that is PTOVmiLoopFusion's job).
+    std::unique_ptr<StrategyEngine> strategyEngine;
+    const std::string strategyVal = strategy.getValue();
+    if (strategyVal == "conservative-dag-greedy")
+      strategyEngine =
+          std::make_unique<ConservativeDAGGreedyStrategyEngine>();
+    else if (strategyVal == "vmi-ub-disjoint")
+      strategyEngine = std::make_unique<VMIUBDisjointStrategyEngine>();
+    else {
+      emitError(getOperation()->getLoc())
+          << "unknown pto-fusion-plan --fusion-strategy='" << strategyVal
+          << "'; expected 'conservative-dag-greedy' or 'vmi-ub-disjoint'";
+      signalPassFailure();
+      return;
+    }
 
     for (const pto::FusionBlockAnalysis &blockAnalysis : analysis.blocks) {
       PlanningContext planningCtx{blockAnalysis};
       SmallVector<PlannedFusionGroup, 8> groups =
-          strategyEngine.planBlock(planningCtx, costModel);
+          strategyEngine->planBlock(planningCtx, costModel);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
     }
 
