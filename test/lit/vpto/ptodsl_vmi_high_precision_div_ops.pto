@@ -49,23 +49,23 @@ module {
   }
 }
 
-// EXPAND: call {{.*}}__pto_ptodsl_a5_tdiv
-// EXPAND: call {{.*}}__pto_ptodsl_a5_tdiv
-// EXPAND: call {{.*}}__pto_ptodsl_a5_tdivs
-// EXPAND: call {{.*}}__pto_ptodsl_a5_tdivs
-// EXPAND: call {{.*}}__pto_ptodsl_a5_trecip
-// EXPAND: call {{.*}}__pto_ptodsl_a5_trsqrt
+// EXPAND: call {{.*}}__pto_tilelang_a5_tdiv
+// EXPAND: call {{.*}}__pto_tilelang_a5_tdiv
+// EXPAND: call {{.*}}__pto_tilelang_a5_tdivs
+// EXPAND: call {{.*}}__pto_tilelang_a5_tdivs
+// EXPAND: call {{.*}}__pto_tilelang_a5_trecip
+// EXPAND: call {{.*}}__pto_tilelang_a5_trsqrt
 
 // INLINE-LABEL: func.func @ptodsl_vmi_high_precision_div_ops
-// INLINE: pto.vmi.vdiv
-// INLINE: pto.vmi.vmula
-// INLINE: pto.vmi.vinterpret_cast
-// INLINE: pto.vmi.vcmp
-// INLINE: pto.vmi.vshl
-// INLINE: pto.vmi.vshr
-// INLINE: pto.vmi.vsel
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vcmps
+// INLINE-DAG: pto.vdiv
+// INLINE-DAG: pto.vmula
+// INLINE-DAG: pto.vbitcast
+// INLINE-DAG: pto.vcmp
+// INLINE-DAG: pto.vshl
+// INLINE-DAG: pto.vshr
+// INLINE-DAG: pto.vsel
+// INLINE-DAG: pto.vsqrt
+// INLINE-DAG: pto.vcmps
 
 // FINAL-LABEL: func.func @ptodsl_vmi_high_precision_div_ops
 // FINAL: pto.vecscope

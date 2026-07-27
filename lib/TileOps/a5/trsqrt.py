@@ -30,13 +30,19 @@ def _is_high_precision_with_tmp(precisionType="default", **context):
 def _emit_trsqrt_body(src, dst, *, high_precision=False):
     dtype = dst.dtype
     valid_rows, valid_cols = dst.valid_shape
+    src_cols = src.shape[1]
+    dst_cols = dst.shape[1]
     lanes = pto.elements_per_vreg(dtype)
+    src_ptr = src.as_ptr()
+    dst_ptr = dst.as_ptr()
 
-    for row in range(0, valid_rows, 1):
-        remained = valid_cols
-        for col in range(0, valid_cols, lanes):
-            mask, remained = pto.make_mask(dtype, remained)
-            value = pto.vlds(src[row, col:])
+    with pto.for_(0, valid_rows, step=1) as row:
+        col_loop = pto.for_(0, valid_cols, step=lanes).carry(remained=valid_cols)
+        with col_loop:
+            col = col_loop.iv
+            mask, remained = pto.make_mask(dtype, col_loop.remained)
+            src_addr = pto.addptr(src_ptr, row * src_cols + col)
+            value = pto.vlds(src_addr, 0)
             if high_precision:
                 root = sqrt_high_precision(value, mask, dtype)
                 one = pto.vbr(pto.f32(1.0) if str(dtype) == "f32" else pto.f16(1.0))
@@ -46,7 +52,9 @@ def _emit_trsqrt_body(src, dst, *, high_precision=False):
                     result = _div_ieee754_f16_impl(one, root, mask)
             else:
                 result = pto.vrsqrt(value, mask)
-            pto.vsts(result, dst[row, col:], mask)
+            dst_addr = pto.addptr(dst_ptr, row * dst_cols + col)
+            pto.vsts(result, dst_addr, 0, mask)
+            col_loop.update(remained=remained)
 
 
 _DTYPES = [

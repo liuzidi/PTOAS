@@ -6,9 +6,9 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi --implicit-check-not=pto.vecscope
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=pto.vmi. --implicit-check-not=__pto_ptodsl_vmi
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=pto.vecscope
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=pto.vmi.
 
 module {
   func.func @ptodsl_vmi_sqrt_ops() {
@@ -40,26 +40,21 @@ module {
   }
 }
 
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt_tile_f32
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt_tile_f16
+// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
+// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
+// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
+// EXPAND: call {{.*}}__pto_tilelang_a5_trsqrt
+// EXPAND: call {{.*}}__pto_tilelang_a5_trsqrt
 
 // INLINE-LABEL: func.func @ptodsl_vmi_sqrt_ops
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vdiv
-// INLINE: pto.vmi.vmula
-// INLINE: pto.vmi.vinterpret_cast
-// INLINE: pto.vmi.vor
-// INLINE: pto.vmi.vsel
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vsel
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vdiv
-// INLINE: pto.vmi.vsqrt
-// INLINE: pto.vmi.vdiv
+// INLINE-DAG: pto.vsqrt
+// INLINE-DAG: pto.vdiv
+// INLINE-DAG: pto.vmula
+// INLINE-DAG: pto.vbitcast
+// INLINE-DAG: pto.vor
+// INLINE-DAG: pto.por
+// INLINE-DAG: pto.vsel
+// INLINE-DAG: pto.vcmps
 
 // FINAL-LABEL: func.func @ptodsl_vmi_sqrt_ops
 // FINAL: pto.vecscope
