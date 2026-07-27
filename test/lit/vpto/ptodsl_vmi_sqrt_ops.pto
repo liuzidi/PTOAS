@@ -21,6 +21,14 @@ module {
     pto.tsqrt
       ins(%src_f32 : !pto.tile_buf<vec, 2x64xf32>)
       outs(%dst_f32 : !pto.tile_buf<vec, 2x64xf32>)
+    pto.tsqrt
+      ins(%src_f32 : !pto.tile_buf<vec, 2x64xf32>)
+      outs(%dst_f32 : !pto.tile_buf<vec, 2x64xf32>)
+      {precisionType = #pto<sqrt_precision high_precision>}
+    pto.tsqrt
+      ins(%src_f16 : !pto.tile_buf<vec, 2x128xf16>)
+      outs(%dst_f16 : !pto.tile_buf<vec, 2x128xf16>)
+      {precisionType = #pto<sqrt_precision high_precision>}
     pto.trsqrt
       ins(%src_f32 : !pto.tile_buf<vec, 2x64xf32>)
       outs(%dst_f32 : !pto.tile_buf<vec, 2x64xf32>)
@@ -33,11 +41,21 @@ module {
 }
 
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt_tile_f32
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt_tile_f16
 
 // INLINE-LABEL: func.func @ptodsl_vmi_sqrt_ops
 // INLINE: pto.vmi.vsqrt
+// INLINE: pto.vmi.vsqrt
+// INLINE: pto.vmi.vdiv
+// INLINE: pto.vmi.vmula
+// INLINE: pto.vmi.vinterpret_cast
+// INLINE: pto.vmi.vor
+// INLINE: pto.vmi.vsel
+// INLINE: pto.vmi.vsqrt
+// INLINE: pto.vmi.vsel
 // INLINE: pto.vmi.vsqrt
 // INLINE: pto.vmi.vdiv
 // INLINE: pto.vmi.vsqrt
@@ -46,4 +64,6 @@ module {
 // FINAL-LABEL: func.func @ptodsl_vmi_sqrt_ops
 // FINAL: pto.vecscope
 // FINAL: pto.vsqrt
+// FINAL: pto.vmula
+// FINAL: pto.vbitcast
 // FINAL: pto.vdiv
