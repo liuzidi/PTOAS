@@ -65,6 +65,7 @@ module {
 // INLINE: pto.vmi.vshr
 // INLINE: pto.vmi.vsel
 // INLINE: pto.vmi.vsqrt
+// INLINE: pto.vmi.vcmps
 
 // FINAL-LABEL: func.func @ptodsl_vmi_high_precision_div_ops
 // FINAL: pto.vecscope
