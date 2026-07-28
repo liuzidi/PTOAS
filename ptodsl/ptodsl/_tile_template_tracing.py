@@ -46,6 +46,7 @@ from ._tracing import (
     require_active_runtime,
 )
 from ._vmi_namespace import vmi as _vmi
+from .tilelib.metadata import TemplateMetadata as _RegistryTemplateMetadata
 from ._types import (
     _resolve,
     float16 as _float16,
@@ -82,6 +83,11 @@ bf16 = ScalarType("bf16", lanes=128, mask_bits=16, bytewidth=2)
 i32 = ScalarType("i32", lanes=64, mask_bits=32, bytewidth=4)
 i16 = ScalarType("i16", lanes=128, mask_bits=16, bytewidth=2)
 i8 = ScalarType("i8", lanes=256, mask_bits=8, bytewidth=1)
+
+_SCALAR_TYPES_BY_NAME = {
+    dtype.name: dtype
+    for dtype in (f32, f16, bf16, i32, i16, i8)
+}
 
 
 @dataclass(frozen=True)
@@ -764,6 +770,47 @@ class _TraceBuilder(TracingRuntime):
         return coerced
 
 
+def _dtype_name(dtype) -> str:
+    return getattr(dtype, "name", str(dtype))
+
+
+def _coerce_parameter_spec(spec):
+    if isinstance(spec, (TileSpec, ScalarType)):
+        return spec
+
+    if hasattr(spec, "shape") and hasattr(spec, "dtype"):
+        shape = tuple(spec.shape)
+        valid_shape = getattr(spec, "valid_shape", None)
+        if valid_shape is not None and tuple(valid_shape) != shape:
+            raise ValueError(
+                "VMI tile-template tracing currently requires valid_shape to "
+                "match the physical tile shape"
+            )
+        dtype = _SCALAR_TYPES_BY_NAME.get(_dtype_name(spec.dtype))
+        if dtype is None:
+            raise ValueError(f"unsupported VMI tile-template dtype {spec.dtype!r}")
+        s_layout = getattr(spec, "s_layout", "none_box")
+        if s_layout != "none_box":
+            raise ValueError(
+                "VMI tile-template tracing currently supports only none_box "
+                f"secondary layout, got {s_layout!r}"
+            )
+        return TileSpec(
+            shape=shape,
+            dtype=dtype,
+            memory_space=getattr(spec, "memory_space", "ub"),
+            b_layout=getattr(spec, "b_layout", "row_major"),
+        )
+
+    if hasattr(spec, "dtype"):
+        dtype = _SCALAR_TYPES_BY_NAME.get(_dtype_name(spec.dtype))
+        if dtype is None:
+            raise ValueError(f"unsupported VMI scalar dtype {spec.dtype!r}")
+        return dtype
+
+    return spec
+
+
 @dataclass(frozen=True)
 class TileTemplate:
     py_fn: object
@@ -773,6 +820,45 @@ class TileTemplate:
     source_label: str
     ir_level: str
     context_constraints: tuple[tuple[str, tuple[object, ...]], ...]
+
+    @property
+    def param_names(self) -> tuple[str, ...]:
+        return tuple(inspect.signature(self.py_fn).parameters)
+
+    @property
+    def metadata(self):
+        if self.ir_level == "vmi":
+            return _RegistryTemplateMetadata.build(
+                op=self.op,
+                target=self.target,
+                name=self.name,
+                constraints=(
+                    (self._context_constraints_match,)
+                    if self.context_constraints
+                    else ()
+                ),
+                priority=100,
+                fusible=True,
+                loop_depth=1,
+                id=1000,
+                is_post_update=False,
+                iteration_axis="row",
+                op_engine="vector",
+                op_class="other",
+                tags=("vmi", "fusion_eligible", "single_logical_row_loop"),
+            )
+
+        return _RegistryTemplateMetadata.build(
+            op=self.op,
+            target=self.target,
+            name=self.name,
+        )
+
+    def _context_constraints_match(self, **context) -> bool:
+        for key, allowed_values in self.context_constraints:
+            if context.get(key) not in allowed_values:
+                return False
+        return True
 
     def validate_context_attrs(self, context_attrs=None) -> None:
         attrs = dict(context_attrs or {})
@@ -793,7 +879,11 @@ class TileTemplate:
         self, context_attrs=None, **parameter_specs: TileSpec | ScalarType
     ) -> "SpecializedTileTemplate":
         self.validate_context_attrs(context_attrs)
-        return SpecializedTileTemplate(self, parameter_specs)
+        converted_specs = {
+            name: _coerce_parameter_spec(spec)
+            for name, spec in parameter_specs.items()
+        }
+        return SpecializedTileTemplate(self, converted_specs)
 
 
 class SpecializedTileTemplate(ModuleArtifact):
@@ -1103,10 +1193,7 @@ def vmi_vbroadcast(source: _VectorValue, *, lanes: int) -> _VectorValue:
     _require_vmi_trace("vmi_vbroadcast")
     if not isinstance(lanes, int) or lanes <= 0:
         raise ValueError("vmi_vbroadcast lanes must be a positive integer")
-    result_type = _pto.VMIVRegType.get(
-        lanes, _resolve(_scalar_descriptor(source.dtype))
-    )
-    result = _vmi.vbrc(source.value, result_type=result_type)
+    result = _vmi.vbrc(source.value, size=lanes)
     return _VectorValue(unwrap_surface_value(result), source.dtype)
 
 
@@ -1145,12 +1232,10 @@ def vmi_vbroadcast_scalar(
             f"{expected_scalar}, got {scalar.type_text}"
         )
     if like is not None:
-        result_type = like.value.type
+        size = _pto.VMIVRegType(like.value.type).element_count
     else:
-        # Build a vreg type from the dtype's lanes + element type.
-        elem = _resolve(_scalar_descriptor(dtype))
-        result_type = _pto.VMIVRegType.get(dtype.lanes, elem)
-    result = _vmi.vbrc(scalar.value, result_type=result_type)
+        size = dtype.lanes
+    result = _vmi.vbrc(scalar.value, size=size)
     return _VectorValue(unwrap_surface_value(result), ref_dtype)
 
 
@@ -1158,10 +1243,7 @@ def vmi_vreduce_max(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     _require_vmi_trace("vmi_vreduce_max")
     if source.dtype != mask.dtype:
         raise TypeError("vmi_vreduce_max source and mask must use the same dtype")
-    result_type = _pto.VMIVRegType.get(
-        1, _resolve(_scalar_descriptor(source.dtype))
-    )
-    result = _vmi.vcmax(source.value, mask.value, result_type=result_type)
+    result = _vmi.vcmax(source.value, mask.value)
     return _VectorValue(unwrap_surface_value(result), source.dtype)
 
 
@@ -1169,15 +1251,7 @@ def vmi_vreduce_add(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     _require_vmi_trace("vmi_vreduce_add")
     if source.dtype != mask.dtype:
         raise TypeError("vmi_vreduce_add source and mask must use the same dtype")
-    result_type = _pto.VMIVRegType.get(
-        1, _resolve(_scalar_descriptor(source.dtype))
-    )
-    result = _vmi.vcadd(
-        source.value,
-        mask.value,
-        result_type=result_type,
-        reassoc=True,
-    )
+    result = _vmi.vcadd(source.value, mask.value, reassoc=True)
     return _VectorValue(unwrap_surface_value(result), source.dtype)
 
 
@@ -1185,12 +1259,7 @@ def vmi_vcvt(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValue:
     _require_vmi_trace("vmi_vcvt")
     if not isinstance(dst_dtype, ScalarType):
         raise TypeError("vmi_vcvt expects a tile-template destination ScalarType")
-    source_type = _pto.VMIVRegType(source.value.type)
-    result_type = _pto.VMIVRegType.get(
-        source_type.element_count,
-        _resolve(_scalar_descriptor(dst_dtype)),
-    )
-    result = _vmi.vcvt(source.value, result_type=result_type)
+    result = _vmi.vcvt(source.value, to_dtype=_scalar_descriptor(dst_dtype))
     return _VectorValue(unwrap_surface_value(result), dst_dtype)
 
 

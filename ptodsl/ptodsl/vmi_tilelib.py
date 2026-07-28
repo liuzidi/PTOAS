@@ -5,7 +5,12 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""Initial canonical VMI TileLib candidates for static Softmax-related coverage."""
+"""Canonical VMI TileLib candidates for static Softmax-related coverage.
+
+The candidates in this module are registered into the ordinary PTODSL TileLib
+registry as ``ir_level="vmi"`` candidates.  ``VMI_TILELIB_REGISTRY`` is kept as
+a compatibility view for direct unit tests and the legacy helper path.
+"""
 
 from __future__ import annotations
 
@@ -49,13 +54,38 @@ from ._tile_template_tracing import (
     vmi_vstore,
     vmi_vstore_linear,
 )
+from .tilelib import registry as _tilelib_registry
 from .tilelib.registry import TileTemplateRegistry
 
 
 ElementwiseCompute = Callable[[Sequence[_VectorValue], _MaskValue], _VectorValue]
 
 
-VMI_TILELIB_REGISTRY = TileTemplateRegistry()
+def _qualify_op_name(op: str) -> str:
+    return op if op.startswith("pto.") else f"pto.{op}"
+
+
+def _normalize_op_name(op: str) -> str:
+    return op[4:] if op.startswith("pto.") else op
+
+
+class _VMITileTemplateRegistry(TileTemplateRegistry):
+    def lookup(self, op: str, target: str) -> list:
+        candidates = super().lookup(op, target)
+        if candidates:
+            return candidates
+        qualified = _qualify_op_name(op)
+        if qualified != op:
+            candidates = super().lookup(qualified, target)
+            if candidates:
+                return candidates
+        normalized = _normalize_op_name(op)
+        if normalized != op:
+            return super().lookup(normalized, target)
+        return []
+
+
+VMI_TILELIB_REGISTRY = _VMITileTemplateRegistry()
 
 
 # Reduce kind -> (merge op, identity element). The identity mirrors pto-isa
@@ -83,14 +113,15 @@ def canonical_vmi_template(
     """Register one canonical VMI implementation in this provider module."""
 
     def decorator(fn):
-        normalized_op = op[4:] if op.startswith("pto.") else op
+        qualified_op = _qualify_op_name(op)
         descriptor = _trace_tile_template(
             target=target,
-            op=normalized_op,
+            op=qualified_op,
             name=name,
             ir_level="vmi",
             context_constraints=context_constraints,
         )(fn)
+        _tilelib_registry.register(descriptor)
         VMI_TILELIB_REGISTRY.register(descriptor)
         return descriptor
 

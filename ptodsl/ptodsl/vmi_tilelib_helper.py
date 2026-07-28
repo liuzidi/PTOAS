@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import inspect
 import json
 import sys
 
@@ -24,6 +23,7 @@ from ._tile_template_tracing import (
     i16,
     i32,
 )
+from .tilelib import registry as _tilelib_registry
 from .tilelib.registry import TileTemplateRegistry
 
 
@@ -39,6 +39,10 @@ _DTYPE_MAP = {
 
 def _normalize_op_name(op_name: str) -> str:
     return op_name[4:] if op_name.startswith("pto.") else op_name
+
+
+def _qualify_op_name(op_name: str) -> str:
+    return op_name if op_name.startswith("pto.") else f"pto.{op_name}"
 
 
 def _parse_operand_specs(spec_text: str) -> list[dict]:
@@ -141,14 +145,43 @@ def _parse_tile_config(config: object, index: int) -> str:
     return b_layout
 
 
+def _is_vmi_candidate(descriptor) -> bool:
+    if getattr(descriptor, "ir_level", None) == "vmi":
+        return True
+    metadata = getattr(descriptor, "metadata", None)
+    return metadata is not None and "vmi" in getattr(metadata, "tags", ())
+
+
 def _find_candidates(module, *, target: str, op_name: str) -> list:
-    registry = getattr(module, "VMI_TILELIB_REGISTRY", None)
-    if not isinstance(registry, TileTemplateRegistry):
-        raise TypeError(
-            f"PTODSL VMI provider module {module.__name__!r} must expose "
-            "VMI_TILELIB_REGISTRY as a TileTemplateRegistry"
+    # Out-of-tree tests/providers may still expose only a module-local
+    # VMI_TILELIB_REGISTRY.  Prefer that local registry so global built-in VMI
+    # candidates do not hide provider-specific ambiguity.
+    legacy_registry = getattr(module, "VMI_TILELIB_REGISTRY", None)
+    if (
+        module.__name__ != "ptodsl.vmi_tilelib"
+        and isinstance(legacy_registry, TileTemplateRegistry)
+    ):
+        normalized_op = _normalize_op_name(op_name)
+        return legacy_registry.lookup(normalized_op, target)
+
+    # Importing the provider module registers its VMI descriptors into the
+    # ordinary PTODSL TileLib registry.
+    _ = module
+    qualified_op = _qualify_op_name(op_name)
+    candidates = [
+        descriptor
+        for descriptor in _tilelib_registry.default_registry().lookup(
+            qualified_op, target
         )
-    return registry.lookup(op_name, target)
+        if _is_vmi_candidate(descriptor)
+    ]
+    if candidates:
+        return candidates
+
+    if isinstance(legacy_registry, TileTemplateRegistry):
+        normalized_op = _normalize_op_name(op_name)
+        return legacy_registry.lookup(normalized_op, target)
+    return []
 
 
 def instantiate_candidate(
@@ -160,23 +193,23 @@ def instantiate_candidate(
     context_attrs: dict[str, object] | None = None,
 ):
     module = importlib.import_module(provider_module)
-    normalized_op = _normalize_op_name(op_name)
-    candidates = _find_candidates(module, target=target, op_name=normalized_op)
+    qualified_op = _qualify_op_name(op_name)
+    candidates = _find_candidates(module, target=target, op_name=qualified_op)
     if not candidates:
         raise LookupError(
-            f"no PTODSL VMI candidate for target={target!r}, op={normalized_op!r} "
+            f"no PTODSL VMI candidate for target={target!r}, op={qualified_op!r} "
             f"in module {provider_module!r}"
         )
     if len(candidates) != 1:
         names = ", ".join(candidate.name for candidate in candidates)
         raise LookupError(
             "RFC-mode PTODSL VMI provider requires exactly one canonical "
-            f"candidate per (target, op); target={target!r}, op={normalized_op!r}, "
+            f"candidate per (target, op); target={target!r}, op={qualified_op!r}, "
             f"found {len(candidates)} in module {provider_module!r}: {names}"
         )
 
     candidate = candidates[0]
-    parameters = tuple(inspect.signature(candidate.py_fn).parameters)
+    parameters = tuple(candidate.param_names)
     if len(parameters) != len(operand_specs):
         raise ValueError(
             f"candidate {candidate.name!r} expects {len(parameters)} operands, "
@@ -199,6 +232,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--operand-specs", required=True)
     parser.add_argument("--context-attrs")
     parser.add_argument("--provider-module", default="ptodsl.vmi_tilelib")
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Validate candidate availability without rendering MLIR",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -211,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
             provider_module=args.provider_module,
             context_attrs=context_attrs,
         )
+        if args.metadata_only:
+            sys.stdout.write(json.dumps({"candidate": artifact.descriptor.name}))
+            return 0
         mlir_text = artifact.mlir_text()
     except Exception as exc:
         print(f"vmi_tilelib_helper: error: {exc}", file=sys.stderr)

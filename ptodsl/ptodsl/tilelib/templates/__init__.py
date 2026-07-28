@@ -10,10 +10,35 @@
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
+from importlib import import_module
 
-from .._template_package import load_template, tileops_package
+from .._template_package import load_template as _load_template, tileops_package
+
+
+_VMI_TEMPLATE_OPS = {
+    "pto.tadd", "pto.tadds", "pto.tcvt", "pto.tcolmax", "pto.tcolsum",
+    "pto.tcolexpandadd", "pto.tcolexpanddiv", "pto.tcolexpandmul",
+    "pto.tcolexpandsub", "pto.tdivs", "pto.texp", "pto.tmax", "pto.tmaxs",
+    "pto.tmins", "pto.tmov", "pto.tmul", "pto.tmuls", "pto.trowexpandsub",
+    "pto.trowmax", "pto.trowsum", "pto.tsub",
+}
+
+
+@lru_cache(maxsize=None)
+def load_template(op: str, target: str) -> bool:
+    """Load the canonical TileOps template and any registered VMI provider."""
+
+    loaded = _load_template(op, target)
+    if target == "a5" and op in _VMI_TEMPLATE_OPS:
+        import_module("ptodsl.vmi_tilelib")
+        loaded = True
+    return loaded
+
+
+load_template_with_vmi = load_template
 
 _tileops = tileops_package()
 __path__ = [str(Path(_tileops.__file__).resolve().parent)]
 
-__all__ = ["load_template"]
+__all__ = ["load_template", "load_template_with_vmi"]

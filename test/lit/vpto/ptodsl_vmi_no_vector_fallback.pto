@@ -22,5 +22,5 @@ module {
   }
 }
 
-// CHECK: no PTODSL VMI candidate for target='a5', op='tmin'
-// CHECK: ExpandTileOp: failed to instantiate canonical VMI implementation for tmin
+// CHECK: --tile-lib-backend=ptodsl-vmi requires a legal VMI TileLib candidate for PIPE_V TileOp
+// CHECK: ExpandTileOp: failed to instantiate TileLib implementation for tmin

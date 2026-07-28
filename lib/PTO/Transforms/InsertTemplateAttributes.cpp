@@ -52,6 +52,7 @@ struct CandidateMetadata {
   int64_t loopDepth;
   bool postUpdate;
   bool tail;
+  SmallVector<std::string, 4> tags;
 };
 
 static std::string getDtypeString(Type elementType) {
@@ -883,6 +884,13 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
           "InsertTemplateAttributes candidate ids must be unique");
       return failure();
     }
+    SmallVector<std::string, 4> tags;
+    if (auto *tagArray = metadata->getArray("tags")) {
+      for (const auto &tagValue : *tagArray) {
+        if (auto tag = tagValue.getAsString())
+          tags.push_back(tag->str());
+      }
+    }
 
     parsedCandidates.push_back(CandidateMetadata{
         candidateId,
@@ -891,6 +899,7 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
         *loopDepth,
         *postUpdate,
         *tail,
+        std::move(tags),
     });
   }
 
@@ -918,6 +927,11 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
   SmallVector<Attribute> attributes;
   attributes.reserve(parsedCandidates.size());
   for (const CandidateMetadata &candidate : parsedCandidates) {
+    SmallVector<Attribute> tagAttrs;
+    tagAttrs.reserve(candidate.tags.size());
+    for (const std::string &tag : candidate.tags)
+      tagAttrs.push_back(builder.getStringAttr(tag));
+
     attributes.push_back(DictionaryAttr::get(
         operation->getContext(),
         {
@@ -932,6 +946,7 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
                 builder.getI64IntegerAttr(candidate.postUpdate ? 1 : 0)),
             builder.getNamedAttr(
                 "tail", builder.getI64IntegerAttr(candidate.tail ? 1 : 0)),
+            builder.getNamedAttr("tags", builder.getArrayAttr(tagAttrs)),
         }));
   }
   return builder.getArrayAttr(attributes);
