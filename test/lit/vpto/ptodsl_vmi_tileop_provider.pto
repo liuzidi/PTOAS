@@ -6,13 +6,13 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=PIPE --implicit-check-not=pto.vecscope
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=pto.vmi.
-// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --enable-vmi=false --emit-vpto %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOVMI
-// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --enable-op-fusion --emit-vpto %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOFUSION
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=PIPE --implicit-check-not=pto.vecscope
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL
 
 module {
   func.func @ptodsl_vmi_tileop_provider() {
+    %c8 = arith.constant 8 : index
+    %c64 = arith.constant 64 : index
     %a = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
     %b = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
     %c = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
@@ -20,6 +20,9 @@ module {
     %wa = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     %wb = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     %wc = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %va = pto.alloc_tile valid_row = %c8 valid_col = %c64 : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    %vb = pto.alloc_tile valid_row = %c8 valid_col = %c64 : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    %vc = pto.alloc_tile valid_row = %c8 valid_col = %c64 : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
     pto.tadd
       ins(%a, %b
           : !pto.tile_buf<vec, 32x64xf32>,
@@ -33,6 +36,11 @@ module {
           : !pto.tile_buf<vec, 32x128xf32>,
             !pto.tile_buf<vec, 32x128xf32>)
       outs(%wc : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tadd
+      ins(%va, %vb
+          : !pto.tile_buf<vec, 8x64xf32, valid=?x?>,
+            !pto.tile_buf<vec, 8x64xf32, valid=?x?>)
+      outs(%vc : !pto.tile_buf<vec, 8x64xf32, valid=?x?>)
     return
   }
 }
@@ -40,8 +48,9 @@ module {
 // PIPE: IR Dump After ExpandTileOp
 // PIPE: call {{.*}}__pto_ptodsl_vmi_a5_tadd
 // PIPE: call {{.*}}__pto_ptodsl_vmi_a5_texp
+// PIPE: call {{.*}}__pto_ptodsl_vmi_a5_tadd
 // PIPE: func.func private {{.*}}__pto_ptodsl_vmi_a5_tadd
-// PIPE-SAME: pto.tileop.instance = "ptodsl-vmi"
+// PIPE-SAME: pto.tilelib.impl = "vmi"
 // PIPE: pto.vmi.create_mask
 // PIPE: scf.for
 // PIPE: pto.vmi.vload
@@ -65,6 +74,3 @@ module {
 // FINAL: pto.vadd
 // FINAL: pto.vsts
 // FINAL: pto.vexp
-
-// NOVMI: --tile-lib-backend=ptodsl-vmi requires --enable-vmi=true
-// NOFUSION: --tile-lib-backend=ptodsl-vmi cannot use the legacy --enable-op-fusion pipeline

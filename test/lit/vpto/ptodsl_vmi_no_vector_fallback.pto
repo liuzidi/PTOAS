@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: not ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl-vmi --emit-vpto %s -o /dev/null 2>&1 | FileCheck %s
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=PIPE --implicit-check-not=__pto_ptodsl_vmi
 
 module {
   func.func @ptodsl_vmi_no_vector_fallback() {
@@ -22,5 +22,9 @@ module {
   }
 }
 
-// CHECK: --tile-lib-backend=ptodsl-vmi requires a legal VMI TileLib candidate for PIPE_V TileOp
-// CHECK: ExpandTileOp: failed to instantiate TileLib implementation for tmin
+// PIPE: IR Dump After ExpandTileOp
+// PIPE: pto.vmi.fusion.boundary = "local"
+// PIPE: IR Dump After PTOInlineLibCall
+// PIPE: func.func @ptodsl_vmi_no_vector_fallback
+// PIPE: pto.vmi.fusion.boundary = "local"
+// PIPE: pto.vmin

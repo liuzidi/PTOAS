@@ -222,6 +222,44 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
   return false;
 }
 
+static bool resolveStaticTileValidShape(Value value,
+                                        SmallVectorImpl<int64_t> &validShape) {
+  Value validRow;
+  Value validCol;
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+
+  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
+    validRow = alloc.getValidRow();
+    validCol = alloc.getValidCol();
+  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
+    validRow = materialize.getValidRow();
+    validCol = materialize.getValidCol();
+  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
+    validRow = subview.getValidRow();
+    validCol = subview.getValidCol();
+  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
+    validRow = popAic.getValidRow();
+    validCol = popAic.getValidCol();
+  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
+    validRow = popAiv.getValidRow();
+    validCol = popAiv.getValidCol();
+  }
+
+  if (!validRow || !validCol)
+    return false;
+
+  int64_t row = ShapedType::kDynamic;
+  int64_t col = ShapedType::kDynamic;
+  if (!getStaticIntFromValue(validRow, row) ||
+      !getStaticIntFromValue(validCol, col))
+    return false;
+
+  validShape.assign({row, col});
+  return true;
+}
+
 static int64_t getStaticIntOrDynamic(OpFoldResult value) {
   if (isa<Attribute>(value)) {
     Attribute attr = cast<Attribute>(value);
@@ -616,15 +654,26 @@ static std::string buildContextAttrsJson(Operation *operation) {
   return json;
 }
 
-static void appendTileOperandSpecJson(std::string &json,
+static void appendTileOperandSpecJson(std::string &json, Value operand,
                                       pto::TileBufType tileType) {
   std::string dtype = getDtypeString(tileType.getElementType());
   json += "{\"kind\":\"tile\",\"dtype\":\"" + dtype + "\",\"shape\":";
   appendJsonIntArray(json, tileType.getShape());
   json += ",\"valid_shape\":";
   auto validShape = tileType.getValidShape();
-  appendJsonIntArray(json, validShape.empty() ? tileType.getShape()
-                                              : validShape);
+  SmallVector<int64_t, 2> resolvedValidShape;
+  if (validShape.empty()) {
+    resolvedValidShape.assign(tileType.getShape().begin(),
+                              tileType.getShape().end());
+  } else {
+    resolvedValidShape.assign(validShape.begin(), validShape.end());
+  }
+  if (llvm::any_of(resolvedValidShape, ShapedType::isDynamic)) {
+    SmallVector<int64_t, 2> producerValidShape;
+    if (resolveStaticTileValidShape(operand, producerValidShape))
+      resolvedValidShape = std::move(producerValidShape);
+  }
+  appendJsonDimArray(json, resolvedValidShape);
   json += ",\"memory_space\":\"";
   json += getMemorySpaceString(tileType);
 
@@ -750,7 +799,7 @@ buildOperandSpecsJson(Operation *operation) {
             "InsertTemplateAttributes encountered an unsupported tile dtype");
         return std::nullopt;
       }
-      appendTileOperandSpecJson(json, tileType);
+      appendTileOperandSpecJson(json, operand, tileType);
       continue;
     }
 
