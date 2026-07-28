@@ -26,6 +26,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tcolexpandsub", name="vmi_tcolexpandsub")
+@canonical_vmi_template(
+    target="a5",
+    op="tcolexpandsub",
+    name="vmi_tcolexpandsub",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_tcolexpandsub(src: pto.Tile, col_values: pto.Tile, dst: pto.Tile):
     emit_col_expand_binary_vmi(src, col_values, dst, binop="sub")

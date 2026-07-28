@@ -26,6 +26,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="trowmax", name="vmi_trowmax")
+@canonical_vmi_template(
+    target="a5",
+    op="trowmax",
+    name="vmi_trowmax",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_trowmax(src: pto.Tile, workspace: pto.Tile, dst: pto.Tile):
     emit_row_reduce_vmi(src, workspace, dst, kind="max")

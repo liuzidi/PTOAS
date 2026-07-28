@@ -218,6 +218,24 @@ def check_provider_helper() -> None:
     expect("pto.vmi.vadd" in text, "provider helper should instantiate the tadd VMI candidate")
     expect(text.count("scf.for") == 1, "provider helper should preserve one logical-block loop")
 
+    f16_tile_spec = {
+        **raw_tile_spec,
+        "dtype": "f16",
+        "shape": [32, 128],
+        "valid_shape": [32, 128],
+    }
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tadd",
+            operand_specs=[f16_tile_spec, f16_tile_spec, f16_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ),
+        LookupError,
+        "no legal PTODSL VMI candidate",
+    )
+
     exp_artifact = instantiate_candidate(
         target="a5",
         op_name="pto.texp",

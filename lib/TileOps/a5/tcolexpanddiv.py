@@ -113,6 +113,7 @@ from ._vmi_common import (  # noqa: E402
     target="a5",
     op="tcolexpanddiv",
     name="vmi_tcolexpanddiv",
+    dtypes=(("f32", "f32", "f32"),),
     # ExpandTileOp::appendOpContextAttrs unconditionally adds a `precisionType`
     # context attr to TColExpandDivOp (even when default), and validate_context_attrs
     # rejects attrs the candidate did not declare, so the candidate declares it.

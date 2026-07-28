@@ -5081,11 +5081,6 @@ def mte_store(
     l2_cache="nmfv",
 ):
     """Ptr-based UB->GM DMA wrapper aligned with the underlying ``pto.dma_store`` surface."""
-    if l2_cache != "nmfv":
-        raise NotImplementedError(
-            "pto.mte_store(...) non-default l2_cache requires MteUbGmOp "
-            "Python binding support for the optional l2_cache_ctl operand"
-        )
     n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
         "nburst",
         nburst,
@@ -5105,6 +5100,10 @@ def mte_store(
         loop_counts,
         loop_src_strides,
         loop_dst_strides,
+        l2_cache_ctl=_coerce_i64(
+            _normalize_mte_store_l2_cache(l2_cache, context="mte_store(...) l2_cache"),
+            context="mte_store l2 cache control",
+        ),
     )
 
 
@@ -5236,11 +5235,6 @@ def mte_ub_gm(
     l2_cache="nmfv",
 ):
     """``pto.mte_ub_gm`` – grouped UB-to-GM DMA surface."""
-    if l2_cache != "nmfv":
-        raise NotImplementedError(
-            "pto.mte_ub_gm(...) non-default l2_cache requires MteUbGmOp "
-            "Python binding support for the optional l2_cache_ctl operand"
-        )
     n_burst, nburst_src_stride, nburst_dst_stride = _normalize_dma_group(
         "nburst",
         nburst,
@@ -5260,6 +5254,10 @@ def mte_ub_gm(
         loop_counts,
         loop_src_strides,
         loop_dst_strides,
+        l2_cache_ctl=_coerce_i64(
+            _normalize_mte_store_l2_cache(l2_cache, context="mte_ub_gm(...) l2_cache"),
+            context="mte_ub_gm l2 cache control",
+        ),
     )
 
 

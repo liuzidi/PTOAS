@@ -44,6 +44,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tmax", name="vmi_tmax")
+@canonical_vmi_template(
+    target="a5",
+    op="tmax",
+    name="vmi_tmax",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_tmax(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
     emit_elementwise_vmi(dst, (src0, src1), _vmi_max)

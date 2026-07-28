@@ -40,7 +40,12 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tmaxs", name="vmi_tmaxs")
+@canonical_vmi_template(
+    target="a5",
+    op="tmaxs",
+    name="vmi_tmaxs",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_tmaxs(src: pto.Tile, scalar: f32, dst: pto.Tile):
     emit_elementwise_vmi(
         dst,

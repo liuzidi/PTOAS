@@ -30,6 +30,7 @@ from ._vmi_common import (  # noqa: E402
     target="a5",
     op="trowexpandsub",
     name="vmi_trowexpandsub",
+    dtypes=(("f32", "f32", "f32"),),
 )
 def vmi_trowexpandsub(src: pto.Tile, row_values: pto.Tile, dst: pto.Tile):
     emit_row_expand_sub_vmi(src, row_values, dst)

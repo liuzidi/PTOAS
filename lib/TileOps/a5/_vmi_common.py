@@ -501,6 +501,7 @@ def canonical_vmi_template(
     target: str = "a5",
     op: str,
     name: str | None = None,
+    dtypes: tuple | list = (),
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
 ):
@@ -513,6 +514,7 @@ def canonical_vmi_template(
             op=qualified_op,
             name=name,
             ir_level="vmi",
+            dtypes=dtypes,
             context_constraints=context_constraints,
             constraints=tuple(constraints),
         )(fn)

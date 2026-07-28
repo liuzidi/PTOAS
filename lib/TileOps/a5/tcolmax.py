@@ -36,6 +36,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tcolmax", name="vmi_tcolmax")
+@canonical_vmi_template(
+    target="a5",
+    op="tcolmax",
+    name="vmi_tcolmax",
+    dtypes=(("f32", "f32"),),
+)
 def vmi_tcolmax(src: pto.Tile, dst: pto.Tile):
     emit_col_reduce_vmi(src, dst, kind="max")

@@ -122,7 +122,7 @@ def _parse_parameter_spec(raw: dict, index: int):
 def _parse_legality_parameter_spec(raw: dict, index: int):
     parsed = _parse_parameter_spec(raw, index)
     if raw.get("kind") == "scalar":
-        return ScalarSpec(MetadataScalarType(parsed.name), raw.get("scalar_value"))
+        return ScalarSpec(MetadataScalarType(parsed.name), raw.get("value"))
     return parsed
 
 

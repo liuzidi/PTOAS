@@ -20,6 +20,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="trowsum", name="vmi_trowsum")
+@canonical_vmi_template(
+    target="a5",
+    op="trowsum",
+    name="vmi_trowsum",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_trowsum(src: Tile, workspace: Tile, dst: Tile):
     emit_row_reduce_vmi(src, workspace, dst, kind="sum")

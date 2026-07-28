@@ -13,11 +13,19 @@ module {
     %lhs = pto.alloc_tile : !pto.tile_buf<vec, 1x64xf32>
     %rhs = pto.alloc_tile : !pto.tile_buf<vec, 1x64xf32>
     %dst = pto.alloc_tile : !pto.tile_buf<vec, 1x64xf32>
+    %lhs_f16 = pto.alloc_tile : !pto.tile_buf<vec, 1x128xf16>
+    %rhs_f16 = pto.alloc_tile : !pto.tile_buf<vec, 1x128xf16>
+    %dst_f16 = pto.alloc_tile : !pto.tile_buf<vec, 1x128xf16>
     pto.tmin
       ins(%lhs, %rhs
           : !pto.tile_buf<vec, 1x64xf32>,
             !pto.tile_buf<vec, 1x64xf32>)
       outs(%dst : !pto.tile_buf<vec, 1x64xf32>)
+    pto.tadd
+      ins(%lhs_f16, %rhs_f16
+          : !pto.tile_buf<vec, 1x128xf16>,
+            !pto.tile_buf<vec, 1x128xf16>)
+      outs(%dst_f16 : !pto.tile_buf<vec, 1x128xf16>)
     return
   }
 }
@@ -28,3 +36,4 @@ module {
 // PIPE: func.func @ptodsl_vmi_no_vector_fallback
 // PIPE: pto.vmi.fusion.boundary = "local"
 // PIPE: pto.vmin
+// PIPE: pto.vadd

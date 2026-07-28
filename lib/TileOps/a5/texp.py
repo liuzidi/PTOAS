@@ -46,6 +46,7 @@ from ._vmi_common import (  # noqa: E402
     target="a5",
     op="texp",
     name="vmi_texp_block64",
+    dtypes=(("f32", "f32"),),
     context_constraints={"precisionType": ("default",)},
 )
 def vmi_texp_block64(src: pto.Tile, dst: pto.Tile):

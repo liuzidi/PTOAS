@@ -66,6 +66,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tmov", name="vmi_tmov")
+@canonical_vmi_template(
+    target="a5",
+    op="tmov",
+    name="vmi_tmov",
+    dtypes=(("f32", "f32"),),
+)
 def vmi_tmov(src: pto.Tile, dst: pto.Tile):
     emit_elementwise_vmi(dst, (src,), _vmi_move)

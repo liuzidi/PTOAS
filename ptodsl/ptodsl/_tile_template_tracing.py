@@ -822,6 +822,7 @@ class TileTemplate:
     name: str
     source_label: str
     ir_level: str
+    dtypes: tuple
     context_constraints: tuple[tuple[str, tuple[object, ...]], ...]
     constraints: tuple[object, ...] = ()
 
@@ -840,6 +841,7 @@ class TileTemplate:
                 op=self.op,
                 target=self.target,
                 name=self.name,
+                dtypes=self.dtypes,
                 constraints=tuple(constraints),
                 priority=100,
                 fusible=True,
@@ -917,6 +919,7 @@ def tile_template(
     op: str,
     name: str | None = None,
     ir_level: str = "vpto",
+    dtypes: tuple | list = (),
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
 ):
@@ -939,6 +942,7 @@ def tile_template(
             name=descriptor_name,
             source_label=f"{source_path}:{fn.__name__}",
             ir_level=ir_level,
+            dtypes=tuple(tuple(signature) for signature in dtypes),
             context_constraints=normalized_context_constraints,
             constraints=tuple(constraints),
         )

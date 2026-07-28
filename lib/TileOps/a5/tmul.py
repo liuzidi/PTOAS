@@ -44,6 +44,11 @@ from ._vmi_common import (  # noqa: E402
 )
 
 
-@canonical_vmi_template(target="a5", op="tmul", name="vmi_tmul")
+@canonical_vmi_template(
+    target="a5",
+    op="tmul",
+    name="vmi_tmul",
+    dtypes=(("f32", "f32", "f32"),),
+)
 def vmi_tmul(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
     emit_elementwise_vmi(dst, (src0, src1), _vmi_mul)
