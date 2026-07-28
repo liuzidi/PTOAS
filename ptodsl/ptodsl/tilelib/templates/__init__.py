@@ -17,11 +17,31 @@ from .._template_package import load_template as _load_template, tileops_package
 
 
 _VMI_TEMPLATE_OPS = {
-    "pto.tadd", "pto.tadds", "pto.tcvt", "pto.tcolmax", "pto.tcolsum",
-    "pto.tcolexpandadd", "pto.tcolexpanddiv", "pto.tcolexpandmul",
-    "pto.tcolexpandsub", "pto.tdivs", "pto.texp", "pto.tmax", "pto.tmaxs",
-    "pto.tmins", "pto.tmov", "pto.tmul", "pto.tmuls", "pto.trowexpandsub",
-    "pto.trowmax", "pto.trowsum", "pto.tsub",
+    "pto.tadd",
+    "pto.tadds",
+    "pto.tcvt",
+    "pto.tcolmax",
+    "pto.tcolsum",
+    "pto.tcolexpandadd",
+    "pto.tcolexpanddiv",
+    "pto.tcolexpandmul",
+    "pto.tcolexpandsub",
+    "pto.tdivs",
+    "pto.tdiv",
+    "pto.texp",
+    "pto.trecip",
+    "pto.trsqrt",
+    "pto.tsqrt",
+    "pto.tmax",
+    "pto.tmaxs",
+    "pto.tmins",
+    "pto.tmov",
+    "pto.tmul",
+    "pto.tmuls",
+    "pto.trowexpandsub",
+    "pto.trowmax",
+    "pto.trowsum",
+    "pto.tsub",
 }
 
 
@@ -31,7 +51,7 @@ def load_template(op: str, target: str) -> bool:
 
     loaded = _load_template(op, target)
     if target == "a5" and op in _VMI_TEMPLATE_OPS:
-        import_module("ptodsl.vmi_tilelib")
+        import_module("lib.TileOps.a5.vmi")
         loaded = True
     return loaded
 

@@ -436,6 +436,7 @@ class _TraceBuilder(TracingRuntime):
         self,
         descriptor: "TileTemplate",
         parameter_specs: dict[str, TileSpec | ScalarType],
+        context_attrs: dict[str, object] | None = None,
     ):
         is_vmi = descriptor.ir_level == "vmi"
         super().__init__(
@@ -457,6 +458,7 @@ class _TraceBuilder(TracingRuntime):
             )
         )
         self.descriptor = descriptor
+        self.context_attrs = dict(context_attrs or {})
         self.parameter_specs = parameter_specs
         self.tile_specs = {
             name: spec
@@ -820,6 +822,7 @@ class TileTemplate:
     source_label: str
     ir_level: str
     context_constraints: tuple[tuple[str, tuple[object, ...]], ...]
+    constraints: tuple[object, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:
@@ -828,15 +831,15 @@ class TileTemplate:
     @property
     def metadata(self):
         if self.ir_level == "vmi":
+            constraints = []
+            if self.context_constraints:
+                constraints.append(self._context_constraints_match)
+            constraints.extend(self.constraints)
             return _RegistryTemplateMetadata.build(
                 op=self.op,
                 target=self.target,
                 name=self.name,
-                constraints=(
-                    (self._context_constraints_match,)
-                    if self.context_constraints
-                    else ()
-                ),
+                constraints=tuple(constraints),
                 priority=100,
                 fusible=True,
                 loop_depth=1,
@@ -883,7 +886,7 @@ class TileTemplate:
             name: _coerce_parameter_spec(spec)
             for name, spec in parameter_specs.items()
         }
-        return SpecializedTileTemplate(self, converted_specs)
+        return SpecializedTileTemplate(self, converted_specs, context_attrs)
 
 
 class SpecializedTileTemplate(ModuleArtifact):
@@ -891,13 +894,17 @@ class SpecializedTileTemplate(ModuleArtifact):
         self,
         descriptor: TileTemplate,
         parameter_specs: dict[str, TileSpec | ScalarType],
+        context_attrs: dict[str, object] | None = None,
     ):
         super().__init__(
             descriptor.name,
-            module_factory=lambda: _TraceBuilder(descriptor, parameter_specs).build_module(),
+            module_factory=lambda: _TraceBuilder(
+                descriptor, parameter_specs, context_attrs
+            ).build_module(),
         )
         self.descriptor = descriptor
         self.parameter_specs = parameter_specs
+        self.context_attrs = dict(context_attrs or {})
         self.tile_specs = {
             name: spec for name, spec in parameter_specs.items() if isinstance(spec, TileSpec)
         }
@@ -910,6 +917,7 @@ def tile_template(
     name: str | None = None,
     ir_level: str = "vpto",
     context_constraints: dict[str, tuple[object, ...]] | None = None,
+    constraints: tuple[object, ...] | list[object] = (),
 ):
     if target != "a5":
         raise ValueError("tile-template tracing currently only supports target='a5'")
@@ -931,6 +939,7 @@ def tile_template(
             source_label=f"{source_path}:{fn.__name__}",
             ir_level=ir_level,
             context_constraints=normalized_context_constraints,
+            constraints=tuple(constraints),
         )
 
     return decorator

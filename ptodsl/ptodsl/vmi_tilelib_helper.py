@@ -24,6 +24,8 @@ from ._tile_template_tracing import (
     i32,
 )
 from .tilelib import registry as _tilelib_registry
+from .tilelib import constraints as _tilelib_constraints
+from .tilelib.metadata import ScalarSpec, ScalarType as MetadataScalarType
 from .tilelib.registry import TileTemplateRegistry
 
 
@@ -117,6 +119,13 @@ def _parse_parameter_spec(raw: dict, index: int):
     return TileSpec(parsed_shape, dtype, memory_space="ub", b_layout=b_layout)
 
 
+def _parse_legality_parameter_spec(raw: dict, index: int):
+    parsed = _parse_parameter_spec(raw, index)
+    if raw.get("kind") == "scalar":
+        return ScalarSpec(MetadataScalarType(parsed.name), raw.get("scalar_value"))
+    return parsed
+
+
 def _parse_tile_config(config: object, index: int) -> str:
     if config is None:
         return "row_major"
@@ -158,7 +167,8 @@ def _find_candidates(module, *, target: str, op_name: str) -> list:
     # candidates do not hide provider-specific ambiguity.
     legacy_registry = getattr(module, "VMI_TILELIB_REGISTRY", None)
     if (
-        module.__name__ != "ptodsl.vmi_tilelib"
+        module.__name__
+        not in {"ptodsl.vmi_tilelib", "ptodsl.tilelib.templates.a5.vmi"}
         and isinstance(legacy_registry, TileTemplateRegistry)
     ):
         normalized_op = _normalize_op_name(op_name)
@@ -200,25 +210,57 @@ def instantiate_candidate(
             f"no PTODSL VMI candidate for target={target!r}, op={qualified_op!r} "
             f"in module {provider_module!r}"
         )
-    if len(candidates) != 1:
-        names = ", ".join(candidate.name for candidate in candidates)
+
+    legal = []
+    rejected = []
+    for candidate in candidates:
+        parameters = tuple(candidate.param_names)
+        if len(parameters) != len(operand_specs):
+            rejected.append(
+                f"{candidate.name}: expects {len(parameters)} operands, "
+                f"got {len(operand_specs)}"
+            )
+            continue
+        render_specs = {
+            name: _parse_parameter_spec(raw_spec, index)
+            for index, (name, raw_spec) in enumerate(zip(parameters, operand_specs))
+        }
+        legality_specs = {
+            name: _parse_legality_parameter_spec(raw_spec, index)
+            for index, (name, raw_spec) in enumerate(zip(parameters, operand_specs))
+        }
+        result = _tilelib_constraints.evaluate_candidate(
+            candidate,
+            legality_specs,
+            target,
+            qualified_op,
+            context_attrs,
+        )
+        if result.legal:
+            legal.append((candidate, render_specs))
+        else:
+            rejected.append(f"{candidate.name}: {result.reason}")
+
+    if not legal:
+        reasons = "; ".join(rejected)
+        raise LookupError(
+            f"no legal PTODSL VMI candidate for target={target!r}, "
+            f"op={qualified_op!r} in module {provider_module!r}; {reasons}"
+        )
+
+    legal.sort(key=lambda item: item[0].metadata.priority, reverse=True)
+    top_priority = legal[0][0].metadata.priority
+    winners = [item for item in legal if item[0].metadata.priority == top_priority]
+    if len(winners) != 1:
+        names = ", ".join(candidate.name for candidate, _ in winners)
         raise LookupError(
             "RFC-mode PTODSL VMI provider requires exactly one canonical "
             f"candidate per (target, op); target={target!r}, op={qualified_op!r}, "
-            f"found {len(candidates)} in module {provider_module!r}: {names}"
+            f"found {len(winners)} legal top-priority candidates in module "
+            f"{provider_module!r}: {names}"
         )
 
-    candidate = candidates[0]
-    parameters = tuple(candidate.param_names)
-    if len(parameters) != len(operand_specs):
-        raise ValueError(
-            f"candidate {candidate.name!r} expects {len(parameters)} operands, "
-            f"got {len(operand_specs)}"
-        )
-    parameter_specs = {
-        name: _parse_parameter_spec(raw_spec, index)
-        for index, (name, raw_spec) in enumerate(zip(parameters, operand_specs))
-    }
+    candidate, parameter_specs = winners[0]
     return candidate.specialize(
         context_attrs=context_attrs or {},
         **parameter_specs,
@@ -231,7 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--op", required=True)
     parser.add_argument("--operand-specs", required=True)
     parser.add_argument("--context-attrs")
-    parser.add_argument("--provider-module", default="ptodsl.vmi_tilelib")
+    parser.add_argument(
+        "--provider-module", default="ptodsl.tilelib.templates.a5.vmi"
+    )
     parser.add_argument(
         "--metadata-only",
         action="store_true",
