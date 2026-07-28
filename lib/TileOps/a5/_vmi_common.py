@@ -531,12 +531,12 @@ def emit_elementwise_vmi(
     logical_lanes: int | None = None,
     allowed_dtypes: Sequence[ScalarType] = (f32,),
 ) -> None:
-    """Emit one flat logical-block loop for a standalone elementwise candidate."""
+    """Emit one flat logical-row loop for a standalone elementwise candidate."""
 
     if not sources:
         raise ValueError("emit_elementwise_vmi requires at least one source tile")
     if logical_lanes is None:
-        logical_lanes = dst.element_type.lanes
+        logical_lanes = dst._spec.shape[1]
     _validate_elementwise_tiles(
         dst,
         sources,
@@ -568,8 +568,6 @@ def _validate_elementwise_tiles(
             "VMI elementwise candidate dtype is not supported; "
             f"got {dst.element_type}, expected one of {tuple(allowed_dtypes)}"
         )
-    if logical_lanes != dst.element_type.lanes:
-        raise ValueError("VMI elementwise candidates require exactly one native VL per row")
     if dst._spec.b_layout != "row_major":
         raise ValueError("VMI elementwise candidates require row-major tiles")
     for source in sources:

@@ -17,6 +17,9 @@ module {
     %b = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
     %c = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
     %d = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
+    %wa = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %wb = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %wc = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
     pto.tadd
       ins(%a, %b
           : !pto.tile_buf<vec, 32x64xf32>,
@@ -25,6 +28,11 @@ module {
     pto.texp
       ins(%c : !pto.tile_buf<vec, 32x64xf32>)
       outs(%d : !pto.tile_buf<vec, 32x64xf32>)
+    pto.tadd
+      ins(%wa, %wb
+          : !pto.tile_buf<vec, 32x128xf32>,
+            !pto.tile_buf<vec, 32x128xf32>)
+      outs(%wc : !pto.tile_buf<vec, 32x128xf32>)
     return
   }
 }
@@ -41,6 +49,8 @@ module {
 // PIPE: pto.vmi.vstore
 // PIPE: func.func private {{.*}}__pto_ptodsl_vmi_a5_texp
 // PIPE: pto.vmi.vexp
+// PIPE: !pto.vmi.vreg<128xf32>
+// PIPE: !pto.vmi.mask<128xpred>
 // PIPE: IR Dump After PTOInlineLibCall
 // PIPE: func.func @ptodsl_vmi_tileop_provider
 // PIPE: pto.vmi.create_mask

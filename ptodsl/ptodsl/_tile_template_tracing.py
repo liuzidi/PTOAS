@@ -169,9 +169,10 @@ class _TileSlice:
 class CanonicalBlockMap:
     """Static mapping contract for one logical block per tile row.
 
-    The canonical VMI Fusion contract requires the physical inner tile extent
-    to equal the candidate's logical lane count. Dynamic valid lanes may later
-    mask a tail inside that block, but a row never contains multiple blocks.
+    The canonical VMI Fusion contract maps one logical row to one logical VMI
+    block. The logical lane count is therefore the tile's inner width, not the
+    dtype's native physical VL. Physical chunking is left to later VMI layout
+    and VMI-to-VPTO lowering passes.
     """
 
     shape: tuple[int, int]
@@ -195,7 +196,7 @@ class CanonicalBlockMap:
     def from_tile(cls, tile: "_TileProxy", *, logical_lanes: int | None = None):
         if not isinstance(tile, _TileProxy):
             raise TypeError("CanonicalBlockMap.from_tile(...) expects a traced Tile argument")
-        lanes = tile.element_type.lanes if logical_lanes is None else logical_lanes
+        lanes = tile._spec.shape[1] if logical_lanes is None else logical_lanes
         return cls(tile._spec.shape, lanes)
 
     @property
