@@ -35,3 +35,15 @@ template_tsub_1d = register_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _sub as _vmi_sub,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+)
+
+
+@canonical_vmi_template(target="a5", op="tsub", name="vmi_tsub")
+def vmi_tsub(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
+    emit_elementwise_vmi(dst, (src0, src1), _vmi_sub)

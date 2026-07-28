@@ -144,7 +144,7 @@ def check_candidate_ir() -> tuple[str, str]:
     expect_raises(
         lambda: specialize_tadd(dtype=f16).mlir_text(),
         ValueError,
-        "require exactly one 64-lane f32 VL per row",
+        "dtype is not supported",
     )
     expect_raises(
         lambda: specialize_texp(shape=(32, 128)).mlir_text(),
@@ -278,16 +278,20 @@ def check_provider_helper() -> None:
     ).mlir_text()
     expect("pto.vmi.vbrc" in tdivs, "tdivs should broadcast its scalar operand")
     expect("pto.vmi.vdiv" in tdivs, "tdivs should lower to VMI vector divide")
-    expect_raises(
-        lambda: instantiate_candidate(
-            target="a5",
-            op_name="pto.tdivs",
-            operand_specs=[raw_tile_spec, scalar_spec, raw_tile_spec],
-            provider_module="ptodsl.vmi_tilelib",
-            context_attrs={"precisionType": "high_precision"},
-        ),
-        ValueError,
-        "does not support context attrs",
+    tdivs_hp = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdivs",
+        operand_specs=[raw_tile_spec, scalar_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "high_precision"},
+    ).mlir_text()
+    expect(
+        tdivs_hp.count("scf.for") == 1,
+        "high-precision tdivs should still emit one logical row loop",
+    )
+    expect(
+        "pto.vmi.vmula" in tdivs_hp,
+        "high-precision tdivs should lower to the VMI refinement sequence",
     )
 
     reduced_tile_spec = {
@@ -326,16 +330,24 @@ def check_provider_helper() -> None:
     ).mlir_text()
     expect("pto.vmi.vcvt" in tcvt, "tcvt should lower to VMI conversion")
 
-    expect_raises(
-        lambda: instantiate_candidate(
-            target="a5",
-            op_name="pto.tdiv",
-            operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
-            provider_module="ptodsl.vmi_tilelib",
-            context_attrs={},
-        ),
-        LookupError,
-        "no PTODSL VMI candidate",
+    tdiv = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdiv",
+        operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "default"},
+    ).mlir_text()
+    expect("pto.vmi.vdiv" in tdiv, "default tdiv should lower to VMI vector divide")
+    tdiv_hp = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdiv",
+        operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "high_precision"},
+    ).mlir_text()
+    expect(
+        "pto.vmi.vmula" in tdiv_hp,
+        "high-precision tdiv should lower to the VMI refinement sequence",
     )
     expect_raises(
         lambda: instantiate_candidate(
@@ -345,8 +357,8 @@ def check_provider_helper() -> None:
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={"precisionType": "high"},
         ),
-        ValueError,
-        "does not support context attrs",
+        LookupError,
+        "no legal PTODSL VMI candidate",
     )
 
     duplicate_module = ModuleType("ptodsl_test_duplicate_vmi_candidates")
@@ -458,7 +470,7 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={},
         ),
-        ValueError,
+        LookupError,
         "expects 2 operands, got 3",
     )
     return colmax, colsum, reduced_col_spec

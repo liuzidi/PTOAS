@@ -30,3 +30,20 @@ template_tmins_1d = register_scalar_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _vmins as _vmi_vmins,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+)
+
+
+@canonical_vmi_template(target="a5", op="tmins", name="vmi_tmins")
+def vmi_tmins(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vmins(values[0], scalar, mask),
+    )

@@ -5,11 +5,12 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""Canonical VMI TileLib candidates for static Softmax-related coverage.
+"""Shared helpers for A5 VMI TileLib candidates.
 
-The candidates in this module are registered into the ordinary PTODSL TileLib
-registry as ``ir_level="vmi"`` candidates.  ``VMI_TILELIB_REGISTRY`` is kept as
-a compatibility view for direct unit tests and the legacy helper path.
+Per-op VMI candidates live next to the ordinary A5 TileLib template for the
+same TileOp (for example ``tadd.py`` owns both the normal and VMI ``tadd``
+candidates).  This module only contains common emitters, legality helpers, and
+algorithm fragments reused by those per-op candidates.
 """
 
 from __future__ import annotations
@@ -1479,304 +1480,38 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
         _vstore(converted, dst, coordinate, dst_mask)
 
 
-@canonical_vmi_template(
-    target="a5",
-    op="tadd",
-    name="vmi_tadd_block64",
-)
-def vmi_tadd_block64(src0: Tile, src1: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src0, src1), _add)
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="texp",
-    name="vmi_texp_block64",
-    context_constraints={"precisionType": ("default",)},
-)
-def vmi_texp_block64(src: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src,), _exp)
-
-
-@canonical_vmi_template(target="a5", op="tsub", name="vmi_tsub")
-def vmi_tsub(src0: Tile, src1: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src0, src1), _sub)
-
-
-@canonical_vmi_template(target="a5", op="tmul", name="vmi_tmul")
-def vmi_tmul(src0: Tile, src1: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src0, src1), _mul)
-
-
-@canonical_vmi_template(target="a5", op="tmax", name="vmi_tmax")
-def vmi_tmax(src0: Tile, src1: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src0, src1), _max)
-
-
-@canonical_vmi_template(target="a5", op="tmov", name="vmi_tmov")
-def vmi_tmov(src: Tile, dst: Tile):
-    emit_elementwise_vmi(dst, (src,), _move)
-
-
-@canonical_vmi_template(target="a5", op="tmuls", name="vmi_tmuls")
-def vmi_tmuls(src: Tile, scale: f32, dst: Tile):
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _vmuls(values[0], scale, mask),
-    )
-
-
-@canonical_vmi_template(target="a5", op="tadds", name="vmi_tadds")
-def vmi_tadds(src: Tile, scalar: f32, dst: Tile):
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _vadds(values[0], scalar, mask),
-    )
-
-
-@canonical_vmi_template(target="a5", op="tmaxs", name="vmi_tmaxs")
-def vmi_tmaxs(src: Tile, scalar: f32, dst: Tile):
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _vmaxs(values[0], scalar, mask),
-    )
-
-
-@canonical_vmi_template(target="a5", op="tmins", name="vmi_tmins")
-def vmi_tmins(src: Tile, scalar: f32, dst: Tile):
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _vmins(values[0], scalar, mask),
-    )
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tdivs",
-    name="vmi_tdivs",
-    context_constraints={"precisionType": ("default", "high_precision")},
-    constraints=(_operand_kinds_are(("tile", "scalar", "tile")),),
-)
-def vmi_tdivs(src: Tile, scalar: f32, dst: Tile):
-    if _context_attr(src, "precisionType", "default") == "high_precision":
-        emit_elementwise_vmi(
-            dst,
-            (src,),
-            lambda values, mask: _divide_by_scalar_high_precision(
-                values[0], scalar, mask
-            ),
-            allowed_dtypes=FLOAT_DTYPES,
-        )
-        return
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _divide_by_scalar(values[0], scalar, mask),
-    )
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tdivs",
-    name="vmi_tdivs_scalar_tile",
-    context_constraints={"precisionType": ("default", "high_precision")},
-    constraints=(_operand_kinds_are(("scalar", "tile", "tile")),),
-)
-def vmi_tdivs_scalar_tile(scalar: f32, src: Tile, dst: Tile):
-    if _context_attr(src, "precisionType", "default") == "high_precision":
-        emit_elementwise_vmi(
-            dst,
-            (src,),
-            lambda values, mask: _divide_scalar_by_vector_high_precision(
-                scalar, values[0], mask
-            ),
-            allowed_dtypes=FLOAT_DTYPES,
-        )
-        return
-    emit_elementwise_vmi(
-        dst,
-        (src,),
-        lambda values, mask: _divide_scalar_by_vector(scalar, values[0], mask),
-    )
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tdiv",
-    name="vmi_tdiv",
-    context_constraints={"precisionType": ("default", "high_precision")},
-)
-def vmi_tdiv(src0: Tile, src1: Tile, dst: Tile):
-    if _context_attr(src0, "precisionType", "default") == "high_precision":
-        emit_elementwise_vmi(
-            dst,
-            (src0, src1),
-            lambda values, mask: _div_high_precision(values[0], values[1], mask),
-            allowed_dtypes=FLOAT_DTYPES,
-        )
-        return
-    emit_elementwise_vmi(
-        dst,
-        (src0, src1),
-        lambda values, mask: _vdiv(values[0], values[1], mask),
-        allowed_dtypes=FLOAT_DTYPES,
-    )
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="trecip",
-    name="vmi_trecip",
-    context_constraints={"precisionType": ("default", "high_precision")},
-)
-def vmi_trecip(src: Tile, dst: Tile):
-    emit_recip_vmi(
-        src,
-        dst,
-        high_precision=_context_attr(src, "precisionType", "default")
-        == "high_precision",
-    )
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tsqrt",
-    name="vmi_tsqrt",
-    context_constraints={"precisionType": ("default", "high_precision")},
-)
-def vmi_tsqrt(src: Tile, dst: Tile):
-    if _context_attr(src, "precisionType", "default") == "high_precision":
-        emit_sqrt_high_precision_vmi(src, dst)
-        return
-    emit_sqrt_vmi(src, dst)
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="trsqrt",
-    name="vmi_trsqrt",
-    context_constraints={"precisionType": ("default",)},
-)
-def vmi_trsqrt(src: Tile, dst: Tile):
-    emit_rsqrt_vmi(src, dst, high_precision=False)
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="trsqrt",
-    name="vmi_trsqrt_with_tmp",
-    context_constraints={"precisionType": ("default", "high_precision")},
-)
-def vmi_trsqrt_with_tmp(src: Tile, dst: Tile, tmp: Tile):
-    _ = tmp
-    emit_rsqrt_vmi(
-        src,
-        dst,
-        high_precision=_context_attr(src, "precisionType", "default")
-        == "high_precision",
-    )
-
-
-@canonical_vmi_template(target="a5", op="trowmax", name="vmi_trowmax")
-def vmi_trowmax(src: Tile, workspace: Tile, dst: Tile):
-    emit_row_reduce_vmi(src, workspace, dst, kind="max")
-
-
-@canonical_vmi_template(target="a5", op="trowsum", name="vmi_trowsum")
-def vmi_trowsum(src: Tile, workspace: Tile, dst: Tile):
-    emit_row_reduce_vmi(src, workspace, dst, kind="sum")
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="trowexpandsub",
-    name="vmi_trowexpandsub",
-)
-def vmi_trowexpandsub(src: Tile, row_values: Tile, dst: Tile):
-    emit_row_expand_sub_vmi(src, row_values, dst)
-
-
-@canonical_vmi_template(target="a5", op="tcolmax", name="vmi_tcolmax")
-def vmi_tcolmax(src: Tile, dst: Tile):
-    emit_col_reduce_vmi(src, dst, kind="max")
-
-
-@canonical_vmi_template(target="a5", op="tcolsum", name="vmi_tcolsum")
-def vmi_tcolsum(src: Tile, dst: Tile):
-    emit_col_reduce_vmi(src, dst, kind="add")
-
-
-@canonical_vmi_template(target="a5", op="tcolexpandsub", name="vmi_tcolexpandsub")
-def vmi_tcolexpandsub(src: Tile, col_values: Tile, dst: Tile):
-    emit_col_expand_binary_vmi(src, col_values, dst, binop="sub")
-
-
-@canonical_vmi_template(target="a5", op="tcolexpandadd", name="vmi_tcolexpandadd")
-def vmi_tcolexpandadd(src: Tile, col_values: Tile, dst: Tile):
-    emit_col_expand_binary_vmi(src, col_values, dst, binop="add")
-
-
-@canonical_vmi_template(target="a5", op="tcolexpandmul", name="vmi_tcolexpandmul")
-def vmi_tcolexpandmul(src: Tile, col_values: Tile, dst: Tile):
-    emit_col_expand_binary_vmi(src, col_values, dst, binop="mul")
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tcolexpanddiv",
-    name="vmi_tcolexpanddiv",
-    # ExpandTileOp::appendOpContextAttrs unconditionally adds a `precisionType`
-    # context attr to TColExpandDivOp (even when default), and validate_context_attrs
-    # rejects attrs the candidate didn't declare — so the candidate must declare it.
-    context_constraints={"precisionType": ("default",)},
-)
-def vmi_tcolexpanddiv(src: Tile, col_values: Tile, dst: Tile):
-    emit_col_expand_binary_vmi(src, col_values, dst, binop="div")
-
-
-@canonical_vmi_template(
-    target="a5",
-    op="tcvt",
-    name="vmi_tcvt",
-    context_constraints={"round_mode": ("RINT",)},
-)
-def vmi_tcvt(src: Tile, dst: Tile):
-    emit_convert_vmi(src, dst)
-
-
 __all__ = [
+    "FLOAT_DTYPES",
+    "Tile",
     "VMI_TILELIB_REGISTRY",
+    "_add",
+    "_context_attr",
+    "_divide_by_scalar",
+    "_divide_by_scalar_high_precision",
+    "_divide_scalar_by_vector",
+    "_divide_scalar_by_vector_high_precision",
+    "_div_high_precision",
+    "_exp",
+    "_max",
+    "_move",
+    "_mul",
+    "_operand_kinds_are",
+    "_sub",
+    "_vadds",
+    "_vdiv",
+    "_vmaxs",
+    "_vmins",
+    "_vmuls",
     "canonical_vmi_template",
     "emit_elementwise_vmi",
-    "vmi_tadd_block64",
-    "vmi_texp_block64",
-    "vmi_tsub",
-    "vmi_tmul",
-    "vmi_tmax",
-    "vmi_tmov",
-    "vmi_tmuls",
-    "vmi_tadds",
-    "vmi_tmaxs",
-    "vmi_tmins",
-    "vmi_tdivs",
-    "vmi_tdivs_scalar_tile",
-    "vmi_tdiv",
-    "vmi_trecip",
-    "vmi_tsqrt",
-    "vmi_trsqrt",
-    "vmi_trsqrt_with_tmp",
-    "vmi_trowmax",
-    "vmi_trowsum",
-    "vmi_trowexpandsub",
-    "vmi_tcvt",
-    "vmi_tcolmax",
-    "vmi_tcolsum",
-    "vmi_tcolexpandsub",
-    "vmi_tcolexpandadd",
-    "vmi_tcolexpandmul",
-    "vmi_tcolexpanddiv",
+    "emit_col_expand_binary_vmi",
+    "emit_col_reduce_vmi",
+    "emit_convert_vmi",
+    "emit_recip_vmi",
+    "emit_row_expand_sub_vmi",
+    "emit_row_reduce_vmi",
+    "emit_rsqrt_vmi",
+    "emit_sqrt_high_precision_vmi",
+    "emit_sqrt_vmi",
+    "f32",
 ]

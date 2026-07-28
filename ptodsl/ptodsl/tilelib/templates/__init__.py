@@ -16,43 +16,13 @@ from importlib import import_module
 from .._template_package import load_template as _load_template, tileops_package
 
 
-_VMI_TEMPLATE_OPS = {
-    "pto.tadd",
-    "pto.tadds",
-    "pto.tcvt",
-    "pto.tcolmax",
-    "pto.tcolsum",
-    "pto.tcolexpandadd",
-    "pto.tcolexpanddiv",
-    "pto.tcolexpandmul",
-    "pto.tcolexpandsub",
-    "pto.tdivs",
-    "pto.tdiv",
-    "pto.texp",
-    "pto.trecip",
-    "pto.trsqrt",
-    "pto.tsqrt",
-    "pto.tmax",
-    "pto.tmaxs",
-    "pto.tmins",
-    "pto.tmov",
-    "pto.tmul",
-    "pto.tmuls",
-    "pto.trowexpandsub",
-    "pto.trowmax",
-    "pto.trowsum",
-    "pto.tsub",
-}
-
-
 @lru_cache(maxsize=None)
 def load_template(op: str, target: str) -> bool:
     """Load the canonical TileOps template and any registered VMI provider."""
 
     loaded = _load_template(op, target)
     if target == "a5" and op in _VMI_TEMPLATE_OPS:
-        import_module("lib.TileOps.a5.vmi")
-        loaded = True
+        import_module("lib.TileOps.a5._vmi_common")
     return loaded
 
 

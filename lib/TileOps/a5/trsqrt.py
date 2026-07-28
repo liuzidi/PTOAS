@@ -129,3 +129,36 @@ def template_trsqrt_with_tmp(src: pto.Tile, dst: pto.Tile, tmp: pto.Tile):
 def template_trsqrt_high_precision(src: pto.Tile, dst: pto.Tile, tmp: pto.Tile):
     _ = tmp
     _emit_trsqrt_body(src, dst, high_precision=True)
+
+
+from ._vmi_common import (  # noqa: E402
+    _context_attr,
+    canonical_vmi_template,
+    emit_rsqrt_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="trsqrt",
+    name="vmi_trsqrt",
+    context_constraints={"precisionType": ("default",)},
+)
+def vmi_trsqrt(src: pto.Tile, dst: pto.Tile):
+    emit_rsqrt_vmi(src, dst, high_precision=False)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="trsqrt",
+    name="vmi_trsqrt_with_tmp",
+    context_constraints={"precisionType": ("default", "high_precision")},
+)
+def vmi_trsqrt_with_tmp(src: pto.Tile, dst: pto.Tile, tmp: pto.Tile):
+    _ = tmp
+    emit_rsqrt_vmi(
+        src,
+        dst,
+        high_precision=_context_attr(src, "precisionType", "default")
+        == "high_precision",
+    )

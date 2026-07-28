@@ -168,7 +168,7 @@ def _find_candidates(module, *, target: str, op_name: str) -> list:
     legacy_registry = getattr(module, "VMI_TILELIB_REGISTRY", None)
     if (
         module.__name__
-        not in {"ptodsl.vmi_tilelib", "ptodsl.tilelib.templates.a5.vmi"}
+        not in {"ptodsl.vmi_tilelib"}
         and isinstance(legacy_registry, TileTemplateRegistry)
     ):
         normalized_op = _normalize_op_name(op_name)
@@ -233,7 +233,7 @@ def instantiate_candidate(
             candidate,
             legality_specs,
             target,
-            qualified_op,
+            candidate.op,
             context_attrs,
         )
         if result.legal:
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--operand-specs", required=True)
     parser.add_argument("--context-attrs")
     parser.add_argument(
-        "--provider-module", default="ptodsl.tilelib.templates.a5.vmi"
+        "--provider-module", default="ptodsl.vmi_tilelib"
     )
     parser.add_argument(
         "--metadata-only",

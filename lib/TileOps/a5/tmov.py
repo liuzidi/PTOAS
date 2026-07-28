@@ -57,3 +57,15 @@ def template_tmov(src: pto.Tile, dst: pto.Tile):
             if str(src.dtype) != str(dst.dtype):
                 data = pto.vbitcast(data, dst.dtype)
             pto.vsts(data, dst[row, col:], mask)
+
+
+from ._vmi_common import (  # noqa: E402
+    _move as _vmi_move,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+)
+
+
+@canonical_vmi_template(target="a5", op="tmov", name="vmi_tmov")
+def vmi_tmov(src: pto.Tile, dst: pto.Tile):
+    emit_elementwise_vmi(dst, (src,), _vmi_move)

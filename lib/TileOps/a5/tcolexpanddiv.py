@@ -101,3 +101,22 @@ def template_tcolexpanddiv_i32(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
                 result = _divide_i32(lhs, rhs, mask)
             pto.vsts(result, dst[row, col:], mask)
             col_loop.update(remained=remained)
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    emit_col_expand_binary_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tcolexpanddiv",
+    name="vmi_tcolexpanddiv",
+    # ExpandTileOp::appendOpContextAttrs unconditionally adds a `precisionType`
+    # context attr to TColExpandDivOp (even when default), and validate_context_attrs
+    # rejects attrs the candidate did not declare, so the candidate declares it.
+    context_constraints={"precisionType": ("default",)},
+)
+def vmi_tcolexpanddiv(src: pto.Tile, col_values: pto.Tile, dst: pto.Tile):
+    emit_col_expand_binary_vmi(src, col_values, dst, binop="div")
