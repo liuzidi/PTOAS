@@ -7,8 +7,9 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // InsertTemplateAttributes records a compact, ordered candidate list before
-// fusion. ExpandTileOp renders the first candidate that remains.
-// Low-level pipe operations must not be mistaken for expandable TileOps.
+// fusion. The unified PTODSL backend exposes both ordinary PTODSL templates and
+// legal VMI candidates to the compiler. ExpandTileOp prefers the VMI candidate
+// for full-shape PIPE_V TileOps.
 //
 // Running without --enable-op-fusion proves metadata insertion is not gated
 // by fusion. Printing before FusionPlan proves its position when fusion is on.
@@ -18,114 +19,61 @@
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SELECT
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=EXPAND
 
-// META-LABEL: func.func @TADD
 // META: pto.tadd
-// META-SAME: candidates = [{
-// META-SAME: id = 1 : i64
-// META-SAME: loop_depth = 1 : i64
-// META-SAME: name = "template_tadd_1d"
+// META-SAME: candidates = [
+// META-SAME: id = 0 : i64
+// META-SAME: loop_depth = 2 : i64
+// META-SAME: name = "template_tadd"
 // META-SAME: postupdate = 0 : i64
-// META-SAME: tail = 0 : i64}, {
-// META-SAME: id = 0 : i64
-// META-SAME: loop_depth = 2 : i64
-// META-SAME: name = "template_tadd"
-// META-NOT: priority =
-// META-NOT: tags =
-// META-NOT: fusible =
-
-// META-LABEL: func.func @TADD_2D
-// META: pto.tadd
-// META-SAME: candidates = [{
-// META-SAME: id = 0 : i64
-// META-SAME: loop_depth = 2 : i64
-// META-SAME: name = "template_tadd"
-// META-NOT: name = "template_tadd_1d"
+// META-SAME: tags = ["elementwise", "binary"]
+// META-SAME: tail = 0 : i64}
+// META-SAME: id = 1000 : i64
+// META-SAME: loop_depth = 1 : i64
+// META-SAME: name = "vmi_tadd_block64"
+// META-SAME: tags = ["vmi", "fusion_eligible", "single_logical_row_loop"]
+// META-SAME: tail = 0 : i64}]
 
 // PREFUSION: IR Dump Before FusionPlan
 // PREFUSION: pto.tadd
 // PREFUSION-SAME: candidates = [
 
-// SELECT-COUNT-2: call @{{.*}}__template_tadd_1d(
-// SELECT-COUNT-1: call @{{.*}}__template_tadd(
-
-// SELECT-COUNT-1: func.func private @{{.*}}__template_tadd_1d(
-// SELECT: scf.for
-// SELECT-NOT: scf.for
-// SELECT: return
-
-// SELECT-COUNT-1: func.func private @{{.*}}__template_tadd(
-// SELECT: scf.for
-// SELECT: scf.for
-// SELECT-NOT: scf.for
-// SELECT: return
+// SELECT: call @{{.*}}__vmi_tadd_block64
+// SELECT-SAME: pto.tilelib.candidate = "vmi_tadd_block64"
+// SELECT-SAME: pto.tilelib.impl = "vmi"
+// SELECT: func.func private @{{.*}}__vmi_tadd_block64
+// SELECT: pto.vmi.vload
+// SELECT: pto.vmi.vadd
+// SELECT: pto.vmi.vstore
 
 // EXPAND: func.func @TADD
 // EXPAND-NOT: pto.tadd ins
 // EXPAND: pto.vecscope
 // EXPAND: pto.vadd
 // EXPAND: pto.vsts
+// EXPAND: pto.tilelib.candidate = "vmi_tadd_block64"
+// EXPAND: pto.tilelib.impl = "vmi"
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TADD() {
-    pto.set_flag[<PIPE_V>, <PIPE_MTE3>, <EVENT_ID0>]
-    pto.wait_flag[<PIPE_V>, <PIPE_MTE3>, <EVENT_ID0>]
-
     %a = pto.alloc_tile
       : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
                       blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %b = pto.alloc_tile
       : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %dst0 = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %dst1 = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
-
-    pto.tadd ins(
-      %a, %b
-        : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                        blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-          !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                        blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-      outs(
-        %dst0
-          : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                          blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-    pto.tadd ins(
-      %a, %b
-        : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                        blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-          !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                        blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-      outs(
-        %dst1
-          : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
-                          blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-    return
-  }
-
-  func.func @TADD_2D() {
-    %a = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
-                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    %b = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
                       blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %dst = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
                       blayout=row_major, slayout=none_box, fractal=512, pad=0>
 
     pto.tadd ins(
       %a, %b
-        : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
+        : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
                         blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-          !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
+          !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
                         blayout=row_major, slayout=none_box, fractal=512, pad=0>)
       outs(
         %dst
-          : !pto.tile_buf<loc=vec, dtype=f32, rows=4, cols=64, v_row=4, v_col=63,
+          : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
                           blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return
   }

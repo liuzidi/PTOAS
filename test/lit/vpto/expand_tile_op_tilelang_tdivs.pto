@@ -3,7 +3,7 @@
 // IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
 // TDIVS has a scalar operand (f32), so it uses the PTOToVPTO lowering path.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-TILE-SCALAR --check-prefix=CHECK-SCALAR-TILE
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=tilelang --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-TILE-SCALAR --check-prefix=CHECK-SCALAR-TILE
 
 // tile / scalar form:
 // CHECK-TILE-SCALAR-LABEL: func.func @TDIVS_TILE_SCALAR
