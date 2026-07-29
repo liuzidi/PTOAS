@@ -40,7 +40,7 @@ module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
 
 // CHECK-LABEL: func.func @kernel
 // CHECK: pto.tile_buf_addr
-// CHECK: pto.vadd
+// CHECK: pto.vmi.vadd
 // CHECK: call @regular_passthrough_i32
 // CHECK-NOT: call @template_tadd
 // CHECK-NOT: func.call @template_tadd

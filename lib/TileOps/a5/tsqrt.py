@@ -129,3 +129,25 @@ def template_tsqrt_high_precision(src: pto.Tile, dst: pto.Tile):
             dst_addr = pto.addptr(dst_ptr, row * dst_cols + col)
             pto.vsts(result, dst_addr, 0, mask)
             col_loop.update(remained=remained)
+
+
+from ._vmi_common import (  # noqa: E402
+    _context_attr,
+    canonical_vmi_template,
+    emit_sqrt_high_precision_vmi,
+    emit_sqrt_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tsqrt",
+    name="vmi_tsqrt",
+    dtypes=(("f16", "f16"), ("f32", "f32")),
+    context_constraints={"precisionType": ("default", "high_precision")},
+)
+def vmi_tsqrt(src: pto.Tile, dst: pto.Tile):
+    if _context_attr(src, "precisionType", "default") == "high_precision":
+        emit_sqrt_high_precision_vmi(src, dst)
+        return
+    emit_sqrt_vmi(src, dst)

@@ -35,3 +35,20 @@ template_tadd_1d = register_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _add as _vmi_add,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tadd",
+    name="vmi_tadd_block64",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tadd_block64(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
+    emit_elementwise_vmi(dst, (src0, src1), _vmi_add)

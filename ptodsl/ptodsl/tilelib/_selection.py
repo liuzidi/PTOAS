@@ -168,6 +168,7 @@ def _legal_candidate_specs(
     op: str,
     operand_specs: list,
     context_attrs: dict | None = None,
+    include_hidden: bool = True,
 ) -> list:
     """Return legal ``(descriptor, specs)`` pairs for this concrete request.
 
@@ -203,6 +204,12 @@ def _legal_candidate_specs(
         for descriptor, specs, reason in evaluated
         if specs is not None and reason is None
     ]
+    if not include_hidden:
+        legal = [
+            (descriptor, specs)
+            for descriptor, specs in legal
+            if "vmi" not in getattr(descriptor.metadata, "tags", ())
+        ]
     if not legal:
         reasons = "; ".join(
             f"{descriptor.name}: {reason}"
@@ -253,6 +260,16 @@ def _select_descriptor_and_specs(
             f"target={target!r}; legal candidates: {legal_names}"
         )
 
+    legal = [
+        (descriptor, specs)
+        for descriptor, specs in legal
+        if "vmi" not in getattr(descriptor.metadata, "tags", ())
+    ]
+    if not legal:
+        raise _registry.NoMatchingTemplate(
+            f"no public TileLib template for op={op!r} target={target!r}"
+        )
+
     if len(legal) == 1:
         return legal[0]
 
@@ -265,9 +282,16 @@ def metadata_request(
     op: str,
     operand_specs: list,
     context_attrs: dict | None = None,
+    include_vmi_candidates: bool = False,
 ) -> dict:
     """Return every legal candidate in deterministic selection order."""
-    legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
+    legal = _legal_candidate_specs(
+        target,
+        op,
+        operand_specs,
+        context_attrs,
+        include_hidden=include_vmi_candidates,
+    )
     _require_unambiguous_top_candidate(target, op, legal)
     return {
         "target": target,

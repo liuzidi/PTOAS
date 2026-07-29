@@ -48,6 +48,8 @@ from ptodsl.vmi_tilelib_helper import instantiate_candidate
 
 
 TILE_SHAPE = (32, 64)
+WIDE_TILE_SHAPE = (32, 128)
+NARROW_TILE_SHAPE = (1, 32)
 
 
 @tile_template(op="tadd", name="legacy_vpto_tadd")
@@ -101,6 +103,19 @@ def check_canonical_block_map() -> None:
     expect(coordinate.linear_offset == 1088, "logical block 17 should start at offset 1088")
     expect(coordinate.active_lanes == 64, "the f32 contract should activate 64 lanes")
 
+    wide_block_map = CanonicalBlockMap(WIDE_TILE_SHAPE, logical_lanes=128)
+    expect(wide_block_map.blocks_per_row == 1, "[32,128]xf32 should contain one block per row")
+    expect(wide_block_map.logical_block_count == 32, "[32,128]xf32 should contain 32 blocks")
+    wide_coordinate = wide_block_map.coordinate(17)
+    expect(wide_coordinate.row == 17, "wide logical block 17 should map directly to row 17")
+    expect(wide_coordinate.col_start == 0, "the wide row-local block should start at column 0")
+    expect(wide_coordinate.linear_offset == 2176, "wide logical block 17 should start at offset 2176")
+    expect(wide_coordinate.active_lanes == 128, "wide rows should activate their full inner width")
+
+    narrow_block_map = CanonicalBlockMap(NARROW_TILE_SHAPE, logical_lanes=32)
+    expect(narrow_block_map.blocks_per_row == 1, "[1,32]xf32 should contain one block per row")
+    expect(narrow_block_map.logical_block_count == 1, "[1,32]xf32 should contain one block")
+
     expect_raises(
         lambda: CanonicalBlockMap((32, 128), logical_lanes=64),
         ValueError,
@@ -113,7 +128,7 @@ def check_canonical_block_map() -> None:
     )
 
 
-def check_candidate_ir() -> tuple[str, str]:
+def check_candidate_ir() -> tuple[str, str, str]:
     tadd = specialize_tadd()
     tadd.verify()
     tadd_text = tadd.mlir_text()
@@ -132,6 +147,15 @@ def check_candidate_ir() -> tuple[str, str]:
     expect("pto.vlds" not in tadd_text, "VMI candidate should not emit physical vlds")
     expect("pto.vsts" not in tadd_text, "VMI candidate should not emit physical vsts")
 
+    wide_tadd = specialize_tadd(shape=WIDE_TILE_SHAPE)
+    wide_tadd.verify()
+    wide_tadd_text = wide_tadd.mlir_text()
+    expect(wide_tadd_text.count("scf.for") == 1, "wide tadd should still contain one row loop")
+    expect("arith.constant 32 : index" in wide_tadd_text, "wide tadd should still iterate by row")
+    expect("!pto.vmi.vreg<128xf32>" in wide_tadd_text, "wide tadd should use a 128-lane logical vreg")
+    expect("!pto.vmi.mask<128xpred>" in wide_tadd_text, "wide tadd should use a 128-lane logical mask")
+    expect(wide_tadd_text.count("pto.vmi.vadd") == 1, "wide tadd should still issue one logical add")
+
     texp = specialize_texp()
     texp.verify()
     texp_text = texp.mlir_text()
@@ -144,14 +168,14 @@ def check_candidate_ir() -> tuple[str, str]:
     expect_raises(
         lambda: specialize_tadd(dtype=f16).mlir_text(),
         ValueError,
-        "require exactly one 64-lane f32 VL per row",
+        "dtype is not supported",
     )
-    expect_raises(
-        lambda: specialize_texp(shape=(32, 128)).mlir_text(),
-        ValueError,
-        "exactly one logical VL block per row",
-    )
-    return tadd_text, texp_text
+    wide_texp = specialize_texp(shape=WIDE_TILE_SHAPE)
+    wide_texp.verify()
+    wide_texp_text = wide_texp.mlir_text()
+    expect(wide_texp_text.count("scf.for") == 1, "wide texp should still contain one row loop")
+    expect("!pto.vmi.vreg<128xf32>" in wide_texp_text, "wide texp should use a 128-lane logical vreg")
+    return tadd_text, wide_tadd_text, texp_text
 
 
 def check_provider_helper() -> None:
@@ -194,6 +218,24 @@ def check_provider_helper() -> None:
     expect("pto.vmi.vadd" in text, "provider helper should instantiate the tadd VMI candidate")
     expect(text.count("scf.for") == 1, "provider helper should preserve one logical-block loop")
 
+    f16_tile_spec = {
+        **raw_tile_spec,
+        "dtype": "f16",
+        "shape": [32, 128],
+        "valid_shape": [32, 128],
+    }
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tadd",
+            operand_specs=[f16_tile_spec, f16_tile_spec, f16_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ),
+        LookupError,
+        "no legal PTODSL VMI candidate",
+    )
+
     exp_artifact = instantiate_candidate(
         target="a5",
         op_name="pto.texp",
@@ -226,22 +268,20 @@ def check_provider_helper() -> None:
     )
     expect("pto.vmi.vmul" in tmul_artifact.mlir_text(), "tmul should lower to VMI")
 
-    compact_tile_spec = {
+    narrow_tile_spec = {
         **raw_tile_spec,
-        "shape": [1, 32],
-        "valid_shape": [1, 32],
+        "shape": list(NARROW_TILE_SHAPE),
+        "valid_shape": list(NARROW_TILE_SHAPE),
     }
-    expect_raises(
-        lambda: instantiate_candidate(
-            target="a5",
-            op_name="pto.tadd",
-            operand_specs=[compact_tile_spec, compact_tile_spec, compact_tile_spec],
-            provider_module="ptodsl.vmi_tilelib",
-            context_attrs={},
-        ).mlir_text(),
-        ValueError,
-        "exactly one logical VL block per row",
-    )
+    narrow = instantiate_candidate(
+        target="a5",
+        op_name="pto.tadd",
+        operand_specs=[narrow_tile_spec, narrow_tile_spec, narrow_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(narrow.count("scf.for") == 1, "narrow tadd should emit one logical row loop")
+    expect("!pto.vmi.vreg<32xf32>" in narrow, "narrow tadd should use a 32-lane logical vreg")
 
     scalar_spec = {"kind": "scalar", "dtype": "f32"}
     tmuls = instantiate_candidate(
@@ -278,16 +318,20 @@ def check_provider_helper() -> None:
     ).mlir_text()
     expect("pto.vmi.vbrc" in tdivs, "tdivs should broadcast its scalar operand")
     expect("pto.vmi.vdiv" in tdivs, "tdivs should lower to VMI vector divide")
-    expect_raises(
-        lambda: instantiate_candidate(
-            target="a5",
-            op_name="pto.tdivs",
-            operand_specs=[raw_tile_spec, scalar_spec, raw_tile_spec],
-            provider_module="ptodsl.vmi_tilelib",
-            context_attrs={"precisionType": "high_precision"},
-        ),
-        ValueError,
-        "does not support context attrs",
+    tdivs_hp = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdivs",
+        operand_specs=[raw_tile_spec, scalar_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "high_precision"},
+    ).mlir_text()
+    expect(
+        tdivs_hp.count("scf.for") == 1,
+        "high-precision tdivs should still emit one logical row loop",
+    )
+    expect(
+        "pto.vmi.vmula" in tdivs_hp,
+        "high-precision tdivs should lower to the VMI refinement sequence",
     )
 
     reduced_tile_spec = {
@@ -326,16 +370,24 @@ def check_provider_helper() -> None:
     ).mlir_text()
     expect("pto.vmi.vcvt" in tcvt, "tcvt should lower to VMI conversion")
 
-    expect_raises(
-        lambda: instantiate_candidate(
-            target="a5",
-            op_name="pto.tdiv",
-            operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
-            provider_module="ptodsl.vmi_tilelib",
-            context_attrs={},
-        ),
-        LookupError,
-        "no PTODSL VMI candidate",
+    tdiv = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdiv",
+        operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "default"},
+    ).mlir_text()
+    expect("pto.vmi.vdiv" in tdiv, "default tdiv should lower to VMI vector divide")
+    tdiv_hp = instantiate_candidate(
+        target="a5",
+        op_name="pto.tdiv",
+        operand_specs=[raw_tile_spec, raw_tile_spec, raw_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"precisionType": "high_precision"},
+    ).mlir_text()
+    expect(
+        "pto.vmi.vmula" in tdiv_hp,
+        "high-precision tdiv should lower to the VMI refinement sequence",
     )
     expect_raises(
         lambda: instantiate_candidate(
@@ -345,8 +397,8 @@ def check_provider_helper() -> None:
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={"precisionType": "high"},
         ),
-        ValueError,
-        "does not support context attrs",
+        LookupError,
+        "no legal PTODSL VMI candidate",
     )
 
     duplicate_module = ModuleType("ptodsl_test_duplicate_vmi_candidates")
@@ -458,7 +510,7 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={},
         ),
-        ValueError,
+        LookupError,
         "expects 2 operands, got 3",
     )
     return colmax, colsum, reduced_col_spec
@@ -657,8 +709,9 @@ def main() -> None:
     check_canonical_block_map()
     check_legacy_vpto_compatibility()
     check_provider_helper()
-    tadd_text, texp_text = check_candidate_ir()
+    tadd_text, wide_tadd_text, texp_text = check_candidate_ir()
     check_vmi_to_vpto_lowering("vmi_tadd_block64", tadd_text, "pto.vadd")
+    check_vmi_to_vpto_lowering("vmi_tadd_block128", wide_tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
     check_col_reduce_candidate()
     check_col_expand_candidate()

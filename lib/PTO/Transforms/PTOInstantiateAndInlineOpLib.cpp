@@ -38,6 +38,17 @@ static constexpr llvm::StringLiteral kOpLibAttrInstVariantId =
 static constexpr llvm::StringLiteral kOpLibAttrInstOp = "pto.oplib.instance.op";
 static constexpr llvm::StringLiteral kOpLibAttrInstDType =
     "pto.oplib.instance.dtype";
+static constexpr llvm::StringLiteral kTileLibImplAttr = "pto.tilelib.impl";
+static constexpr llvm::StringLiteral kTileLibCandidateAttr =
+    "pto.tilelib.candidate";
+static constexpr llvm::StringLiteral kVmiFusionSourceAttr =
+    "pto.vmi.fusion.source";
+static constexpr llvm::StringLiteral kVmiFusionTileOpAttr =
+    "pto.vmi.fusion.tileop";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
+    "pto.vmi.fusion.boundary_reason";
 static constexpr llvm::StringLiteral kErrInstanceBodyMissing =
     "E_OPLIB_INSTANCE_BODY_MISSING";
 
@@ -120,6 +131,17 @@ static Operation *cloneOpForInlineWithFix(OpBuilder &builder, Operation &op,
   return builder.clone(op, mapping);
 }
 
+static void copyTileLibSelectionAttrs(Operation *dst, Operation *src) {
+  for (StringRef attrName :
+       {StringRef(kTileLibImplAttr), StringRef(kTileLibCandidateAttr),
+        StringRef(kVmiFusionSourceAttr), StringRef(kVmiFusionTileOpAttr),
+        StringRef(kVmiFusionBoundaryAttr),
+        StringRef(kVmiFusionBoundaryReasonAttr)}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
+}
+
 static void eraseDeadBridgeCasts(func::FuncOp func) {
   bool changed = true;
   while (changed) {
@@ -187,6 +209,7 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
     }
 
     Operation *newOp = cloneOpForInlineWithFix(builder, op, mapping);
+    copyTileLibSelectionAttrs(newOp, callee);
     for (auto [oldRes, newRes] :
          llvm::zip(op.getResults(), newOp->getResults()))
       mapping.map(oldRes, newRes);

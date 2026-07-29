@@ -8,9 +8,9 @@
 
 // Test that ExpandTileOp + InlineLibCall + FoldTileBufIntrinsics pipeline
 // expands pto.trowexpandsub via the PTODSL TileLib template
-// lib/TileOps/trowexpandsub.py.
+// ptodsl/ptodsl/tilelib/templates/a5/trowexpandsub.py.
 //
-// Pipeline: ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
+// Pipeline: PTOMaterializeTileHandles -> ExpandTileOp -> InlineLibCall -> FoldTileBufIntrinsics
 //
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --enable-tile-op-expand %s -o - 2>/dev/null | FileCheck %s
 
@@ -26,25 +26,24 @@
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TROWEXPANDSUB() {
-    // src0: 32x32 matrix (row-major)
+    // src0: 32x64 matrix (row-major), one f32 VL block per row.
     %src0 = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32,
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=64, v_row=32, v_col=64,
                       blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    // src1: 32x8 (one scalar vector per row, width=8 for f32 which is 32/sizeof(f32))
-    // For row-major src1, valid_shape[1] must be 32/sizeof(dtype)
+    // src1: compact row state, one scalar per row.
     %src1 = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=8, v_row=32, v_col=8,
-                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    // dst: 32x32 result (row-major)
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=1, v_row=32, v_col=1,
+                      blayout=col_major, slayout=none_box, fractal=512, pad=0>
+    // dst: 32x64 result (row-major)
     %dst = pto.alloc_tile
-      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32,
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=64, v_row=32, v_col=64,
                       blayout=row_major, slayout=none_box, fractal=512, pad=0>
 
-    pto.trowexpandsub ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32,
+    pto.trowexpandsub ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=64, v_row=32, v_col=64,
                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>,
-                               !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=8, v_row=32, v_col=8,
-                                   blayout=row_major, slayout=none_box, fractal=512, pad=0>)
-                       outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, v_row=32, v_col=32,
+                               !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=1, v_row=32, v_col=1,
+                                   blayout=col_major, slayout=none_box, fractal=512, pad=0>)
+                       outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=64, v_row=32, v_col=64,
                                    blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return
   }

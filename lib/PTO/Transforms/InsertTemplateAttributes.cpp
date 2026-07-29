@@ -52,6 +52,7 @@ struct CandidateMetadata {
   int64_t loopDepth;
   bool postUpdate;
   bool tail;
+  SmallVector<std::string, 4> tags;
 };
 
 static std::string getDtypeString(Type elementType) {
@@ -219,6 +220,44 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
     return true;
   }
   return false;
+}
+
+static bool resolveStaticTileValidShape(Value value,
+                                        SmallVectorImpl<int64_t> &validShape) {
+  Value validRow;
+  Value validCol;
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+
+  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
+    validRow = alloc.getValidRow();
+    validCol = alloc.getValidCol();
+  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
+    validRow = materialize.getValidRow();
+    validCol = materialize.getValidCol();
+  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
+    validRow = subview.getValidRow();
+    validCol = subview.getValidCol();
+  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
+    validRow = popAic.getValidRow();
+    validCol = popAic.getValidCol();
+  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
+    validRow = popAiv.getValidRow();
+    validCol = popAiv.getValidCol();
+  }
+
+  if (!validRow || !validCol)
+    return false;
+
+  int64_t row = ShapedType::kDynamic;
+  int64_t col = ShapedType::kDynamic;
+  if (!getStaticIntFromValue(validRow, row) ||
+      !getStaticIntFromValue(validCol, col))
+    return false;
+
+  validShape.assign({row, col});
+  return true;
 }
 
 static int64_t getStaticIntOrDynamic(OpFoldResult value) {
@@ -615,15 +654,26 @@ static std::string buildContextAttrsJson(Operation *operation) {
   return json;
 }
 
-static void appendTileOperandSpecJson(std::string &json,
+static void appendTileOperandSpecJson(std::string &json, Value operand,
                                       pto::TileBufType tileType) {
   std::string dtype = getDtypeString(tileType.getElementType());
   json += "{\"kind\":\"tile\",\"dtype\":\"" + dtype + "\",\"shape\":";
   appendJsonIntArray(json, tileType.getShape());
   json += ",\"valid_shape\":";
   auto validShape = tileType.getValidShape();
-  appendJsonIntArray(json, validShape.empty() ? tileType.getShape()
-                                              : validShape);
+  SmallVector<int64_t, 2> resolvedValidShape;
+  if (validShape.empty()) {
+    resolvedValidShape.assign(tileType.getShape().begin(),
+                              tileType.getShape().end());
+  } else {
+    resolvedValidShape.assign(validShape.begin(), validShape.end());
+  }
+  if (llvm::any_of(resolvedValidShape, ShapedType::isDynamic)) {
+    SmallVector<int64_t, 2> producerValidShape;
+    if (resolveStaticTileValidShape(operand, producerValidShape))
+      resolvedValidShape = std::move(producerValidShape);
+  }
+  appendJsonDimArray(json, resolvedValidShape);
   json += ",\"memory_space\":\"";
   json += getMemorySpaceString(tileType);
 
@@ -749,7 +799,7 @@ buildOperandSpecsJson(Operation *operation) {
             "InsertTemplateAttributes encountered an unsupported tile dtype");
         return std::nullopt;
       }
-      appendTileOperandSpecJson(json, tileType);
+      appendTileOperandSpecJson(json, operand, tileType);
       continue;
     }
 
@@ -883,6 +933,13 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
           "InsertTemplateAttributes candidate ids must be unique");
       return failure();
     }
+    SmallVector<std::string, 4> tags;
+    if (auto *tagArray = metadata->getArray("tags")) {
+      for (const auto &tagValue : *tagArray) {
+        if (auto tag = tagValue.getAsString())
+          tags.push_back(tag->str());
+      }
+    }
 
     parsedCandidates.push_back(CandidateMetadata{
         candidateId,
@@ -891,6 +948,7 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
         *loopDepth,
         *postUpdate,
         *tail,
+        std::move(tags),
     });
   }
 
@@ -918,6 +976,11 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
   SmallVector<Attribute> attributes;
   attributes.reserve(parsedCandidates.size());
   for (const CandidateMetadata &candidate : parsedCandidates) {
+    SmallVector<Attribute> tagAttrs;
+    tagAttrs.reserve(candidate.tags.size());
+    for (const std::string &tag : candidate.tags)
+      tagAttrs.push_back(builder.getStringAttr(tag));
+
     attributes.push_back(DictionaryAttr::get(
         operation->getContext(),
         {
@@ -932,6 +995,7 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
                 builder.getI64IntegerAttr(candidate.postUpdate ? 1 : 0)),
             builder.getNamedAttr(
                 "tail", builder.getI64IntegerAttr(candidate.tail ? 1 : 0)),
+            builder.getNamedAttr("tags", builder.getArrayAttr(tagAttrs)),
         }));
   }
   return builder.getArrayAttr(attributes);

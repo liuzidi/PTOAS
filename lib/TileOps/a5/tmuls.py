@@ -30,3 +30,25 @@ template_tmuls_1d = register_scalar_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _vmuls as _vmi_vmuls,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tmuls",
+    name="vmi_tmuls",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tmuls(src: pto.Tile, scale: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vmuls(values[0], scale, mask),
+    )

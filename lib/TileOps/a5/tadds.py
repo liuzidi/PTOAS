@@ -30,3 +30,25 @@ template_tadds_1d = register_scalar_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _vadds as _vmi_vadds,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tadds",
+    name="vmi_tadds",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tadds(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vadds(values[0], scalar, mask),
+    )

@@ -29,7 +29,13 @@ def metadata(
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid TileLib metadata request: {exc}") from exc
     return json.dumps(
-        metadata_request(target, op, operand_specs, context_attrs),
+        metadata_request(
+            target,
+            op,
+            operand_specs,
+            context_attrs,
+            include_vmi_candidates=True,
+        ),
         separators=(",", ":"),
         sort_keys=True,
     )

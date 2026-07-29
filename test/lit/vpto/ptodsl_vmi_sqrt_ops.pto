@@ -6,9 +6,9 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=pto.vecscope
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=pto.vmi.
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi --implicit-check-not=pto.vecscope
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-backend=vpto --enable-op-fusion=false --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=__pto_ptodsl_vmi
 
 module {
   func.func @ptodsl_vmi_sqrt_ops() {
@@ -40,21 +40,20 @@ module {
   }
 }
 
-// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
-// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
-// EXPAND: call {{.*}}__pto_tilelang_a5_tsqrt
-// EXPAND: call {{.*}}__pto_tilelang_a5_trsqrt
-// EXPAND: call {{.*}}__pto_tilelang_a5_trsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt
+// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trsqrt
 
 // INLINE-LABEL: func.func @ptodsl_vmi_sqrt_ops
-// INLINE-DAG: pto.vsqrt
-// INLINE-DAG: pto.vdiv
-// INLINE-DAG: pto.vmula
-// INLINE-DAG: pto.vbitcast
-// INLINE-DAG: pto.vor
-// INLINE-DAG: pto.por
-// INLINE-DAG: pto.vsel
-// INLINE-DAG: pto.vcmps
+// INLINE-DAG: pto.vmi.vsqrt
+// INLINE-DAG: pto.vmi.vdiv
+// INLINE-DAG: pto.vmi.vmula
+// INLINE-DAG: pto.vmi.vinterpret_cast
+// INLINE-DAG: pto.vmi.vor
+// INLINE-DAG: pto.vmi.vsel
+// INLINE-DAG: pto.vmi.vcmps
 
 // FINAL-LABEL: func.func @ptodsl_vmi_sqrt_ops
 // FINAL: pto.vecscope

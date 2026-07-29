@@ -25,3 +25,19 @@ template_tcolsum = register_column_reduction(
         ("f32", "f32"),
     ],
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    emit_col_reduce_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tcolsum",
+    name="vmi_tcolsum",
+    dtypes=(("f32", "f32"),),
+)
+def vmi_tcolsum(src: pto.Tile, dst: pto.Tile):
+    emit_col_reduce_vmi(src, dst, kind="add")

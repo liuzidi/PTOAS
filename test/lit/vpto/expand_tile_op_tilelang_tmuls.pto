@@ -5,13 +5,17 @@
 //
 // RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
 
-// After PTOToVPTO lowering, pto.tmuls should use vmuls (vector multiply scalar).
+// The unified PTODSL backend lowers the scalar operand through a VMI candidate,
+// broadcasting it with vdup and using the ordinary vector multiply.
 // CHECK: func.func @TMULS
 // CHECK-NOT: pto.tmuls ins
 // CHECK: pto.vecscope
+// CHECK: pto.vdup
+// CHECK: scf.for
 // CHECK: pto.vlds
-// CHECK: pto.vmuls
+// CHECK: pto.vmul
 // CHECK: pto.vsts
+// CHECK: pto.tilelib.candidate = "vmi_tmuls"
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TMULS() {

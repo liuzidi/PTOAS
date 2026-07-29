@@ -42,6 +42,13 @@ config.test_exec_root = os.path.join(config.ptoir_obj_root, 'test/lit')
 config.ptoir_tools_dir = os.path.join(config.ptoir_obj_root, 'tools/ptoas')
 config.ptoir_test_tools_dir = os.path.join(config.ptoir_obj_root,
                                            'tools/pto-test-opt')
+config.substitutions.append(('%python_executable', config.python_executable))
+config.substitutions.append((
+    '%mlir_python_root',
+    os.path.realpath(
+        os.path.join(
+            os.path.dirname(config.llvm_tools_dir),
+            'tools/mlir/python_packages/mlir_core'))))
 
 config.substitutions.append(('%PATH%', config.environment['PATH']))
 config.substitutions.append(('%shlibext', config.llvm_shlib_ext))

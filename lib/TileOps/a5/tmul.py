@@ -35,3 +35,20 @@ template_tmul_1d = register_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _mul as _vmi_mul,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tmul",
+    name="vmi_tmul",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tmul(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
+    emit_elementwise_vmi(dst, (src0, src1), _vmi_mul)

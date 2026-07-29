@@ -18,3 +18,19 @@ template_trowmax = register_row_extreme(
     reduce_op=pto.vcmax,
     combine_op=pto.vmax,
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    emit_row_reduce_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="trowmax",
+    name="vmi_trowmax",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_trowmax(src: pto.Tile, workspace: pto.Tile, dst: pto.Tile):
+    emit_row_reduce_vmi(src, workspace, dst, kind="max")

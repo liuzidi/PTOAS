@@ -12,7 +12,7 @@
 // CHECK-NOT: memref.reinterpret_cast %arg0
 // CHECK-NOT: pto.make_tensor_view
 // CHECK-NOT: pto.partition_view
-// CHECK: pto.vadd
+// CHECK: pto.vmi.vadd
 // CHECK: return
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {

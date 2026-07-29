@@ -50,7 +50,7 @@ module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
 }
 
 // CHECK-LABEL: func.func @kernel(
-// CHECK: pto.vadd
+// CHECK: pto.vmi.vadd
 // CHECK: arith.constant 1 : i32
 // CHECK: arith.constant 2 : i32
 // CHECK: arith.addi %{{[^,]+}}, %{{[^,]+}} : i32
