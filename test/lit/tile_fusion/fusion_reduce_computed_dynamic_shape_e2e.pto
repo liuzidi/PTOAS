@@ -13,8 +13,8 @@
 // over the same row range) and bind output.cols=1, while still keeping the
 // tadd/tmul/trowsum chain in one fusion group.
 //
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --tile-lib-backend=tilelang --pto-level=level3 --enable-op-fusion --enable-shape-inference --emit-vpto %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck --check-prefix=PLAN %s
-// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --tile-lib-backend=tilelang --pto-level=level3 --enable-op-fusion --enable-shape-inference --emit-vpto %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck --check-prefix=LOOP %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level3 --enable-op-fusion --enable-shape-inference --emit-vpto %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck --check-prefix=PLAN %s
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level3 --enable-op-fusion --enable-shape-inference --emit-vpto %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck --check-prefix=LOOP %s
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   // tadd -> tmul -> trowsum chain where each stage uses separately computed
@@ -91,7 +91,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // Reduce computation inside the same col loop.
 // LOOP: pto.vcadd
 // LOOP: %{{.*}} = pto.vadd
-// LOOP: scf.yield {{.*}} : i32, !pto.vreg<64xf32>
+// LOOP: scf.yield {{.*}} : !pto.vreg<64xf32>, index
 // LOOP: }
 // Epilogue: row-reduction result store after inner loop.
 // LOOP: pto.vsts
