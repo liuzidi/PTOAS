@@ -143,6 +143,8 @@ std::unique_ptr<Pass> createPTOCanonicalizeIRPass();
 std::unique_ptr<Pass> createLowerPTOToUBufOpsPass();
 std::unique_ptr<Pass>
 createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
+std::unique_ptr<Pass> createPTOVmiLoopFusionPass();
+std::unique_ptr<Pass> createPTOVmiLoadStoreElisionPass();
 std::unique_ptr<Pass> createPTOInlineBackendHelpersPass(
     const PTOInlineBackendHelpersOptions &options = {});
 

@@ -85,6 +85,8 @@ add_mlir_dialect_library(PTOTransforms
   LowerPTOToUBufOps.cpp
   PTOLowerToOpLibCalls.cpp
   PTOInstantiateAndInlineOpLib.cpp
+  PTOVmiLoopFusion.cpp
+  PTOVmiLoadStoreElision.cpp
   PTOToEmitC.cpp
   CppPostprocess.cpp
   Utils.cpp

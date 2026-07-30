@@ -430,6 +430,11 @@ static llvm::cl::opt<bool> enableTileOpExpand(
         "--pto-backend=vpto."),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableVMI(
+    "enable-vmi",
+    llvm::cl::desc("Enable VMI fusion and load/store elision on the VPTO path"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
     llvm::cl::desc("Control A5 tile fusion on level2/level3. Disabled by "
@@ -3119,6 +3124,17 @@ static void appendVMISemanticPipeline(OpPassManager &pm) {
   // verifier, layout, or lowering pass sees signless integer element types.
   pm.addNestedPass<func::FuncOp>(
       pto::createVMINormalizeSignlessIntToUnsignedPass());
+  if (enableVMI) {
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+    pm.addPass(pto::createPTOVmiLoopFusionPass());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+    pm.addNestedPass<func::FuncOp>(
+        pto::createPTOVmiLoadStoreElisionPass());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+  }
   // Expand unified VMI ops before layout assignment so grouped vci becomes
   // the contiguous-only legacy group_iota producer. Layout assignment can
   // then materialize any consumer-requested non-contiguous use explicitly.

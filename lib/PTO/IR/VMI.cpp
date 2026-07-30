@@ -4507,6 +4507,12 @@ ParseResult VMIvStoreOp::parse(OpAsmParser &parser, OperationState &result) {
                           {static_cast<int32_t>(nValues), 1, 1,
                            hasStride ? 1 : 0, hasBlock ? 1 : 0,
                            hasRepeat ? 1 : 0, hasMask ? 1 : 0}));
+  if (succeeded(parser.parseOptionalArrow())) {
+    Type updatedBaseType;
+    if (parser.parseType(updatedBaseType))
+      return failure();
+    result.types.push_back(updatedBaseType);
+  }
   return success();
 }
 
@@ -4540,6 +4546,8 @@ void VMIvStoreOp::print(OpAsmPrinter &p) {
   if (!getMask().empty()) {
     p << ", " << getMask()[0].getType();
   }
+  if (Value updatedBase = getUpdatedBase())
+    p << " -> " << updatedBase.getType();
 }
 
 LogicalResult VMIvStoreOp::verify() {

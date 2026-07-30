@@ -11506,6 +11506,21 @@ struct LowerVPTOOpsPass final
 
   void runOnOperation() override {
     materializeVecScopeCarrierLoops(getOperation());
+    // Remove dead pto.alloc_tile ops before lowering. The CANN900 lowering
+    // patterns do not cover AllocTileOp (the UB address is materialized
+    // through a separate pto.castptr of the address constant), so leaving
+    // alloc_tile ops in the IR causes translateModuleToLLVMIR to fail with
+    // "missing LLVMTranslationDialectInterface for pto.alloc_tile". This
+    // mirrors the dead-alloc sweep in VPTOLLVMEmitter (Beta1).
+    {
+      SmallVector<pto::AllocTileOp> deadAllocs;
+      getOperation().walk([&](pto::AllocTileOp alloc) {
+        if (alloc.use_empty())
+          deadAllocs.push_back(alloc);
+      });
+      for (pto::AllocTileOp alloc : llvm::reverse(deadAllocs))
+        alloc.erase();
+    }
     if (failed(lowerVPTOOps(getOperation(), llvm::errs())))
       signalPassFailure();
   }

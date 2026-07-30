@@ -769,9 +769,11 @@ def VMIStrideStoreOp : VMI_Op<"stride_store", [DeclareOpInterfaceMethods<MemoryE
   let arguments = (ins VMI_VRegTypeConstraint:$value, PtrOrMemRef:$destination,
                        Index:$offset, I16:$block_stride, I16:$repeat_stride,
                        VMI_MaskTypeConstraint:$mask);
-  let results = (outs);
+  let results = (outs Optional<PtrOrMemRef>:$updated_base);
   let hasVerifier = 1;
-  let assemblyFormat = "$value `,` $destination `[` $offset `]` `,` $block_stride `,` $repeat_stride `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($block_stride) `,` type($repeat_stride) `,` type($mask)";
+  let assemblyFormat = [{
+    $value `,` $destination `[` $offset `]` `,` $block_stride `,` $repeat_stride `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($block_stride) `,` type($repeat_stride) `,` type($mask) (`->` type($updated_base)^)?
+  }];
 }
 
 def VMIScatterOp : VMI_Op<"scatter", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
@@ -1495,7 +1497,7 @@ def VMIvStoreOp : VMI_Op<"vstore",
     OptionalAttr<I64Attr>:$group,
     OptionalAttr<StrAttr>:$pmode
   );
-  let results = (outs);
+  let results = (outs Optional<PtrOrMemRef>:$updated_base);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }

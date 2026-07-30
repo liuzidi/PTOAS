@@ -616,9 +616,20 @@ static LogicalResult lowerVStore(VMIvStoreOp op, OpBuilder &builder) {
     }
     Value bs = op.getBlockStride();
     Value rs = op.getRepeatStride();
-    builder.create<VMIStrideStoreOp>(op->getLoc(), op.getValues()[0],
-                                    op.getDestination(), op.getOffset(), bs, rs,
-                                    mask);
+    Value updatedBase = op.getUpdatedBase();
+    if (updatedBase) {
+      // Forward the updated_base result: build stride_store so it produces the
+      // updated dst pointer, then replace the vstore result uses with it.
+      auto strideStore = builder.create<VMIStrideStoreOp>(
+          op->getLoc(), updatedBase.getType(), op.getValues()[0],
+          op.getDestination(), op.getOffset(), bs, rs, mask);
+      updatedBase.replaceAllUsesWith(strideStore.getUpdatedBase());
+    } else {
+      // No result: pass an empty Type for the optional updated_base result.
+      builder.create<VMIStrideStoreOp>(op->getLoc(), Type{}, op.getValues()[0],
+                                       op.getDestination(), op.getOffset(), bs,
+                                       rs, mask);
+    }
     op->erase();
     return success();
   }

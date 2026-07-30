@@ -27,8 +27,15 @@ region-aware cost model 选择并锁定实现；该方案会把实现版本选�
    logical VL。每行只有一个 block，canonical candidate 只生成 row 主循环；不支持
    将多 VL inner Tile 平坦化为更多 blocks。Reduce compact result 和沿用源 iteration
    contract 的 Convert 结果不按目标 dtype 重新划分。
-3. VMI Fusion 在 `ExpandTileOp`、`PTOInlineLibCall` 和 shape intrinsic folding 之后
-   运行，直接分析真实的 VMI `scf.for`，不消费 `pto.fusion_region`。
+3. VMI Fusion 消费 Tile 层 `FusionPlan` / `OpScheduling` /
+   `PTOFusionRegionGen` 已生成的 `pto.fusion_region`。完整流水线为：
+   Tile-native PTO IR → `InsertTemplateAttributes` → `FusionPlan` →
+   `OpScheduling` → `PTOFusionRegionGen` → View/Memory planning →
+   `ExpandTileOp` → `PTOInlineLibCall` → VMI region-local 合法性分析 →
+   VMI Loop Fusion → VMI Mem2Reg → VMI layout assignment → `VMIToVPTO`。
+   `ExpandTileOp` / `PTOInlineLibCall` 在 Tile 层已生成的 `pto.fusion_region`
+   内原地展开并保留外层 region；VMI Fusion 不重新划分或扩大 region 边界，
+   只在每个 region 内做 loop fusion 与 mem2reg。
 4. 仅处理带 TileLib provenance 的 canonical VMI fusion unit。任意用户手写 VMI、
    非 canonical 模板或无法证明来源的循环默认不参与融合。
 5. 融合采用保守、部分融合策略：只合并边界、循环域、依赖、alias、访问模式和 mask
@@ -47,8 +54,13 @@ region-aware cost model 选择并锁定实现；该方案会把实现版本选�
 
 ### B. 直接复用 `FusionPlan` / `FusionRegionGen`
 
-不采用为 VMI 实现本体。可以复用其 block-local DFG、活跃性和迭代域分析思路或抽取
-通用 utility，但现有 pass 的输入、语义节点和 region op 都是 Tile-native PTO IR。
+**采纳**（本 ADR 第 3 条已据此修订）。VMI 不自建 region 划分，而是复用 Tile 层
+`FusionPlan`（`strategy="vmi-ub-disjoint"` 的 `VMIUBDisjointStrategyEngine`）/
+`OpScheduling` / `PTOFusionRegionGen` 产出的 `pto.fusion_region`。Tile 层 region 是
+VMI 优化的最大合法范围；VMI Loop Fusion 与 Mem2Reg 只在 region 内执行，不跨 region
+合并、不扩大边界。`VMIUBDisjointStrategyEngine` 在 compute-node 层只按 F3 邻接分组
+（非白名单 op 夹在 compute 节点之间即切断），不做 UB-overlap 判定 —— UB 重叠
+（reduce-final stuck）由 `PTOVmiLoopFusion` 在 `scf.for` 层用 SSA/UB def-use 处理。
 
 ### C. 复用 `PTOLowLevelLoopFusion`
 
