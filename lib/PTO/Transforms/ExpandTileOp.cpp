@@ -72,6 +72,8 @@ namespace pto {
 namespace {
 
 constexpr llvm::StringLiteral kCandidatesAttr = "candidates";
+constexpr llvm::StringLiteral kSelectedCandidateAttr =
+    "pto.tilelib.selected_candidate";
 
 // ============================================================================
 // OperandTypeInfo: describes one operand for template specialization.
@@ -1243,19 +1245,22 @@ func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
   }
 
   auto candidates = tileOp->getAttrOfType<ArrayAttr>(kCandidatesAttr);
-  if (!candidates || candidates.empty()) {
-    tileOp->emitError("ExpandTileOp requires at least one template candidate");
-    return nullptr;
+  DictionaryAttr selected;
+  if (auto selectedAttr =
+          tileOp->getAttrOfType<DictionaryAttr>(kSelectedCandidateAttr)) {
+    selected = selectedAttr;
+  } else if (candidates && !candidates.empty()) {
+    selected = dyn_cast<DictionaryAttr>(candidates[0]);
   }
-
-  auto selected = dyn_cast<DictionaryAttr>(candidates[0]);
   if (!selected) {
-    tileOp->emitError("ExpandTileOp candidate 0 must be a dictionary");
+    tileOp->emitError(
+        "ExpandTileOp requires a selected template candidate or a non-empty "
+        "candidates attribute");
     return nullptr;
   }
   auto selectedName = selected.getAs<StringAttr>("name");
   if (!selectedName) {
-    tileOp->emitError("ExpandTileOp candidate 0 requires a string name");
+    tileOp->emitError("ExpandTileOp selected candidate requires a string name");
     return nullptr;
   }
 

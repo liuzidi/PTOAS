@@ -136,6 +136,9 @@ std::unique_ptr<Pass> createVMILowerUnifiedToLegacyPass();
 std::unique_ptr<Pass> createVMINormalizeSignlessIntToUnsignedPass();
 std::unique_ptr<Pass> createVMIToVPTOPass();
 std::unique_ptr<Pass> createInsertTemplateAttributesPass();
+std::unique_ptr<Pass> createSelectTemplateCandidatePass();
+std::unique_ptr<Pass> createSelectTemplateCandidatePass(
+    const SelectTemplateCandidateOptions &options);
 std::unique_ptr<Pass> createExpandTileOpPass();
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass(llvm::StringRef foldMode);

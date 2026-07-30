@@ -664,6 +664,124 @@ def check_col_reduce_vmi_to_vpto_lowering() -> None:
     check_vmi_to_vpto_lowering("vmi_tcolsum", colsum, "pto.vadd")
 
 
+def check_tmov_nd2nz() -> None:
+    """tmov dispatches on dst layout: ND row-major -> elementwise move;
+    NZ col-major -> single-VL ND->NZ block-strided vstore loop that lowers to
+    pto.vsstb (one row scf.for, constant block_stride/repeat_stride, no
+    last-block branch). Mirrors the hand-written softmax ND->NZ path's
+    single-layer constant-stride form."""
+    nd_tile_spec = {
+        "kind": "tile",
+        "dtype": "f16",
+        "shape": [16, 128],
+        "valid_shape": [16, 128],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    nz_tile_spec = {
+        **nd_tile_spec,
+        "config": {
+            "b_layout": "col_major",
+            "s_layout": "row_major",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+
+    # ND -> NZ: helper must accept the NZ dst config (s_layout=row_major) and
+    # the candidate must render one row loop with block-strided vmi.vstore.
+    nz_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tmov",
+        operand_specs=[nd_tile_spec, nz_tile_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect("pto.vmi.vload" in nz_text, "tmov ND->NZ should load via pto.vmi.vload")
+    expect("pto.vmi.vstore" in nz_text, "tmov ND->NZ should store via pto.vmi.vstore")
+    expect(nz_text.count("scf.for") == 1, "tmov ND->NZ should render one row loop")
+    expect("blayout=col_major" in nz_text, "tmov ND->NZ dst should be a col-major NZ tile")
+    # constant strides, no second (tail-block) loop
+    expect("arith.constant 1 : i16" in nz_text, "tmov ND->NZ repeat_stride should be a constant 1")
+
+    # Lower to VPTO and confirm it reaches a single pto.vsstb with constant
+    # block_stride/repeat_stride inside one scf.for (the pto-isa single-VL form).
+    check_vmi_to_vpto_lowering("vmi_tmov_nd2nz", nz_text, "pto.vsstb")
+
+    # 1/2-VL case (bf16 cols=64 < lanes=128): the partial tail is handled by a
+    # count predicate (pto-isa CreatePredicate(count)); lowering should reach a
+    # full-VL vlds + a half-VL mask (PAT_VL64) vsstb, still one row loop, still
+    # constant strides. Mirrors fa_dn_softmax [128,64] bf16 x_exp_buf -> NZ.
+    half_nd_spec = {
+        "kind": "tile",
+        "dtype": "bf16",
+        "shape": [128, 64],
+        "valid_shape": [128, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    half_nz_spec = {
+        **half_nd_spec,
+        "config": {
+            "b_layout": "col_major",
+            "s_layout": "row_major",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    half_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tmov",
+        operand_specs=[half_nd_spec, half_nz_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(half_text.count("scf.for") == 1, "tmov 1/2-VL ND->NZ should render one row loop")
+    expect(
+        "arith.constant 1 : i16" in half_text,
+        "tmov 1/2-VL repeat_stride should still be a constant 1",
+    )
+    # Lower to VPTO and confirm the half-VL mask form (full-VL vlds + half-VL
+    # block-mask vsstb) reaches pto.vsstb inside one scf.for.
+    check_vmi_to_vpto_lowering("vmi_tmov_nd2nz_halfvl", half_text, "pto.vsstb")
+
+    # Regression: ND -> ND still selects the elementwise move path (no
+    # block-strided store), so the dispatch did not break the plain-move case.
+    # The elementwise VMI candidate is f32 / 64-lane, so use an f32 tile here.
+    nd_f32_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "shape": [16, 64],
+        "valid_shape": [16, 64],
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    nd_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tmov",
+        operand_specs=[nd_f32_spec, nd_f32_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect("pto.vmi.vstore" in nd_text, "tmov ND->ND should still emit a vmi store")
+    expect("arith.constant 1 : i16" not in nd_text, "tmov ND->ND must not emit block-stride operands")
+
+
 def check_legacy_vpto_compatibility() -> None:
     spec = TileSpec(TILE_SHAPE, f32)
     artifact = legacy_vpto_tadd.specialize(src0=spec, src1=spec, dst=spec)
@@ -717,6 +835,7 @@ def main() -> None:
     check_col_expand_candidate()
     check_tcvt_bf16_candidate()
     check_col_reduce_vmi_to_vpto_lowering()
+    check_tmov_nd2nz()
     print("ptodsl_vmi_tile_template: PASS")
 
 

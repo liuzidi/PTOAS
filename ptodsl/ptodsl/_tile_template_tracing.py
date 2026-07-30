@@ -96,6 +96,11 @@ class TileSpec:
     dtype: ScalarType
     memory_space: str = "ub"
     b_layout: str = "row_major"
+    # valid_shape: may be smaller than shape (e.g. RowPlusOne: shape=(129,64),
+    # valid_shape=(128,64)). Defaults to shape when None (plain tiles).
+    valid_shape: tuple[int, int] | None = None
+    # compact_mode: "normal" (default) or "row_plus_one" (UB +1 padding band).
+    compact_mode: str = "normal"
 
     def __post_init__(self):
         if len(self.shape) != 2:
@@ -106,18 +111,41 @@ class TileSpec:
             raise ValueError("TileSpec currently only supports ub tiles")
         if self.b_layout not in {"row_major", "col_major"}:
             raise ValueError("TileSpec.b_layout must be 'row_major' or 'col_major'")
+        if self.compact_mode not in {"normal", "row_plus_one"}:
+            raise ValueError(
+                "TileSpec.compact_mode must be 'normal' or 'row_plus_one'"
+            )
+        # pto-isa invariant: ValidRow <= alignRow (physical rows). valid_shape
+        # defaults to shape when None (handled in mlir_type / consumers).
+        if self.valid_shape is not None:
+            if len(self.valid_shape) != 2:
+                raise ValueError("TileSpec.valid_shape must be rank-2")
+            if any(not isinstance(d, int) or d < 0 for d in self.valid_shape):
+                raise ValueError("TileSpec.valid_shape must contain non-negative ints")
+            if self.valid_shape[0] > self.shape[0] or self.valid_shape[1] > self.shape[1]:
+                raise ValueError(
+                    "TileSpec.valid_shape must not exceed physical shape "
+                    f"{self.shape}, got {self.valid_shape}"
+                )
+
+    @property
+    def effective_valid_shape(self) -> tuple[int, int]:
+        """valid_shape, defaulting to shape when None (plain tiles)."""
+        return self.valid_shape if self.valid_shape is not None else self.shape
 
     def mlir_type(self):
         rows, cols = self.shape
+        vrow, vcol = self.effective_valid_shape
         return _tile_buf_type(
             [rows, cols],
             _scalar_descriptor(self.dtype),
-            [rows, cols],
+            [vrow, vcol],
             blayout="RowMajor" if self.b_layout == "row_major" else "ColMajor",
             address_space=self.memory_space,
             slayout="NoneBox",
             fractal_size=512,
             pad="Null",
+            compact=self.compact_mode,
         )
 
 
@@ -306,9 +334,13 @@ class _TileProxy:
 
     @property
     def valid_shape(self) -> tuple[_Value, _Value]:
+        # valid_shape (defaults to shape for plain tiles); RowPlusOne carries
+        # a smaller valid_shape (e.g. 128 vs physical 129) so the row loop iterates
+        # valid_rows times, not the padded physical rows.
+        vrow, vcol = self._spec.effective_valid_shape
         return (
-            self._trace.index_const(self._spec.shape[0]),
-            self._trace.index_const(self._spec.shape[1]),
+            self._trace.index_const(vrow),
+            self._trace.index_const(vcol),
         )
 
     @property
@@ -784,25 +816,37 @@ def _coerce_parameter_spec(spec):
     if hasattr(spec, "shape") and hasattr(spec, "dtype"):
         shape = tuple(spec.shape)
         valid_shape = getattr(spec, "valid_shape", None)
-        if valid_shape is not None and tuple(valid_shape) != shape:
-            raise ValueError(
-                "VMI tile-template tracing currently requires valid_shape to "
-                "match the physical tile shape"
-            )
+        if valid_shape is not None:
+            valid_shape = tuple(valid_shape)
         dtype = _SCALAR_TYPES_BY_NAME.get(_dtype_name(spec.dtype))
         if dtype is None:
             raise ValueError(f"unsupported VMI tile-template dtype {spec.dtype!r}")
         s_layout = getattr(spec, "s_layout", "none_box")
-        if s_layout != "none_box":
+        compact_mode = getattr(spec, "compact_mode", "normal")
+        is_nd2nz_layout = (
+            s_layout == "row_major"
+            and getattr(spec, "b_layout", "row_major") == "col_major"
+        )
+        is_row_plus_one_layout = (
+            is_nd2nz_layout
+            and valid_shape is not None
+            and valid_shape != shape
+        )
+        if s_layout != "none_box" and not (
+            is_nd2nz_layout or compact_mode == "row_plus_one"
+        ):
             raise ValueError(
                 "VMI tile-template tracing currently supports only none_box "
-                f"secondary layout, got {s_layout!r}"
+                "or ND-to-NZ row_major secondary layout, "
+                f"got {s_layout!r}"
             )
         return TileSpec(
             shape=shape,
             dtype=dtype,
             memory_space=getattr(spec, "memory_space", "ub"),
             b_layout=getattr(spec, "b_layout", "row_major"),
+            valid_shape=valid_shape,
+            compact_mode="row_plus_one" if is_row_plus_one_layout else compact_mode,
         )
 
     if hasattr(spec, "dtype"):
@@ -825,6 +869,7 @@ class TileTemplate:
     dtypes: tuple
     context_constraints: tuple[tuple[str, tuple[object, ...]], ...]
     constraints: tuple[object, ...] = ()
+    tags: tuple[str, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:
@@ -851,7 +896,12 @@ class TileTemplate:
                 iteration_axis="row",
                 op_engine="vector",
                 op_class="other",
-                tags=("vmi", "fusion_eligible", "single_logical_row_loop"),
+                tags=(
+                    "vmi",
+                    "fusion_eligible",
+                    "single_logical_row_loop",
+                    *self.tags,
+                ),
             )
 
         return _RegistryTemplateMetadata.build(
@@ -922,6 +972,7 @@ def tile_template(
     dtypes: tuple | list = (),
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
+    tags: tuple[str, ...] | list[str] = (),
 ):
     if target != "a5":
         raise ValueError("tile-template tracing currently only supports target='a5'")
@@ -945,6 +996,7 @@ def tile_template(
             dtypes=tuple(tuple(signature) for signature in dtypes),
             context_constraints=normalized_context_constraints,
             constraints=tuple(constraints),
+            tags=tuple(tags),
         )
 
     return decorator

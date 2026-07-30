@@ -3478,6 +3478,8 @@ int mlir::pto::compilePTOASModule(
   fusionPlanOpts.enableVfSimCostmodelOptimization =
       enableVfSimCostmodelOptimization;
   fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
+  if (enableVMI && enableA5VPTOFusionPath)
+    fusionPlanOpts.strategy = "vmi-ub-disjoint";
   if (!isA2A3 && enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));
@@ -3488,6 +3490,12 @@ int mlir::pto::compilePTOASModule(
         pto::createFusionPlanPass(fusionPlanOpts));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
+  }
+  if (!isA2A3 && effectiveBackend == PTOBackend::VPTO &&
+      hasTileOpsToExpand && enableVMI && enableA5VPTOFusionPath) {
+    pto::SelectTemplateCandidateOptions selectOptions;
+    selectOptions.selectionPolicy = "prefer-vmi";
+    pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
   }
 
   pm.addNestedPass<mlir::func::FuncOp>(

@@ -504,6 +504,7 @@ def canonical_vmi_template(
     dtypes: tuple | list = (),
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
+    tags: tuple[str, ...] | list[str] = (),
 ):
     """Register one canonical VMI implementation in this provider module."""
 
@@ -517,6 +518,7 @@ def canonical_vmi_template(
             dtypes=dtypes,
             context_constraints=context_constraints,
             constraints=tuple(constraints),
+            tags=tuple(tags),
         )(fn)
         _tilelib_registry.register(descriptor)
         VMI_TILELIB_REGISTRY.register(descriptor)
