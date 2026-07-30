@@ -249,16 +249,41 @@ def _select_descriptor_and_specs(
     context_attrs: dict | None = None,
     candidate_id: str | None = None,
 ):
-    legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
     if candidate_id:
-        for descriptor, specs in legal:
-            if descriptor.name == candidate_id:
+        for descriptor in _registered_candidates(target, op):
+            if descriptor.name != candidate_id:
+                continue
+            try:
+                specs = _build_tile_specs(descriptor, operand_specs)
+            except Exception as exc:
+                raise _registry.NoMatchingTemplate(
+                    f"candidate {candidate_id!r} cannot bind operands for "
+                    f"op={op!r} target={target!r}: {exc}"
+                ) from exc
+
+            legality = _constraints.evaluate_candidate(
+                descriptor,
+                specs,
+                target,
+                op,
+                context_attrs,
+            )
+            if legality.legal:
                 return descriptor, specs
-        legal_names = ", ".join(descriptor.name for descriptor, _ in legal)
-        raise _registry.NoMatchingTemplate(
-            f"candidate {candidate_id!r} is not a legal template for op={op!r} "
-            f"target={target!r}; legal candidates: {legal_names}"
+            raise _registry.NoMatchingTemplate(
+                f"candidate {candidate_id!r} is not a legal template for "
+                f"op={op!r} target={target!r}: {legality.reason}"
+            )
+
+        registered_names = ", ".join(
+            descriptor.name for descriptor in _registered_candidates(target, op)
         )
+        raise _registry.NoMatchingTemplate(
+            f"candidate {candidate_id!r} is not registered for op={op!r} "
+            f"target={target!r}; registered candidates: {registered_names}"
+        )
+
+    legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
 
     legal = [
         (descriptor, specs)

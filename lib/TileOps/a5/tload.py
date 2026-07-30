@@ -38,6 +38,20 @@ from ._load_store import (
 )
 def template_tload_nd2nd(src: pto.PartitionTensorView, dst: pto.Tile):
     elem_bytes = pto.bytewidth(dst.dtype)
+    if len(src.shape) == 1:
+        _, ub_cols = dst.shape
+        valid_rows, valid_cols = dst.valid_shape
+        stride = 1 if src.strides is None or src.strides[0] is None else src.strides[0]
+        pto.mte_load(
+            src.as_ptr(),
+            dst.as_ptr(),
+            0,
+            valid_cols * elem_bytes,
+            nburst=(valid_rows, stride * elem_bytes, ub_cols * elem_bytes),
+            pad=dma_pad_for(dst),
+        )
+        return
+
     if len(src.shape) == 2:
         _, ub_cols = dst.shape
         valid_rows, valid_cols = dst.valid_shape

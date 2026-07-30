@@ -682,6 +682,54 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
   return false;
 }
 
+static bool resolveStaticTileValidShape(Value value,
+                                        SmallVectorImpl<int64_t> &validShape) {
+  Value validRow;
+  Value validCol;
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+
+  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
+    validRow = alloc.getValidRow();
+    validCol = alloc.getValidCol();
+  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
+    validRow = materialize.getValidRow();
+    validCol = materialize.getValidCol();
+  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
+    validRow = subview.getValidRow();
+    validCol = subview.getValidCol();
+  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
+    validRow = popAic.getValidRow();
+    validCol = popAic.getValidCol();
+  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
+    validRow = popAiv.getValidRow();
+    validCol = popAiv.getValidCol();
+  } else if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(def)) {
+    auto result = dyn_cast<OpResult>(value);
+    if (!result)
+      return false;
+    auto yieldOp =
+        dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
+    if (!yieldOp || result.getResultNumber() >= yieldOp.getNumOperands())
+      return false;
+    return resolveStaticTileValidShape(yieldOp.getOperand(result.getResultNumber()),
+                                       validShape);
+  }
+
+  if (!validRow || !validCol)
+    return false;
+
+  int64_t row = ShapedType::kDynamic;
+  int64_t col = ShapedType::kDynamic;
+  if (!getStaticIntFromValue(validRow, row) ||
+      !getStaticIntFromValue(validCol, col))
+    return false;
+
+  validShape.assign({row, col});
+  return true;
+}
+
 static int64_t getStaticIntOrDynamic(OpFoldResult ofr) {
   if (isa<Attribute>(ofr)) {
     Attribute attr = cast<Attribute>(ofr);

@@ -112,6 +112,30 @@ class TileTemplateRegistry:
 
     def select(self, op: str, target: str, tile_specs: dict,
                context_attrs: dict | None = None, candidate_id: str | None = None):
+        if candidate_id:
+            candidates = self.lookup(op, target)
+            matched = [descriptor for descriptor in candidates if descriptor.name == candidate_id]
+            if not matched:
+                names = ", ".join(descriptor.name for descriptor in candidates)
+                raise NoMatchingTemplate(
+                    f"candidate {candidate_id!r} is not registered for op={op!r} "
+                    f"target={target!r}; registered candidates: {names}"
+                )
+            descriptor = matched[0]
+            legality = _constraints.evaluate_candidate(
+                descriptor,
+                tile_specs,
+                target,
+                op,
+                context_attrs,
+            )
+            if legality.legal:
+                return descriptor
+            raise NoMatchingTemplate(
+                f"candidate {candidate_id!r} is not a legal template for op={op!r} "
+                f"target={target!r}: {legality.reason}"
+            )
+
         legal = self.legal_candidates(
             op,
             target,
@@ -119,15 +143,6 @@ class TileTemplateRegistry:
             context_attrs,
             include_hidden=bool(candidate_id),
         )
-        if candidate_id:
-            for descriptor in legal:
-                if descriptor.name == candidate_id:
-                    return descriptor
-            legal_names = ", ".join(d.name for d in legal)
-            raise NoMatchingTemplate(
-                f"candidate {candidate_id!r} is not a legal template for op={op!r} "
-                f"target={target!r}; legal candidates: {legal_names}"
-            )
 
         if len(legal) == 1:
             return legal[0]

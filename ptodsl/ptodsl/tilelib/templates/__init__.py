@@ -15,6 +15,7 @@ from functools import lru_cache
 from .._template_package import load_template as _load_template, tileops_package
 
 
+
 @lru_cache(maxsize=None)
 def load_template(op: str, target: str) -> bool:
     """Load the canonical TileOps template and any registered VMI provider."""

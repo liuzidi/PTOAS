@@ -112,7 +112,11 @@ def _check_store_bounds(src_shape, src_valid_shape, dst_shape, dst_strides, *, l
 def tload_nd2nd_constraint(src_kind, src_shape, src_strides, src_memory_space, dst_kind, dst_shape, dst_valid_shape, dst_memory_space, dst_config, **_):
     if src_kind != "view" or dst_kind != "tile" or src_memory_space != "gm" or dst_memory_space not in {"ub", "vec"}:
         return False
-    if _view_rank(src_shape) == 2:
+    if _view_rank(src_shape) == 1:
+        logical_rows = 1
+        logical_cols = src_shape[0]
+        stride_axis = 0
+    elif _view_rank(src_shape) == 2:
         logical_rows, logical_cols = src_shape
         stride_axis = 1
     else:
@@ -127,7 +131,7 @@ def tload_nd2nd_constraint(src_kind, src_shape, src_strides, src_memory_space, d
         logical_rows=logical_rows,
         logical_cols=logical_cols,
         stride_axis=stride_axis,
-        ranks=(2, 5),
+        ranks=(1, 2, 5),
     )
 
 
@@ -169,7 +173,11 @@ def tload_nz2nz_constraint(src_kind, src_shape, src_memory_space, dst_kind, dst_
 def tstore_nd_constraint(src_kind, src_shape, src_valid_shape, src_memory_space, src_config, dst_kind, dst_shape, dst_strides, dst_memory_space, **_):
     if src_kind != "tile" or dst_kind != "view" or src_memory_space not in {"ub", "vec"} or dst_memory_space != "gm":
         return False
-    if _view_rank(dst_shape) == 2:
+    if _view_rank(dst_shape) == 1:
+        logical_rows = 1
+        logical_cols = dst_shape[0]
+        stride_axis = 0
+    elif _view_rank(dst_shape) == 2:
         logical_rows, logical_cols = dst_shape
         stride_axis = 1
     else:
@@ -184,7 +192,7 @@ def tstore_nd_constraint(src_kind, src_shape, src_valid_shape, src_memory_space,
         logical_rows=logical_rows,
         logical_cols=logical_cols,
         stride_axis=stride_axis,
-        ranks=(2, 5),
+        ranks=(1, 2, 5),
     )
 
 
