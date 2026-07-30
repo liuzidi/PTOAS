@@ -67,8 +67,11 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
     if len(dst.shape) == 3 and dst.shape[1] == 1:
         valid_rows, valid_cols = src.valid_shape
         _, ub_cols = src.shape
-        row_stride, _, _ = dst.strides
-        row_stride = valid_cols if row_stride is None else row_stride
+        row_stride = valid_cols
+        if dst.strides is not None:
+            row_stride = dst.strides[0]
+        if row_stride is None:
+            raise ValueError("rank-3 ND tstore requires a static outer row stride")
         pto.mte_store(
             src.as_ptr(),
             dst.as_ptr(),

@@ -70,8 +70,11 @@ def template_tload_nd2nd(src: pto.PartitionTensorView, dst: pto.Tile):
     if len(src.shape) == 3 and src.shape[1] == 1:
         _, ub_cols = dst.shape
         valid_rows, valid_cols = dst.valid_shape
-        row_stride, _, _ = src.strides
-        row_stride = valid_cols if row_stride is None else row_stride
+        row_stride = valid_cols
+        if src.strides is not None:
+            row_stride = src.strides[0]
+        if row_stride is None:
+            raise ValueError("rank-3 ND tload requires a static outer row stride")
         pto.mte_load(
             src.as_ptr(),
             dst.as_ptr(),

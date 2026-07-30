@@ -123,6 +123,8 @@ def tload_nd2nd_constraint(src_kind, src_shape, src_strides, src_memory_space, d
         logical_rows = src_shape[0]
         logical_cols = src_shape[2]
         stride_axis = 2
+        if src_strides is not None and _is_unknown_dim(_stride_at(src_strides, 0)):
+            return False
     else:
         logical_rows = _shape_size(src_shape[:4])
         logical_cols = src_shape[4]
@@ -188,6 +190,8 @@ def tstore_nd_constraint(src_kind, src_shape, src_valid_shape, src_memory_space,
         logical_rows = dst_shape[0]
         logical_cols = dst_shape[2]
         stride_axis = 2
+        if dst_strides is not None and _is_unknown_dim(_stride_at(dst_strides, 0)):
+            return False
     else:
         logical_rows = _shape_size(dst_shape[:4])
         logical_cols = dst_shape[4]
