@@ -7,8 +7,8 @@
 
 // CHECK-LABEL: func.func @accum_combined_stride_after_use
 // CHECK: scf.for
-// CHECK-DAG:   [[X:%[0-9]+]] = arith.addi
-// CHECK-DAG:   [[Y:%[0-9]+]] = arith.muli
+// CHECK:   [[Y:%[0-9]+]] = arith.muli
+// CHECK:   [[X:%[0-9]+]] = arith.addi
 // CHECK:   [[STRIDE:%[0-9]+]] = arith.addi [[X]], [[Y]]
 // CHECK:   pto.vlds {{.*}}[[[STRIDE]]] {{.*}} -> !pto.vreg<64xf32>, !pto.ptr<f32,
 // CHECK:   pto.vsts {{.*}}[[[STRIDE]]]{{.*}} -> !pto.ptr<f32,

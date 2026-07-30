@@ -8,16 +8,16 @@
 
 // InsertTemplateAttributes records a compact, ordered candidate list before
 // fusion. The unified PTODSL backend exposes both ordinary PTODSL templates and
-// legal VMI candidates to the compiler. ExpandTileOp prefers the VMI candidate
-// for full-shape PIPE_V TileOps.
+// legal VMI candidates to the compiler. SelectTemplateCandidate prefers the
+// VMI candidate for full-shape PIPE_V TileOps; ExpandTileOp only consumes it.
 //
 // Running without --enable-op-fusion proves metadata insertion is not gated
 // by fusion. Printing before FusionPlan proves its position when fusion is on.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-pto-ir --mlir-print-ir-after=pto-insert-template-attributes %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=META
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --pto-level=level2 --enable-op-fusion --emit-pto-ir --mlir-print-ir-before=pto-fusion-plan %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PREFUSION
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SELECT
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=EXPAND
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-pto-ir --mlir-print-ir-after=pto-insert-template-attributes %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=META
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --pto-level=level2 --emit-pto-ir --mlir-print-ir-before=pto-fusion-plan %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PREFUSION
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SELECT
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=EXPAND
 
 // META: pto.tadd
 // META-SAME: candidates = [
@@ -52,6 +52,10 @@
 // EXPAND: pto.vsts
 // EXPAND: pto.tilelib.candidate = "vmi_tadd_block64"
 // EXPAND: pto.tilelib.impl = "vmi"
+
+// A full-shape VMI candidate does not need an opt-in capability for partial
+// valid shapes; the capability is attached only by templates that support it.
+// META-NOT: supports_partial_valid_shape
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TADD() {

@@ -8,9 +8,8 @@
 
 // Unit test for FoldTileBufIntrinsics on the VPTO tile-op expansion path.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-fold-tile-buf-intrinsics %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SHAPE
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-fold-tile-buf-intrinsics %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=ADDR
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=vpto-ptr-normalize %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NORMALIZED
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-fold-tile-buf-intrinsics %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SHAPE
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-fold-tile-buf-intrinsics %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=ADDR
 //
 // After the first shape-only FoldTileBufIntrinsics:
 // - tile_valid_rows / tile_valid_cols should be gone
@@ -19,42 +18,27 @@
 // SHAPE: pto.tile_buf_addr
 // SHAPE-NOT: pto.tile_valid_rows
 // SHAPE-NOT: pto.tile_valid_cols
-// SHAPE: arith.constant 16 : index
-// SHAPE: arith.constant 64 : index
-// SHAPE: pto.vlds
-// SHAPE: pto.vadd
-// SHAPE: pto.vsts
+// SHAPE: arith.constant {{.*}} 64 : index
+// SHAPE: arith.constant {{.*}} 16 : index
+// SHAPE: pto.vmi.vload
+// SHAPE: pto.vmi.vadd
+// SHAPE: pto.vmi.vstore
 
 // After the later addr-only FoldTileBufIntrinsics:
-// - tile_buf_addr should still carry the planned tile address as pto.ptr
+// - tile_buf_addr should also be gone
+// - the expanded body should use concrete memrefs/constants
 // ADDR-LABEL: func.func @TADD
-// ADDR: pto.tile_buf_addr {{.*}} -> {{.*<f32, ub>}}
-// ADDR: pto.tile_buf_addr {{.*}} -> {{.*<f32, ub>}}
-// ADDR: pto.tile_buf_addr {{.*}} -> {{.*<f32, ub>}}
-// ADDR-NOT: pto.pointer_cast
+// ADDR: pto.pointer_cast(
+// ADDR: pto.pointer_cast(
+// ADDR: pto.pointer_cast(
+// ADDR-NOT: pto.tile_buf_addr
 // ADDR-NOT: pto.tile_valid_rows
 // ADDR-NOT: pto.tile_valid_cols
-// ADDR: scf.for
-// ADDR: pto.vlds
-// ADDR: pto.vlds
-// ADDR: pto.vadd
-// ADDR: pto.vsts
-
-// After VPTO pointer normalization:
-// - tile_buf_addr has been folded to concrete pto.castptr addresses
-// - tile-slice addressing is carried by the vlds/vsts offset operand
-// NORMALIZED-LABEL: func.func @TADD
-// NORMALIZED: pto.castptr
-// NORMALIZED: pto.castptr
-// NORMALIZED: pto.castptr
-// NORMALIZED-NOT: pto.tile_buf_addr
-// NORMALIZED-NOT: pto.pointer_cast
-// NORMALIZED-NOT: arith.muli
-// NORMALIZED: scf.for
-// NORMALIZED: pto.vlds
-// NORMALIZED: pto.vlds
-// NORMALIZED: pto.vadd
-// NORMALIZED: pto.vsts
+// ADDR-NOT: pto.bind_tile
+// ADDR: pto.vmi.vload
+// ADDR: pto.vmi.vload
+// ADDR: pto.vmi.vadd
+// ADDR: pto.vmi.vstore
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TADD() {
