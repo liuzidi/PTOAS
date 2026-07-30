@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from functools import lru_cache
-from importlib import import_module
 
 from .._template_package import load_template as _load_template, tileops_package
 
@@ -20,10 +19,7 @@ from .._template_package import load_template as _load_template, tileops_package
 def load_template(op: str, target: str) -> bool:
     """Load the canonical TileOps template and any registered VMI provider."""
 
-    loaded = _load_template(op, target)
-    if target == "a5" and op in _VMI_TEMPLATE_OPS:
-        import_module("lib.TileOps.a5._vmi_common")
-    return loaded
+    return _load_template(op, target)
 
 
 load_template_with_vmi = load_template

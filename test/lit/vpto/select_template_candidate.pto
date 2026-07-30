@@ -1,0 +1,43 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: pto-test-opt --pto-select-template-candidate='selection-policy=prefer-vmi' %s | FileCheck %s --check-prefix=VMI
+// RUN: pto-test-opt --pto-select-template-candidate='selection-policy=ordinary-only' %s | FileCheck %s --check-prefix=ORDINARY
+
+module {
+  func.func @select() {
+    %src = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    %dst = pto.alloc_tile
+      : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64, v_row=16, v_col=64,
+                      blayout=row_major, slayout=none_box, fractal=512, pad=0>
+    pto.tmov ins(%src : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64,
+                                      v_row=16, v_col=64, blayout=row_major,
+                                      slayout=none_box, fractal=512, pad=0>)
+      outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=64,
+                                v_row=16, v_col=64, blayout=row_major,
+                                slayout=none_box, fractal=512, pad=0>)
+      {candidates = [
+        {id = 0 : i64, name = "template_tmov", tags = ["elementwise"]},
+        {id = 1000 : i64, name = "vmi_tmov",
+         tags = ["vmi", "fusion_eligible"]}
+      ]}
+    return
+  }
+}
+
+// VMI: pto.tmov
+// VMI-SAME: pto.tilelib.impl = "vmi"
+// VMI-SAME: pto.tilelib.selected_candidate = {{.*}}name = "vmi_tmov"
+// VMI-NOT: pto.vmi.fusion.boundary
+
+// ORDINARY: pto.tmov
+// ORDINARY-SAME: pto.tilelib.impl = "ptodsl"
+// ORDINARY-SAME: pto.tilelib.selected_candidate = {{.*}}name = "template_tmov"
+// ORDINARY-SAME: pto.vmi.fusion.boundary = "local"

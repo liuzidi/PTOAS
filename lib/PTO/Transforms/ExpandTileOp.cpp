@@ -72,6 +72,26 @@ namespace pto {
 namespace {
 
 constexpr llvm::StringLiteral kCandidatesAttr = "candidates";
+constexpr llvm::StringLiteral kSelectedCandidateAttr =
+    "pto.tilelib.selected_candidate";
+constexpr llvm::StringLiteral kTileLibCandidateAttr = "pto.tilelib.candidate";
+constexpr llvm::StringLiteral kTileLibImplAttr = "pto.tilelib.impl";
+constexpr llvm::StringLiteral kVmiFusionSourceAttr = "pto.vmi.fusion.source";
+constexpr llvm::StringLiteral kVmiFusionTileOpAttr = "pto.vmi.fusion.tileop";
+constexpr llvm::StringLiteral kVmiFusionBoundaryAttr = "pto.vmi.fusion.boundary";
+constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
+    "pto.vmi.fusion.boundary_reason";
+
+static void copyTileLibSelectionAttrs(Operation *dst, Operation *src) {
+  for (StringRef attrName :
+       {StringRef(kTileLibCandidateAttr), StringRef(kTileLibImplAttr),
+        StringRef(kVmiFusionSourceAttr), StringRef(kVmiFusionTileOpAttr),
+        StringRef(kVmiFusionBoundaryAttr),
+        StringRef(kVmiFusionBoundaryReasonAttr)}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
+}
 
 // ============================================================================
 // OperandTypeInfo: describes one operand for template specialization.
@@ -1192,6 +1212,7 @@ func::FuncOp ExpandState::invokeInProcessTileLib(const SpecKey &key,
       auto cloned = cast<func::FuncOp>(builder.clone(*fn, mapping));
       cloned.setName(plannedSymbols.lookup(fn.getSymName()));
       cloned.setVisibility(SymbolTable::Visibility::Private);
+      copyTileLibSelectionAttrs(cloned, tileOp);
       clonedFuncs.push_back(cloned);
     }
 
@@ -1243,21 +1264,33 @@ func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
   }
 
   auto candidates = tileOp->getAttrOfType<ArrayAttr>(kCandidatesAttr);
-  if (!candidates || candidates.empty()) {
-    tileOp->emitError("ExpandTileOp requires at least one template candidate");
-    return nullptr;
+  DictionaryAttr selected;
+  if (auto selectedAttr =
+          tileOp->getAttrOfType<DictionaryAttr>(kSelectedCandidateAttr)) {
+    selected = selectedAttr;
+  } else if (candidates && !candidates.empty()) {
+    selected = dyn_cast<DictionaryAttr>(candidates[0]);
   }
-
-  auto selected = dyn_cast<DictionaryAttr>(candidates[0]);
   if (!selected) {
-    tileOp->emitError("ExpandTileOp candidate 0 must be a dictionary");
+    tileOp->emitError(
+        "ExpandTileOp requires a selected template candidate or a non-empty "
+        "candidates attribute");
     return nullptr;
   }
   auto selectedName = selected.getAs<StringAttr>("name");
   if (!selectedName) {
-    tileOp->emitError("ExpandTileOp candidate 0 requires a string name");
+    tileOp->emitError("ExpandTileOp selected candidate requires a string name");
     return nullptr;
   }
+
+  tileOp->setAttr(kTileLibCandidateAttr, selectedName);
+  if (!tileOp->hasAttr(kTileLibImplAttr))
+    tileOp->setAttr(kTileLibImplAttr,
+                    StringAttr::get(ctx, "ptodsl"));
+  tileOp->setAttr(kVmiFusionSourceAttr,
+                  StringAttr::get(ctx, "tilelib"));
+  tileOp->setAttr(kVmiFusionTileOpAttr,
+                  StringAttr::get(ctx, key.opName));
 
   std::string uniqueName =
       buildUniqueFunctionName(key, selectedName.getValue());

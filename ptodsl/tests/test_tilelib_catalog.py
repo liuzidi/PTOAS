@@ -916,6 +916,33 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertEqual(selected.name, "template_tmov_basic")
         self.assertIn("pto.vsts", selected.specialize(**specs).mlir_text())
 
+    def test_tmov_nd2nz_half_vl_renders(self):
+        specs = {
+            "src": TileSpec(
+                shape=(128, 64),
+                valid_shape=(128, 64),
+                dtype=ScalarType("bf16"),
+                memory_space="vec",
+                b_layout="row_major",
+                s_layout="none_box",
+            ),
+            "dst": TileSpec(
+                shape=(128, 64),
+                valid_shape=(128, 64),
+                dtype=ScalarType("bf16"),
+                memory_space="vec",
+                b_layout="col_major",
+                s_layout="row_major",
+            ),
+        }
+        selected = select("pto.tmov", "a5", specs)
+        self.assertEqual(selected.name, "template_tmov_nd2nz")
+        mlir = selected.specialize(**specs).mlir_text()
+        self.assertIn("pto.vlds", mlir)
+        self.assertIn("pto.vsstb", mlir)
+        self.assertEqual(mlir.count("scf.for"), 1)
+        self.assertIn("arith.constant 1 : i16", mlir)
+
     def test_tfillpad_expanding_zero_pad_remains_zero(self):
         specs = {
             "src": TileSpec(

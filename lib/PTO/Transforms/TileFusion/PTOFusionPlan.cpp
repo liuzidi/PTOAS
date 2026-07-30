@@ -81,10 +81,14 @@ static bool isCurrentlyPlannableOp(StringRef opName) {
       .Cases("tmul", "tdiv", "tadd", "tsub", "tmax", "tmin", true)
       .Cases("tmuls", "tdivs", "tadds", "tsubs", "tmaxs", "tmins", true)
       .Case("texp", true)
+      .Case("tmov", true)
       .Case("texpands", true)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv", true)
+      .Cases("tcolexpandsub", "tcolexpandadd", "tcolexpandmul", "tcolexpanddiv",
+             true)
       .Cases("trowsum", "trowmax", "trowmin", true)
       .Cases("tcolsum", "tcolmax", "tcolmin", true)
+      .Case("tcvt", true)
       .Default(false);
 }
 

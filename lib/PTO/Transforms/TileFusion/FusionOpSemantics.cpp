@@ -21,6 +21,7 @@ static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
       .Cases("tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins",
              FusionComputeFamily::Elementwise)
       .Case("texp", FusionComputeFamily::Elementwise)
+      .Case("tmov", FusionComputeFamily::Elementwise)
       .Case("texpands", FusionComputeFamily::ScalarExpand)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv",
              FusionComputeFamily::RowBroadcastBinary)
@@ -110,8 +111,12 @@ FailureOr<FusionOpSemantics> getFusionOpSemantics(Operation *op) {
 
   semantics.kind = FusionOpKind::Compute;
   semantics.tileOutputs = collectNormalizedTileOutputs(op);
-  if (semantics.tileOutputs.empty())
-    return failure();
+  // EmitC still carries tile operations on memrefs. They are not eligible for
+  // tile-native fusion, but remain valid hard boundaries in the shared DFG.
+  if (semantics.tileOutputs.empty()) {
+    semantics.kind = FusionOpKind::HardBoundary;
+    return semantics;
+  }
 
   SmallVector<unsigned, 4> dpsInitOperandNumbers;
   if (dpsIface) {

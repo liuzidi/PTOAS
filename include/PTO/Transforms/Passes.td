@@ -573,6 +573,25 @@ def InsertTemplateAttributes
   ];
 }
 
+def SelectTemplateCandidate
+    : Pass<"pto-select-template-candidate", "ModuleOp"> {
+  let summary = "Select one implementation from each tile operation's candidates";
+  let description = [{
+    Applies candidate-selection policy after fusion planning. `prefer-vmi`
+    selects a fusion-eligible VMI implementation when its shape capability is
+    sufficient, then falls back to an ordinary PTODSL implementation.
+    `ordinary-only` excludes VMI implementations. The selected implementation
+    and any VMI fusion boundary are recorded for ExpandTileOp to consume.
+  }];
+  let constructor = "mlir::pto::createSelectTemplateCandidatePass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+  let options = [
+    Option<"selectionPolicy", "selection-policy", "std::string",
+           /*default=*/"\"prefer-vmi\"",
+           "Candidate policy: prefer-vmi or ordinary-only">
+  ];
+}
+
 def ExpandTileOp : Pass<"pto-expand-tile-op", "ModuleOp"> {
   let summary = "Expand tile ops into calls to TileLib template functions";
   let description = [{
@@ -701,6 +720,66 @@ def PTOInlineLibCall : Pass<"pto-inline-libcall", "ModuleOp"> {
       "debug", "debug", "bool",
       /*default=*/"false",
       "Enable verbose debug logging for OP-Lib instantiation/inlining">];
+}
+
+def PTOVmiLoopFusion : Pass<"pto-vmi-loop-fusion", "ModuleOp"> {
+  let summary = "Fuse same-header scf.for loops inside each pto.fusion_region";
+  let description = [{
+    Runs after `PTOFusionRegionGen` has wrapped compute TileOps into
+    `pto.fusion_region` regions (and before `VMILowerUnifiedToLegacy`).
+    Adjacent `scf.for` ops with structurally identical headers (same
+    lower/upper bound, step, and semantic attributes, including constant
+    offsets)
+    are merged into one fused loop: each original loop's region iter-args
+    (reduce carry) and body operations are concatenated in source order, and the
+    fused `scf.yield` concatenates the original yield operands mapped through the
+    fused loop's iter-args. The fused loop is built with a body-builder callback
+    so the yield is constructed in place. Whether two for's fuse is decided by
+    whether the ops between them can be legally relocated after fusion: hoisted
+    above the fused for (loop-invariant) or sunk below it. Between-ops form
+    dependency-connected components (SSA def-use or same-UB store->load); each
+    moves as a whole. A component that can neither hoist nor sink blocks fusion.
+    The pass operates only inside `pto.fusion_region` regions; IR outside
+    regions is untouched. It does not perform mem2reg (UB roundtrip elimination)
+    and does not build `pto.vecscope`. This replaces the legacy a5
+    `PTOLowLevelLoopFusion` for the ptodsl-vmi path.
+  }];
+  let constructor = "mlir::pto::createPTOVmiLoopFusionPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::arith::ArithDialect"];
+}
+
+def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> {
+  let summary = "Forward and elide fusion-region-local VMI loads/stores";
+  let description = [{
+    Two-pass + lane-interval tracking. Pass 1 forward scans each
+    `pto.fusion_region` (top-level segments between for's + each fused
+    `scf.for` body) building a content-version table and marking forward targets
+    without mutating IR; Pass 2 reverses to replace loads' uses with the
+    recorded source value and erase dead loads/stores (use_empty-guarded). The
+    canonical tracked value is resolved through the `pto.pointer_cast`/
+    `pto.castptr` UB alias chain; a `pto.vmi.vload` has no mask operand so its
+    read lane set is inferred from its consuming op (mask-free consumers like
+    vcvt => full vreg). `create_mask %N` is a prefix predicate, so lane sets are
+    modeled as prefix intervals [0,N): store->load forward when the store's
+    write set contains the load's read set with no intervening intersecting
+    write; vload->vload dedup when read sets match with no intervening
+    intersecting write; merge-pmode stores only invalidate the lane interval
+    they write (partial overlap marks entries stale but not dead, so a later
+    vload of mixed content correctly does NOT forward — badref guard). Stores
+    whose UB escapes the region (read by a later mte_ub_gm) are marked
+    non-erasable and preserved. This first version primarily forwards consumer
+    loads; producer stores are erased only when the local analysis also proves
+    them dead, so it does not claim complete UB store-load roundtrip removal.
+    Must run after `PTOVmiLoopFusion` + CSE and before
+    `VMILowerUnifiedToLegacy` (which lowers `pto.vmi.vload/vstore` to
+    `pto.vlds/vsts`).
+  }];
+  let constructor = "mlir::pto::createPTOVmiLoadStoreElisionPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::memref::MemRefDialect"];
 }
 
 def PTOInlineBackendHelpers

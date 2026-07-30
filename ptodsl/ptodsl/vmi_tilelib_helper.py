@@ -98,6 +98,7 @@ def _parse_parameter_spec(raw: dict, index: int):
         raise ValueError(f"operand-specs[{index}] shape must contain integers") from exc
 
     valid_shape = raw.get("valid_shape")
+    parsed_valid_shape = parsed_shape
     if valid_shape is not None:
         if not isinstance(valid_shape, list) or len(valid_shape) != 2:
             raise ValueError(f"operand-specs[{index}] valid_shape must be rank-2")
@@ -105,9 +106,15 @@ def _parse_parameter_spec(raw: dict, index: int):
             raise ValueError(
                 "initial PTODSL VMI provider does not support dynamic valid_shape"
             )
-        if tuple(int(dim) for dim in valid_shape) != parsed_shape:
+        parsed_valid_shape = tuple(int(dim) for dim in valid_shape)
+        # pto-isa invariant: ValidRow <= alignRow (physical). valid_shape may be
+        # smaller than physical shape (e.g. RowPlusOne: valid=(128,64),
+        # shape=(129,64)) — the +1 padding band lives only in UB, never GM.
+        if parsed_valid_shape[0] > parsed_shape[0] or parsed_valid_shape[1] > parsed_shape[1]:
             raise ValueError(
-                "initial PTODSL VMI provider requires valid_shape to equal physical shape"
+                "initial PTODSL VMI provider requires valid_shape to not exceed "
+                f"physical shape {parsed_shape}; operand-specs[{index}] has "
+                f"valid_shape={list(parsed_valid_shape)}"
             )
 
     memory_space = raw.get("memory_space", "ub")
@@ -115,8 +122,11 @@ def _parse_parameter_spec(raw: dict, index: int):
         raise ValueError(
             f"initial PTODSL VMI provider supports only UB tiles, got {memory_space!r}"
         )
-    b_layout = _parse_tile_config(raw.get("config"), index)
-    return TileSpec(parsed_shape, dtype, memory_space="ub", b_layout=b_layout)
+    b_layout, compact_mode = _parse_tile_config(raw.get("config"), index)
+    return TileSpec(
+        parsed_shape, dtype, memory_space="ub", b_layout=b_layout,
+        valid_shape=parsed_valid_shape, compact_mode=compact_mode,
+    )
 
 
 def _parse_legality_parameter_spec(raw: dict, index: int):
@@ -126,13 +136,23 @@ def _parse_legality_parameter_spec(raw: dict, index: int):
     return parsed
 
 
-def _parse_tile_config(config: object, index: int) -> str:
+def _parse_tile_config(config: object, index: int) -> tuple[str, str]:
+    """Return ``(b_layout, compact_mode)`` from the operand config object.
+
+    compact_mode: "normal" (default, includes null/0/1) or "row_plus_one" (2).
+    """
     if config is None:
-        return "row_major"
+        return ("row_major", "normal")
     if not isinstance(config, dict):
         raise ValueError(f"operand-specs[{index}] config must be an object")
+    allowed_s_layouts = {"none_box", "row_major"}
+    s_layout = config.get("s_layout", "none_box")
+    if s_layout not in allowed_s_layouts:
+        raise ValueError(
+            "initial PTODSL VMI provider supports only none_box or row_major "
+            f"secondary layouts; operand-specs[{index}] has s_layout={s_layout!r}"
+        )
     expected = {
-        "s_layout": "none_box",
         "s_fractal_size": 512,
         "pad_value": "0x0",
     }
@@ -151,7 +171,24 @@ def _parse_tile_config(config: object, index: int) -> str:
             "initial PTODSL VMI provider supports row-major or col-major tiles; "
             f"operand-specs[{index}] has b_layout={b_layout!r}"
         )
-    return b_layout
+    # compact_mode: ExpandTileOp emits it as an int (0/1=Normal, 2=RowPlusOne).
+    compact_int = config.get("compact_mode", 1)
+    try:
+        compact_int = int(compact_int)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"operand-specs[{index}] compact_mode must be an int, got {compact_int!r}"
+        ) from exc
+    if compact_int in (0, 1):
+        compact_mode = "normal"
+    elif compact_int == 2:
+        compact_mode = "row_plus_one"
+    else:
+        raise ValueError(
+            f"operand-specs[{index}] compact_mode must be 0/1 (Normal) or 2 "
+            f"(RowPlusOne), got {compact_int}"
+        )
+    return (b_layout, compact_mode)
 
 
 def _is_vmi_candidate(descriptor) -> bool:

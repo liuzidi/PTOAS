@@ -754,6 +754,7 @@ class _VMINamespace:
         dist_mode=None,
         group=None,
         pmode=None,
+        post_update=False,
         loc=None,
         ip=None,
     ):
@@ -774,9 +775,31 @@ class _VMINamespace:
                 raise TypeError('pto.vmi.vstore(...) with dist_mode="dintlv" requires an (even, odd) pair')
         elif _is_sequence(values):
             raise TypeError("pto.vmi.vstore(...) expects a single VMI vector unless dist_mode=\"dintlv\"")
+        dest = _raw(destination)
+        if post_update:
+            # Produce the updated_base result (block-stride mode only): the
+            # generated vstore builder takes the result type as `updated_base`.
+            # Returns the updated dst pointer Value.
+            op = _generated("vstore")(
+                _type_of(dest),
+                _raw_sequence(values),
+                dest,
+                _coerce_index_value(offset),
+                _variadic_mask(mask),
+                stride=None if stride is None else _coerce_index_value(stride),
+                block_stride=_i16_value(block_stride, context="pto.vmi.vstore(block_stride)"),
+                repeat_stride=_i16_value(repeat_stride, context="pto.vmi.vstore(repeat_stride)"),
+                dist_mode=dist_mode,
+                group=group,
+                pmode=pmode,
+                loc=loc,
+                ip=ip,
+            )
+            return _wrap_result(op)
         return _generated("vstore")(
+            None,
             _raw_sequence(values),
-            _raw(destination),
+            dest,
             _coerce_index_value(offset),
             _variadic_mask(mask),
             stride=None if stride is None else _coerce_index_value(stride),

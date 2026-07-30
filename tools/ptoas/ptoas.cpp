@@ -430,6 +430,11 @@ static llvm::cl::opt<bool> enableTileOpExpand(
         "--pto-backend=vpto."),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableVMI(
+    "enable-vmi",
+    llvm::cl::desc("Enable VMI fusion and load/store elision on the VPTO path"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
     llvm::cl::desc("Control A5 tile fusion on level2/level3. Disabled by "
@@ -3102,7 +3107,18 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   // the pipeline can use MLIR's standard Func inliner implementation.
   kernelModulePM.addPass(std::make_unique<ApplySIMTEntryNoInlinePass>());
   kernelModulePM.addPass(createInlinerPass());
-  appendVMISemanticPipeline(kernelModulePM);
+  // Direct VMI input requires semantic lowering even when the optimization
+  // switch is disabled; loop fusion and forwarding remain gated by enableVMI.
+  bool containsVMI = false;
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef().starts_with("pto.vmi.")) {
+      containsVMI = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (enableVMI || containsVMI)
+    appendVMISemanticPipeline(kernelModulePM);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -3119,6 +3135,18 @@ static void appendVMISemanticPipeline(OpPassManager &pm) {
   // verifier, layout, or lowering pass sees signless integer element types.
   pm.addNestedPass<func::FuncOp>(
       pto::createVMINormalizeSignlessIntToUnsignedPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  if (enableVMI) {
+    // Optimize fusion regions while loads and stores are still unified VMI ops.
+    pm.addPass(pto::createPTOVmiLoopFusionPass());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+    pm.addNestedPass<func::FuncOp>(
+        pto::createPTOVmiLoadStoreElisionPass());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+  }
   // Expand unified VMI ops before layout assignment so grouped vci becomes
   // the contiguous-only legacy group_iota producer. Layout assignment can
   // then materialize any consumer-requested non-contiguous use explicitly.
@@ -3462,6 +3490,8 @@ int mlir::pto::compilePTOASModule(
   fusionPlanOpts.enableVfSimCostmodelOptimization =
       enableVfSimCostmodelOptimization;
   fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
+  if (enableVMI && enableA5VPTOFusionPath)
+    fusionPlanOpts.strategy = "vmi-ub-disjoint";
   if (!isA2A3 && enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));
@@ -3472,6 +3502,12 @@ int mlir::pto::compilePTOASModule(
         pto::createFusionPlanPass(fusionPlanOpts));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
+  }
+  if (!isA2A3 && effectiveBackend == PTOBackend::VPTO &&
+      hasTileOpsToExpand && enableVMI && enableA5VPTOFusionPath) {
+    pto::SelectTemplateCandidateOptions selectOptions;
+    selectOptions.selectionPolicy = "prefer-vmi";
+    pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
   }
 
   pm.addNestedPass<mlir::func::FuncOp>(
