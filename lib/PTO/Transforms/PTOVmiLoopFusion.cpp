@@ -82,31 +82,27 @@ using namespace mlir::pto;
 
 namespace {
 
-// Resolve a value to the comparison key used for header equivalence: trace the
-// pointer_cast/castptr/arith.constant alias chain so that two references to the
-// same compile-time UB address or the same constant are treated as identical.
-static Value canonicalizeForCompare(Value v) {
-  if (auto arg = dyn_cast<BlockArgument>(v))
-    return v;
-  Operation *def = v.getDefiningOp();
-  if (!def)
-    return v;
-
-  if (auto pc = dyn_cast<pto::PointerCastOp>(def)) {
-    if (!pc.getOperands().empty())
-      return canonicalizeForCompare(pc.getOperands()[0]);
-  }
-  if (auto cp = dyn_cast<pto::CastPtrOp>(def))
-    return canonicalizeForCompare(cp->getOperand(0));
-  if (auto add = dyn_cast<arith::AddIOp>(def)) {
-    if (auto lhs = dyn_cast<arith::ConstantOp>(
-            add.getLhs().getDefiningOp()))
-      return canonicalizeForCompare(add.getRhs());
-    if (auto rhs = dyn_cast<arith::ConstantOp>(
-            add.getRhs().getDefiningOp()))
-      return canonicalizeForCompare(add.getLhs());
-  }
-  return v;
+// Structural equivalence for loop bounds and steps. Preserve every operation,
+// operand and attribute: in particular, N+1 and N+2 are different headers.
+static bool areEquivalentHeaderValues(Value lhs, Value rhs) {
+  if (lhs == rhs)
+    return true;
+  if (!lhs || !rhs || lhs.getType() != rhs.getType())
+    return false;
+  Operation *ld = lhs.getDefiningOp();
+  Operation *rd = rhs.getDefiningOp();
+  if (!ld || !rd || ld == rd)
+    return ld == rd;
+  if (ld->getName() != rd->getName() || ld->getNumRegions() != 0 ||
+      rd->getNumRegions() != 0 ||
+      ld->getNumOperands() != rd->getNumOperands() ||
+      ld->getAttrDictionary() != rd->getAttrDictionary() ||
+      !llvm::equal(ld->getResultTypes(), rd->getResultTypes()))
+    return false;
+  for (auto [a, b] : llvm::zip(ld->getOperands(), rd->getOperands()))
+    if (!areEquivalentHeaderValues(a, b))
+      return false;
+  return true;
 }
 
 static bool isFusionProvenanceAttr(NamedAttribute attr) {
@@ -124,14 +120,11 @@ static SmallVector<NamedAttribute, 4> getSemanticLoopAttrs(scf::ForOp loop) {
 }
 
 static bool sameHeader(scf::ForOp a, scf::ForOp b) {
-  if (canonicalizeForCompare(a.getStep()) !=
-      canonicalizeForCompare(b.getStep()))
+  if (!areEquivalentHeaderValues(a.getStep(), b.getStep()))
     return false;
-  if (canonicalizeForCompare(a.getLowerBound()) !=
-      canonicalizeForCompare(b.getLowerBound()))
+  if (!areEquivalentHeaderValues(a.getLowerBound(), b.getLowerBound()))
     return false;
-  if (canonicalizeForCompare(a.getUpperBound()) !=
-      canonicalizeForCompare(b.getUpperBound()))
+  if (!areEquivalentHeaderValues(a.getUpperBound(), b.getUpperBound()))
     return false;
   if (getSemanticLoopAttrs(a) != getSemanticLoopAttrs(b))
     return false;
@@ -475,8 +468,44 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
         return true;
     }
   }
+  // Writes are order-sensitive too. Only the same injective location in the
+  // same logical iteration preserves the original loop-by-loop WAW order.
+  for (const auto &runWrite : runAcc) {
+    if (runWrite.isLoad)
+      continue;
+    for (const auto &candWrite : candAcc) {
+      if (candWrite.isLoad || !(runWrite.ub == candWrite.ub))
+        continue;
+      if (isCrossIter(runWrite, candWrite))
+        return true;
+    }
+  }
   return false;
 };
+
+// First-version iter-arg handling only concatenates independent loop-carried
+// state. Reject a candidate that consumes any result of an earlier member,
+// whether as an init arg or as a value captured in its body.
+static bool hasMemberResultDependency(ArrayRef<Member> members,
+                                      scf::ForOp cand) {
+  SmallPtrSet<Value, 16> memberResults;
+  for (const Member &member : members) {
+    scf::ForOp loop = member.loop;
+    for (Value result : loop.getResults())
+      memberResults.insert(result);
+  }
+  bool dependent = false;
+  cand->walk([&](Operation *op) {
+    for (Value operand : op->getOperands()) {
+      if (!memberResults.count(operand))
+        continue;
+      dependent = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return dependent;
+}
 
 static SmallVector<scf::ForOp, 8> membersAsLoops(ArrayRef<Member> members) {
   SmallVector<scf::ForOp, 8> loops;
@@ -485,12 +514,26 @@ static SmallVector<scf::ForOp, 8> membersAsLoops(ArrayRef<Member> members) {
   return loops;
 }
 
+// PTO address/mask materializations predate consistent Pure traits but are
+// side-effect-free and safe to relocate. Keep this exception list closed.
+static bool isKnownRelocatablePure(Operation *op) {
+  return isPure(op) ||
+         isa<pto::PointerCastOp, pto::CastPtrOp, pto::VMICreateMaskOp>(op);
+}
+
 // Can `op` be hoisted above the fused for (run before any member executes)?
 // Inputs must be available before the run: no SSA use of any member's result,
 // and no UB read of an address that some member writes (that would read a
 // loop-produced value).
 static bool canHoistAboveRun(Operation *op, ArrayRef<scf::ForOp> runLoops,
+                             ArrayRef<UBId> runReads,
                              ArrayRef<UBId> runWrites) {
+  // Closed-set relocation: pure regionless ops and the two explicitly modeled
+  // unified memory ops are the only operations movable across a fusion run.
+  if (op->getNumRegions() != 0 ||
+      (!isKnownRelocatablePure(op) &&
+       !isa<pto::VMIvLoadOp, pto::VMIvStoreOp>(op)))
+    return false;
   SmallPtrSet<Value, 16> loopResults;
   for (scf::ForOp l : runLoops)
     for (Value r : l.getResults())
@@ -498,10 +541,17 @@ static bool canHoistAboveRun(Operation *op, ArrayRef<scf::ForOp> runLoops,
   for (Value opnd : op->getOperands())
     if (loopResults.count(opnd))
       return false;
-  if (auto v = dyn_cast<pto::VMIvLoadOp>(op))
-    if (auto id = getVLoadUB(v))
-      if (ubListContains(runWrites, *id))
-        return false;
+  if (auto v = dyn_cast<pto::VMIvLoadOp>(op)) {
+    auto id = getVLoadUB(v);
+    if (!id || ubListContains(runWrites, *id))
+      return false;
+  }
+  if (auto v = dyn_cast<pto::VMIvStoreOp>(op)) {
+    auto id = getVStoreUB(v);
+    if (!id || ubListContains(runReads, *id) ||
+        ubListContains(runWrites, *id))
+      return false;
+  }
   return true;
 }
 
@@ -509,16 +559,28 @@ static bool canHoistAboveRun(Operation *op, ArrayRef<scf::ForOp> runLoops,
 // UB writes must not be read inside any member (members run per iteration and
 // would need the value). SSA outputs consumed inside members also block sink.
 static bool canSinkBelowRun(Operation *op, ArrayRef<scf::ForOp> runLoops,
-                            ArrayRef<UBId> runReads) {
+                            ArrayRef<UBId> runReads,
+                            ArrayRef<UBId> runWrites) {
+  if (op->getNumRegions() != 0 ||
+      (!isKnownRelocatablePure(op) &&
+       !isa<pto::VMIvLoadOp, pto::VMIvStoreOp>(op)))
+    return false;
   for (Value res : op->getResults())
     for (OpOperand &use : res.getUses())
       for (scf::ForOp l : runLoops)
         if (l->isAncestor(use.getOwner()))
           return false;
-  if (auto v = dyn_cast<pto::VMIvStoreOp>(op))
-    if (auto id = getVStoreUB(v))
-      if (ubListContains(runReads, *id))
-        return false;
+  if (auto v = dyn_cast<pto::VMIvStoreOp>(op)) {
+    auto id = getVStoreUB(v);
+    if (!id || ubListContains(runReads, *id) ||
+        ubListContains(runWrites, *id))
+      return false;
+  }
+  if (auto v = dyn_cast<pto::VMIvLoadOp>(op)) {
+    auto id = getVLoadUB(v);
+    if (!id || ubListContains(runWrites, *id))
+      return false;
+  }
   return true;
 }
 
@@ -615,6 +677,9 @@ static SmallVector<Member, 8> collectRun(Block &body,
     if (!sameHeader(first, cand))
       break;
 
+    if (hasMemberResultDependency(members, cand))
+      break;
+
     // Between-ops: [betweenStart, cand).
     SmallVector<Operation *, 8> between;
     for (Operation *op = betweenStart; op && op != cand;
@@ -650,9 +715,9 @@ static SmallVector<Member, 8> collectRun(Block &body,
     for (const SmallVector<Operation *, 4> &comp : comps) {
       bool compHoist = true, compSink = true;
       for (Operation *op : comp) {
-        if (!canHoistAboveRun(op, fullLoops, runWrites))
+        if (!canHoistAboveRun(op, fullLoops, runReads, runWrites))
           compHoist = false;
-        if (!canSinkBelowRun(op, fullLoops, runReads))
+        if (!canSinkBelowRun(op, fullLoops, runReads, runWrites))
           compSink = false;
       }
       if (!compHoist && !compSink) {
@@ -669,7 +734,7 @@ static SmallVector<Member, 8> collectRun(Block &body,
     for (const SmallVector<Operation *, 4> &comp : comps) {
       bool compHoist = true;
       for (Operation *op : comp)
-        if (!canHoistAboveRun(op, fullLoops, runWrites)) {
+        if (!canHoistAboveRun(op, fullLoops, runReads, runWrites)) {
           compHoist = false;
           break;
         }

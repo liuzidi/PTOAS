@@ -3107,7 +3107,18 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   // the pipeline can use MLIR's standard Func inliner implementation.
   kernelModulePM.addPass(std::make_unique<ApplySIMTEntryNoInlinePass>());
   kernelModulePM.addPass(createInlinerPass());
-  appendVMISemanticPipeline(kernelModulePM);
+  // Direct VMI input requires semantic lowering even when the optimization
+  // switch is disabled; loop fusion and forwarding remain gated by enableVMI.
+  bool containsVMI = false;
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef().starts_with("pto.vmi.")) {
+      containsVMI = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (enableVMI || containsVMI)
+    appendVMISemanticPipeline(kernelModulePM);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -3124,9 +3135,10 @@ static void appendVMISemanticPipeline(OpPassManager &pm) {
   // verifier, layout, or lowering pass sees signless integer element types.
   pm.addNestedPass<func::FuncOp>(
       pto::createVMINormalizeSignlessIntToUnsignedPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   if (enableVMI) {
-    pm.addPass(createCanonicalizerPass());
-    pm.addPass(createCSEPass());
+    // Optimize fusion regions while loads and stores are still unified VMI ops.
     pm.addPass(pto::createPTOVmiLoopFusionPass());
     pm.addPass(createCanonicalizerPass());
     pm.addPass(createCSEPass());

@@ -727,8 +727,9 @@ def PTOVmiLoopFusion : Pass<"pto-vmi-loop-fusion", "ModuleOp"> {
   let description = [{
     Runs after `PTOFusionRegionGen` has wrapped compute TileOps into
     `pto.fusion_region` regions (and before `VMILowerUnifiedToLegacy`).
-    Adjacent `scf.for` ops with identical headers (same lower/upper bound, step,
-    and attributes, compared through the `pointer_cast`/`castptr` UB alias chain)
+    Adjacent `scf.for` ops with structurally identical headers (same
+    lower/upper bound, step, and semantic attributes, including constant
+    offsets)
     are merged into one fused loop: each original loop's region iter-args
     (reduce carry) and body operations are concatenated in source order, and the
     fused `scf.yield` concatenates the original yield operands mapped through the
@@ -750,7 +751,7 @@ def PTOVmiLoopFusion : Pass<"pto-vmi-loop-fusion", "ModuleOp"> {
 }
 
 def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> {
-  let summary = "Elide fusion-region-local VMI load/store round trips";
+  let summary = "Forward and elide fusion-region-local VMI loads/stores";
   let description = [{
     Two-pass + lane-interval tracking. Pass 1 forward scans each
     `pto.fusion_region` (top-level segments between for's + each fused
@@ -768,10 +769,11 @@ def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> 
     they write (partial overlap marks entries stale but not dead, so a later
     vload of mixed content correctly does NOT forward — badref guard). Stores
     whose UB escapes the region (read by a later mte_ub_gm) are marked
-    non-erasable and preserved. This performs the UB roundtrip elimination
-    (US-005 mem2reg) for the ptodsl-vmi path, replacing the legacy a5
-    `PTOFusionLoadStoreElision`. Must run after `PTOVmiLoopFusion` + CSE and
-    before `VMILowerUnifiedToLegacy` (which lowers `pto.vmi.vload/vstore` to
+    non-erasable and preserved. This first version primarily forwards consumer
+    loads; producer stores are erased only when the local analysis also proves
+    them dead, so it does not claim complete UB store-load roundtrip removal.
+    Must run after `PTOVmiLoopFusion` + CSE and before
+    `VMILowerUnifiedToLegacy` (which lowers `pto.vmi.vload/vstore` to
     `pto.vlds/vsts`).
   }];
   let constructor = "mlir::pto::createPTOVmiLoadStoreElisionPass()";

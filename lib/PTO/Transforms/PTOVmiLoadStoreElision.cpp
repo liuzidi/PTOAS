@@ -7,7 +7,7 @@
 // See LICENSE in the root directory of the software repository for the full text of the License.
 
 //===----------------------------------------------------------------------===//
-// PTOVmiLoadStoreElision.cpp - elide vmi load/store round trips
+// PTOVmiLoadStoreElision.cpp - forward and elide vmi loads/stores
 //===----------------------------------------------------------------------===//
 //
 // Adapted from PTOFusionLoadStoreElision for the unified VMI path. Inside each
@@ -209,6 +209,21 @@ static bool areEquivalentValues(Value lhs, Value rhs) {
   if (isa<arith::ConstantOp>(ld) && isa<arith::ConstantOp>(rd))
     return ld->getAttrDictionary() == rd->getAttrDictionary();
   return cl == cr;
+}
+
+// Storage-root identity deliberately ignores the pointer_cast result type.
+// Different memref views of the same constant UB address may overlap even when
+// they cannot be used as exact forwarding matches.
+static bool haveSameStorageRoot(Value lhs, Value rhs) {
+  Value cl = getCanonicalTrackedValue(lhs);
+  Value cr = getCanonicalTrackedValue(rhs);
+  auto lp = cl ? cl.getDefiningOp<pto::PointerCastOp>() : nullptr;
+  auto rp = cr ? cr.getDefiningOp<pto::PointerCastOp>() : nullptr;
+  if (!lp || !rp || lp.getOperands().empty() || rp.getOperands().empty())
+    return false;
+  auto lc = lp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
+  auto rc = rp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
+  return lc && rc && lc.getValue() == rc.getValue();
 }
 
 static bool areEquivalentMaskValues(Value lhs, Value rhs) {
@@ -673,8 +688,14 @@ static bool elideOpRange(OpRange ops) {
       //    be read / escape).
       for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
         ContentEntry &e = entries[i];
-        if (!sameLoc(e, base, offset))
+        if (!haveSameStorageRoot(e.base, base))
           continue;
+        // Without a byte-range alias model, a different offset or view on the
+        // same storage root may partially overlap this write.
+        if (!sameLoc(e, base, offset)) {
+          e.stale = true;
+          continue;
+        }
         if (writeLanes.contains(e.lanes)) {
           if (!e.isLoad && !e.escapeMark)
             e.eraseMark = true;

@@ -4551,6 +4551,17 @@ void VMIvStoreOp::print(OpAsmPrinter &p) {
 }
 
 LogicalResult VMIvStoreOp::verify() {
+  bool hasBlock = static_cast<bool>(getBlockStride());
+  bool hasRepeat = static_cast<bool>(getRepeatStride());
+  if (Value updatedBase = getUpdatedBase()) {
+    if (!(hasBlock && hasRepeat))
+      return emitOpError(
+          "updated_base result requires block_stride and repeat_stride");
+    if (updatedBase.getType() != getDestination().getType())
+      return emitOpError(
+          "updated_base result type must match destination type");
+  }
+
   // group and dist_mode are mutually exclusive
   if (getGroup() && getDistMode()) {
     return emitOpError("group and dist_mode are mutually exclusive");
@@ -4581,8 +4592,6 @@ LogicalResult VMIvStoreOp::verify() {
 
   // block_stride / repeat_stride: paired, mutually exclusive with
   // dist_mode and group
-  bool hasBlock = static_cast<bool>(getBlockStride());
-  bool hasRepeat = static_cast<bool>(getRepeatStride());
   if (hasBlock != hasRepeat)
     return emitOpError(
         "block_stride and repeat_stride must both be present or absent");

@@ -1479,6 +1479,9 @@ def VMIvStoreOp : VMI_Op<"vstore",
     block-stride mode (mutually exclusive with dist-mode and group):
     - {block_stride = B, repeat_stride = R}: block-strided masked store
 
+    The optional updated_base result is valid only in block-stride mode and
+    has the same type as destination. It represents post-update address state.
+
     pmode governs inactive lane behavior:
     - "zero" (default):  inactive lanes store 0
     - "merge":           inactive lanes skip write (needs mask)

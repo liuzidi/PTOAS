@@ -116,4 +116,64 @@ module {
     } : index
     return
   }
+
+  // Distinct constant offsets in a bound are distinct iteration domains.
+  // LOOP-LABEL: func.func @different_bound_offsets
+  // LOOP-COUNT-2: scf.for
+  // LOOP-NOT: scf.for
+  func.func @different_bound_offsets(%n: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %n1 = arith.addi %n, %c1 : index
+    %n2 = arith.addi %n, %c2 : index
+    %unused = pto.fusion_region {
+      scf.for %i = %c0 to %n1 step %c1 {}
+      scf.for %i = %c0 to %n2 step %c1 {}
+      pto.yield(%c0) : (index) -> ()
+    } : index
+    return
+  }
+
+  // Direct member-result threading is not supported by the concatenating
+  // iter-arg builder and must keep the loops separate.
+  // LOOP-LABEL: func.func @member_result_dependency
+  // LOOP-COUNT-2: scf.for
+  // LOOP-NOT: scf.for
+  func.func @member_result_dependency() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    pto.fusion_region {
+      %a = scf.for %i = %c0 to %c4 step %c1 iter_args(%x = %c0) -> index {
+        scf.yield %i : index
+      }
+      %b = scf.for %i = %c0 to %c4 step %c1 iter_args(%x = %a) -> index {
+        scf.yield %x : index
+      }
+      pto.yield(%b) : (index) -> ()
+    } : index
+    return
+  }
+
+  func.func private @unknown_effect()
+
+  // Calls are not in the relocation closed set, even without SSA edges.
+  // LOOP-LABEL: func.func @unknown_between_effect
+  // LOOP: scf.for
+  // LOOP: func.call @unknown_effect
+  // LOOP: scf.for
+  // LOOP-NOT: scf.for
+  func.func @unknown_between_effect() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %unused = pto.fusion_region {
+      scf.for %i = %c0 to %c4 step %c1 {}
+      func.call @unknown_effect() : () -> ()
+      scf.for %i = %c0 to %c4 step %c1 {}
+      pto.yield(%c0) : (index) -> ()
+    } : index
+    return
+  }
 }
