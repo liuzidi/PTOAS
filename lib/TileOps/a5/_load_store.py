@@ -119,6 +119,10 @@ def tload_nd2nd_constraint(src_kind, src_shape, src_strides, src_memory_space, d
     elif _view_rank(src_shape) == 2:
         logical_rows, logical_cols = src_shape
         stride_axis = 1
+    elif _view_rank(src_shape) == 3 and src_shape[1] == 1:
+        logical_rows = src_shape[0]
+        logical_cols = src_shape[2]
+        stride_axis = 2
     else:
         logical_rows = _shape_size(src_shape[:4])
         logical_cols = src_shape[4]
@@ -131,7 +135,7 @@ def tload_nd2nd_constraint(src_kind, src_shape, src_strides, src_memory_space, d
         logical_rows=logical_rows,
         logical_cols=logical_cols,
         stride_axis=stride_axis,
-        ranks=(1, 2, 5),
+        ranks=(1, 2, 3, 5),
     )
 
 
@@ -180,6 +184,10 @@ def tstore_nd_constraint(src_kind, src_shape, src_valid_shape, src_memory_space,
     elif _view_rank(dst_shape) == 2:
         logical_rows, logical_cols = dst_shape
         stride_axis = 1
+    elif _view_rank(dst_shape) == 3 and dst_shape[1] == 1:
+        logical_rows = dst_shape[0]
+        logical_cols = dst_shape[2]
+        stride_axis = 2
     else:
         logical_rows = _shape_size(dst_shape[:4])
         logical_cols = dst_shape[4]
@@ -192,7 +200,7 @@ def tstore_nd_constraint(src_kind, src_shape, src_valid_shape, src_memory_space,
         logical_rows=logical_rows,
         logical_cols=logical_cols,
         stride_axis=stride_axis,
-        ranks=(1, 2, 5),
+        ranks=(1, 2, 3, 5),
     )
 
 

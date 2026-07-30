@@ -67,6 +67,21 @@ def template_tload_nd2nd(src: pto.PartitionTensorView, dst: pto.Tile):
         )
         return
 
+    if len(src.shape) == 3 and src.shape[1] == 1:
+        _, ub_cols = dst.shape
+        valid_rows, valid_cols = dst.valid_shape
+        row_stride, _, _ = src.strides
+        row_stride = valid_cols if row_stride is None else row_stride
+        pto.mte_load(
+            src.as_ptr(),
+            dst.as_ptr(),
+            0,
+            valid_cols * elem_bytes,
+            nburst=(valid_rows, row_stride * elem_bytes, ub_cols * elem_bytes),
+            pad=dma_pad_for(dst),
+        )
+        return
+
     g0, g1, g2, g3, g4 = src.shape
     s0, s1, s2, s3, s4 = src.strides
     _, ub_cols = dst.shape

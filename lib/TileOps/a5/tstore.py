@@ -64,6 +64,19 @@ def template_tstore_nd(src: pto.Tile, dst: pto.PartitionTensorView):
         )
         return
 
+    if len(dst.shape) == 3 and dst.shape[1] == 1:
+        valid_rows, valid_cols = src.valid_shape
+        _, ub_cols = src.shape
+        row_stride, _, _ = dst.strides
+        row_stride = valid_cols if row_stride is None else row_stride
+        pto.mte_store(
+            src.as_ptr(),
+            dst.as_ptr(),
+            valid_cols * elem_bytes,
+            nburst=(valid_rows, ub_cols * elem_bytes, row_stride * elem_bytes),
+        )
+        return
+
     g0, g1, g2, g3, g4 = dst.shape
     s0, s1, s2, s3, s4 = dst.strides
     valid_rows, valid_cols = src.valid_shape

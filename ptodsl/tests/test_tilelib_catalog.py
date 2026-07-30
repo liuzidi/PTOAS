@@ -614,6 +614,45 @@ class TileLibCatalogTest(unittest.TestCase):
         store_mlir = selected_store.specialize(**store_specs).mlir_text()
         self.assertIn("pto.mte_ub_gm", store_mlir)
 
+    def test_rank3_degenerate_middle_axis_load_store_views_render(self):
+        load_specs = {
+            "src": ViewSpec(
+                shape=(64, 1, 32),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(4096, 64, 1),
+            ),
+            "dst": TileSpec(
+                shape=(64, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 32),
+            ),
+        }
+        selected_load = select("pto.tload", "a5", load_specs)
+        self.assertEqual(selected_load.name, "template_tload_nd2nd")
+        load_mlir = selected_load.specialize(**load_specs).mlir_text()
+        self.assertIn("pto.mte_gm_ub", load_mlir)
+
+        store_specs = {
+            "src": TileSpec(
+                shape=(64, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 32),
+            ),
+            "dst": ViewSpec(
+                shape=(64, 1, 32),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(4096, 64, 1),
+            ),
+        }
+        selected_store = select("pto.tstore", "a5", store_specs)
+        self.assertEqual(selected_store.name, "template_tstore_nd")
+        store_mlir = selected_store.specialize(**store_specs).mlir_text()
+        self.assertIn("pto.mte_ub_gm", store_mlir)
+
     def test_tgather_index_fallback_renders(self):
         cases = (
             ("f32", "i32", 64),
