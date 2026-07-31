@@ -38,6 +38,7 @@ from ptodsl._tile_template_tracing import (
     index_mul,
     tile_template as _trace_tile_template,
 )
+from ptodsl._vmi_namespace import vmi as _vmi_builder
 from ptodsl.tilelib import registry as _tilelib_registry
 from ptodsl.tilelib.registry import TileTemplateRegistry
 from mlir.dialects import pto as _pto_dialect
@@ -48,8 +49,9 @@ FLOAT_DTYPES = (f32, f16)
 ui32 = ScalarType("ui32", lanes=64, mask_bits=32, bytewidth=4)
 ui16 = ScalarType("ui16", lanes=128, mask_bits=16, bytewidth=2)
 
-# The helpers below only adapt traced TileLib values and dtype metadata; every
-# actual VMI op is emitted through the public pto.vmi.* builder namespace.
+# The helpers below only adapt traced TileLib values and dtype metadata.  Use
+# the raw VMI builder alias instead of pto.vmi so tile-template tracing helpers
+# cannot shadow the builder namespace while a VMI template is being traced.
 
 
 def _pto_dtype(dtype: ScalarType):
@@ -129,7 +131,7 @@ def _create_mask_lanes(
     if not 0 < active_lanes <= vector_lanes:
         raise ValueError("active_lanes must be in the range [1, vector_lanes]")
     active = trace.index_const(active_lanes)
-    return _wrap_mask(pto.vmi.create_mask(active.value, size=vector_lanes), dtype)
+    return _wrap_mask(_vmi_builder.create_mask(active.value, size=vector_lanes), dtype)
 
 
 def _create_mask(
@@ -162,7 +164,7 @@ def _vload(tile: _TileProxy, coordinate: CanonicalBlockCoordinate) -> _VectorVal
     ptr_value = tile._trace.ensure_tile_ptr(tile)
     offset = tile._trace._coerce_index(coordinate.linear_offset)
     return _wrap_vreg(
-        pto.vmi.vload(
+        _vmi_builder.vload(
             ptr_value.value,
             offset.value,
             size=coordinate.block_map.logical_lanes,
@@ -179,7 +181,7 @@ def _vload_linear(tile: _TileProxy, offset, *, lanes: int) -> _VectorValue:
     ptr_value = tile._trace.ensure_tile_ptr(tile)
     offset_value = tile._trace._coerce_index(offset)
     return _wrap_vreg(
-        pto.vmi.vload(ptr_value.value, offset_value.value, size=lanes),
+        _vmi_builder.vload(ptr_value.value, offset_value.value, size=lanes),
         tile.element_type,
     )
 
@@ -196,7 +198,7 @@ def _vstore(
     _validate_mask("_vstore", mask, vec.dtype)
     ptr_value = tile._trace.ensure_tile_ptr(tile)
     offset = tile._trace._coerce_index(coordinate.linear_offset)
-    pto.vmi.vstore(vec.value, ptr_value.value, offset.value, mask.value)
+    _vmi_builder.vstore(vec.value, ptr_value.value, offset.value, mask.value)
 
 
 def _vstore_linear(
@@ -212,13 +214,13 @@ def _vstore_linear(
     _validate_mask("_vstore_linear", mask, vec.dtype)
     ptr_value = tile._trace.ensure_tile_ptr(tile)
     offset_value = tile._trace._coerce_index(offset)
-    pto.vmi.vstore(vec.value, ptr_value.value, offset_value.value, mask.value)
+    _vmi_builder.vstore(vec.value, ptr_value.value, offset_value.value, mask.value)
 
 
 def _vbinary(name: str, lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValue:
     dtype = _validate_same_dtype(f"pto.vmi.{name}", lhs, rhs)
     _validate_mask(f"pto.vmi.{name}", mask, dtype)
-    builder = getattr(pto.vmi, name)
+    builder = getattr(_vmi_builder, name)
     return _wrap_vreg(builder(lhs.value, rhs.value, mask.value), dtype)
 
 
@@ -264,7 +266,7 @@ def _vshr(lhs: _VectorValue, rhs: _VectorValue, mask: _MaskValue) -> _VectorValu
 
 def _vunary(name: str, source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     _validate_mask(f"pto.vmi.{name}", mask, source.dtype)
-    builder = getattr(pto.vmi, name)
+    builder = getattr(_vmi_builder, name)
     return _wrap_vreg(builder(source.value, mask.value), source.dtype)
 
 
@@ -291,7 +293,7 @@ def _vvec_scalar(
     mask: _MaskValue,
 ) -> _VectorValue:
     _validate_mask(f"pto.vmi.{name}", mask, source.dtype)
-    builder = getattr(pto.vmi, name)
+    builder = getattr(_vmi_builder, name)
     return _wrap_vreg(builder(source.value, scalar.value, mask.value), source.dtype)
 
 
@@ -319,7 +321,7 @@ def _vcmp(
 ) -> _MaskValue:
     dtype = _validate_same_dtype("pto.vmi.vcmp", lhs, rhs)
     _validate_mask("pto.vmi.vcmp", seed, dtype)
-    return _wrap_mask(pto.vmi.vcmp(lhs.value, rhs.value, seed.value, cmp), dtype)
+    return _wrap_mask(_vmi_builder.vcmp(lhs.value, rhs.value, seed.value, cmp), dtype)
 
 
 def _vcmps(
@@ -330,7 +332,7 @@ def _vcmps(
 ) -> _MaskValue:
     _validate_mask("pto.vmi.vcmps", seed, source.dtype)
     return _wrap_mask(
-        pto.vmi.vcmps(source.value, scalar.value, seed.value, cmp),
+        _vmi_builder.vcmps(source.value, scalar.value, seed.value, cmp),
         source.dtype,
     )
 
@@ -343,7 +345,7 @@ def _vsel(
     dtype = _validate_same_dtype("pto.vmi.vsel", true_value, false_value)
     _validate_mask("pto.vmi.vsel", mask, dtype)
     return _wrap_vreg(
-        pto.vmi.vsel(mask.value, true_value.value, false_value.value),
+        _vmi_builder.vsel(mask.value, true_value.value, false_value.value),
         dtype,
     )
 
@@ -357,7 +359,7 @@ def _vmula(
     dtype = _validate_same_dtype("pto.vmi.vmula", acc, lhs, rhs)
     _validate_mask("pto.vmi.vmula", mask, dtype)
     return _wrap_vreg(
-        pto.vmi.vmula(acc.value, lhs.value, rhs.value, mask.value),
+        _vmi_builder.vmula(acc.value, lhs.value, rhs.value, mask.value),
         dtype,
     )
 
@@ -365,17 +367,17 @@ def _vmula(
 def _pand(lhs: _MaskValue, rhs: _MaskValue) -> _MaskValue:
     if lhs.dtype.mask_bits != rhs.dtype.mask_bits:
         raise TypeError("pto.vmi.vand mask operands must use the same granularity")
-    return _wrap_mask(pto.vmi.vand(lhs.value, rhs.value), lhs.dtype)
+    return _wrap_mask(_vmi_builder.vand(lhs.value, rhs.value), lhs.dtype)
 
 
 def _por(lhs: _MaskValue, rhs: _MaskValue) -> _MaskValue:
     if lhs.dtype.mask_bits != rhs.dtype.mask_bits:
         raise TypeError("pto.vmi.vor mask operands must use the same granularity")
-    return _wrap_mask(pto.vmi.vor(lhs.value, rhs.value), lhs.dtype)
+    return _wrap_mask(_vmi_builder.vor(lhs.value, rhs.value), lhs.dtype)
 
 
 def _pnot(mask: _MaskValue) -> _MaskValue:
-    return _wrap_mask(pto.vmi.vnot(mask.value), mask.dtype)
+    return _wrap_mask(_vmi_builder.vnot(mask.value), mask.dtype)
 
 
 def _scalar_constant(value: float | int, dtype: ScalarType) -> _Value:
@@ -385,7 +387,7 @@ def _scalar_constant(value: float | int, dtype: ScalarType) -> _Value:
 def _vbrc(source: _VectorValue, *, lanes: int) -> _VectorValue:
     if not isinstance(lanes, int) or lanes <= 0:
         raise ValueError("_vbrc lanes must be a positive integer")
-    return _wrap_vreg(pto.vmi.vbrc(source.value, size=lanes), source.dtype)
+    return _wrap_vreg(_vmi_builder.vbrc(source.value, size=lanes), source.dtype)
 
 
 def _vbrc_scalar(
@@ -398,7 +400,7 @@ def _vbrc_scalar(
         raise TypeError("_vbrc_scalar requires like= or dtype=")
     ref_dtype = like.dtype if like is not None else dtype
     size = _vreg_lanes(like) if like is not None else dtype.lanes
-    return _wrap_vreg(pto.vmi.vbrc(scalar.value, size=size), ref_dtype)
+    return _wrap_vreg(_vmi_builder.vbrc(scalar.value, size=size), ref_dtype)
 
 
 def _vconstant(
@@ -415,18 +417,18 @@ def _vconstant(
     scalar = _scalar_constant(value, dtype)
     if like is not None:
         return _vbrc_scalar(scalar, like=like)
-    return _wrap_vreg(pto.vmi.vbrc(scalar.value, size=lanes), dtype)
+    return _wrap_vreg(_vmi_builder.vbrc(scalar.value, size=lanes), dtype)
 
 
 def _vreduce_max(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     _validate_mask("pto.vmi.vcmax", mask, source.dtype)
-    return _wrap_vreg(pto.vmi.vcmax(source.value, mask.value), source.dtype)
+    return _wrap_vreg(_vmi_builder.vcmax(source.value, mask.value), source.dtype)
 
 
 def _vreduce_add(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     _validate_mask("pto.vmi.vcadd", mask, source.dtype)
     return _wrap_vreg(
-        pto.vmi.vcadd(source.value, mask.value, reassoc=True),
+        _vmi_builder.vcadd(source.value, mask.value, reassoc=True),
         source.dtype,
     )
 
@@ -435,7 +437,7 @@ def _vcvt(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValue:
     if not isinstance(dst_dtype, ScalarType):
         raise TypeError("_vcvt expects a tile-template destination ScalarType")
     return _wrap_vreg(
-        pto.vmi.vcvt(source.value, to_dtype=_pto_dtype(dst_dtype)),
+        _vmi_builder.vcvt(source.value, to_dtype=_pto_dtype(dst_dtype)),
         dst_dtype,
     )
 
@@ -449,7 +451,7 @@ def _vinterpret_cast(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValu
     if source_bits % dst_bits != 0:
         raise ValueError("_vinterpret_cast requires matching total bit width")
     return _wrap_vreg(
-        pto.vmi.vinterpret_cast(source.value, to_dtype=_pto_dtype(dst_dtype)),
+        _vmi_builder.vinterpret_cast(source.value, to_dtype=_pto_dtype(dst_dtype)),
         dst_dtype,
     )
 
@@ -1215,14 +1217,15 @@ def _validate_row_reduce_tiles(
         or workspace._spec.b_layout != "row_major"
     ):
         raise ValueError("row-reduce source and workspace must be row-major")
-    if workspace._spec.shape != src._spec.shape:
-        raise ValueError("row-reduce workspace shape must match the source")
     rows, cols = src._spec.shape
+    workspace_rows, workspace_cols = workspace._spec.shape
+    if workspace_rows != rows or workspace_cols < cols:
+        raise ValueError(
+            "row-reduce workspace must have matching rows and at least source columns"
+        )
     if dst._spec.shape != (rows, 1) or dst._spec.b_layout != "col_major":
         raise ValueError("row-reduce destination must be a col-major [rows, 1] tile")
-    if cols != f32.lanes:
-        raise ValueError("row-reduce source rows must contain exactly one f32 VL block")
-    return CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
+    return CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
 
 def emit_row_reduce_vmi(
@@ -1271,15 +1274,13 @@ def emit_row_expand_sub_vmi(
         or row_values._spec.b_layout != "col_major"
     ):
         raise ValueError("trowexpandsub row values must be a col-major [rows, 1] tile")
-    if cols != f32.lanes:
-        raise ValueError("trowexpandsub rows must contain exactly one f32 VL block")
-    block_map = CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
+    block_map = CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
     _prepare_tile_access(src, row_values, dst)
     full_mask = _create_mask(block_map, f32, trace=src._trace)
     with for_(0, rows, step=1) as row:
         row_scalar = _vload_linear(row_values, row, lanes=1)
-        broadcast = _vbrc(row_scalar, lanes=f32.lanes)
+        broadcast = _vbrc(row_scalar, lanes=cols)
         row_block_base = index_mul(row, block_map.blocks_per_row)
         for block_in_row in range(block_map.blocks_per_row):
             coordinate = block_map.coordinate(
@@ -1297,9 +1298,7 @@ def _validate_col_reduce_tiles(
 
     Mirror of `_validate_row_reduce_tiles` but the surviving axis is the column
     dimension: src is [rows, cols] row-major, dst is [1, cols] row-major, and the
-    reduction runs across all rows. First slice only supports a single VL block
-    wide tile (cols == VL), matching the pto-isa `TColReduceInstr_NoPostUpdate`
-    one-repeat layout.
+    reduction runs across all rows as a single logical row-width vector.
     """
     if src.element_type != f32 or dst.element_type != f32:
         raise ValueError("col-reduce VMI candidates currently support only f32")
@@ -1308,12 +1307,7 @@ def _validate_col_reduce_tiles(
     rows, cols = src._spec.shape
     if dst._spec.shape != (1, cols):
         raise ValueError("col-reduce destination must be a row-major [1, cols] tile")
-    if cols != f32.lanes:
-        raise ValueError(
-            "col-reduce VMI candidates currently support only cols == VL(f32) "
-            f"(got cols={cols}, VL={f32.lanes})"
-        )
-    return CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
+    return CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
 
 def emit_col_reduce_vmi(
@@ -1324,17 +1318,17 @@ def emit_col_reduce_vmi(
 ) -> None:
     """Emit a ColReduce (tcolmax / tcolsum / tcolmin / ...) VMI candidate.
 
-    Mirrors pto-isa `TColReduceInstr_NoPostUpdate` with a single VL block:
-      acc = vbr(InitVal)                        # VL-wide, reduce-neutral init
+    Mirrors pto-isa `TColReduceInstr_NoPostUpdate` over one logical row:
+      acc = vbr(InitVal)                        # row-wide, reduce-neutral init
       for row in 0..rows: acc = op(acc, load(row))   # runtime scf.for
       store(acc, dst)
 
-    The accumulator stays VL-wide for the whole reduction (the column axis is
+    The accumulator stays row-wide for the whole reduction (the column axis is
     the surviving axis). This intentionally avoids `_vreduce_max`/`vmi_vcmax`,
     which collapse to a 1-lane scalar — wrong for a column-preserving ColMax.
 
     The init is the reduce's identity element (max->-inf, min->+inf, add->0,
-    prod->1), broadcast VL-wide via `vbr` — exactly pto-isa's
+    prod->1), broadcast to the logical row via `vbr` — exactly pto-isa's
     `vbr(dstVReg, InstrOp::InitVal)` (see a5/common.hpp `Padding<T>::Min/Max`).
     The reduce runs from row 0 (not 1): iteration 0 does op(InitVal, load(0))
     which absorbs row 0 through the op (e.g. max(-inf, x) = x, 0 + x = x), so a
@@ -1342,7 +1336,7 @@ def emit_col_reduce_vmi(
     the downstream loop-fusion pass can merge this reduce with its same-index
     neighbors into one scf.for.
 
-    The cross-row reduction is a runtime ``scf.for`` carrying the VL-wide
+    The cross-row reduction is a runtime ``scf.for`` carrying the row-wide
     accumulator as loop state (one ``vmi.vmax``/``vmi.vadd`` per iteration),
     matching the pto-isa repeat loop. It must NOT be a Python ``range`` here:
     a trace-time ``range`` would statically unroll one merge per row (e.g. 127
@@ -1350,7 +1344,7 @@ def emit_col_reduce_vmi(
     """
     # Reduce identity element per kind (pto-isa InstrOp::InitVal /
     # a5 Padding<T>::Min/Max): max -> -inf (0xff800000), min -> +inf
-    # (0x7f800000), add -> 0.0, prod -> 1.0. Broadcast VL-wide with vbr.
+    # (0x7f800000), add -> 0.0, prod -> 1.0. Broadcast row-wide with vbr.
     reduce_identity = {
         "max": float("-inf"),
         "min": float("inf"),
@@ -1362,25 +1356,23 @@ def emit_col_reduce_vmi(
 
     _prepare_tile_access(src, dst)
     full_mask = _create_mask(block_map, f32, trace=src._trace)
-    # Seed the VL-wide accumulator with the reduce-neutral identity (vbr InitVal,
+    # Seed the row-wide accumulator with the reduce-neutral identity (vbr InitVal,
     # matching pto-isa `TColReduceInstr_NoPostUpdate`), so the loop runs c0..rows
     # and absorbs row 0 via op(InitVal, load(0)) instead of preloading row 0.
     # The broadcast takes the element type/lanes from `f32` directly — no dummy
     # load needed (a vload would carry a Read memory effect and survive DCE,
     # duplicating the row-0 read the loop itself does).
-    accumulator = _vbrc_scalar(
-        _scalar_constant(reduce_identity, f32), dtype=f32
-    )
+    accumulator = _vconstant(reduce_identity, f32, lanes=block_map.cols)
     # The whole reduction is a runtime scf.for from row 0 carrying the
-    # VL-wide accumulator; each iteration does one element-wise merge (VL
-    # stays full). Row r maps to logical block r*blocks_per_row.
+    # row-wide accumulator; each iteration does one element-wise merge over the
+    # full logical row. Row r maps to logical block r*blocks_per_row.
     with for_(0, block_map.rows, step=1, state={"acc": accumulator}) as loop:
         row_block_base = index_mul(loop.iv, block_map.blocks_per_row)
         loaded = _vload(src, block_map.coordinate(row_block_base))
         merged = merge_op(loop.state.acc, loaded, full_mask)
         loop.yield_state(acc=merged)
     accumulator = loop.results[0]
-    # dst [1, cols] is a single VL block; store via linear offset to avoid the
+    # dst [1, cols] is one logical row; store via linear offset to avoid the
     # src/dst shape mismatch in CanonicalBlockCoordinate validation (src is
     # [rows, cols], dst is [1, cols]).
     _vstore_linear(accumulator, dst, 0, full_mask)
@@ -1391,9 +1383,8 @@ def _validate_col_expand_binary_tiles(
 ) -> CanonicalBlockMap:
     """Validate tiles for a ColExpandBinary (tcolexpandsub/...) VMI candidate.
 
-    src is [rows, cols] row-major, col_values is [1, cols] row-major (one VL
-    block of surviving reduce result), dst is [rows, cols] row-major. cols must
-    equal VL(f32) so the single broadcast loads exactly one VL block.
+    src is [rows, cols] row-major, col_values is [1, cols] row-major (one
+    logical row of surviving reduce result), dst is [rows, cols] row-major.
     """
     if (
         src.element_type != f32
@@ -1413,11 +1404,7 @@ def _validate_col_expand_binary_tiles(
         raise ValueError(
             "col-expand-binary col_values must be a row-major [1, cols] tile"
         )
-    if cols != f32.lanes:
-        raise ValueError(
-            "col-expand-binary VMI candidates currently support only cols == VL(f32)"
-        )
-    return CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
+    return CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
 
 def emit_col_expand_binary_vmi(
@@ -1429,7 +1416,7 @@ def emit_col_expand_binary_vmi(
 ) -> None:
     """Emit a ColExpandBinary (tcolexpandsub/add/mul/div) VMI candidate.
 
-    Mirrors pto-isa `TColExpandBinOp`: the single VL block of col_values is
+    Mirrors pto-isa `TColExpandBinOp`: the single logical row of col_values is
     broadcast to every row, then a binary op is applied per row block.
     """
     binop_dispatch = {
@@ -1448,12 +1435,12 @@ def emit_col_expand_binary_vmi(
 
     _prepare_tile_access(src, col_values, dst)
     full_mask = _create_mask(block_map, f32, trace=src._trace)
-    # pto-isa TColExpandBinOp broadcasts by reloading the same col_values VL
+    # pto-isa TColExpandBinOp broadcasts by reloading the same col_values row
     # block per row (vlds with fixed offset), NOT a 1-lane vbrc. col_values is
-    # [1, cols] (one VL block), so the broadcast load is loop-invariant: hoist
+    # [1, cols] (one logical row), so the broadcast load is loop-invariant: hoist
     # it out of the row loop so a later mem2reg (Stage C) can forward the
     # ColMax result directly to the consumer without a per-row reload.
-    broadcast = _vload_linear(col_values, 0, lanes=f32.lanes)
+    broadcast = _vload_linear(col_values, 0, lanes=block_map.cols)
     with for_(0, block_map.rows, step=1) as row:
         coordinate = block_map.coordinate(index_mul(row, block_map.blocks_per_row))
         value = _vload(src, coordinate)
@@ -1470,11 +1457,12 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
         raise ValueError("tcvt source and destination shapes must match")
     if src._spec.b_layout != "row_major" or dst._spec.b_layout != "row_major":
         raise ValueError("tcvt VMI candidate requires row-major tiles")
-    block_map = CanonicalBlockMap.from_tile(src, logical_lanes=f32.lanes)
+    _, cols = src._spec.shape
+    block_map = CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
     _prepare_tile_access(src, dst)
     dst_mask = _create_mask_lanes(
-        f32.lanes, f32.lanes, dst.element_type, trace=src._trace
+        cols, cols, dst.element_type, trace=src._trace
     )
     with for_(0, block_map.logical_block_count, step=1) as logical_block:
         coordinate = block_map.coordinate(logical_block)

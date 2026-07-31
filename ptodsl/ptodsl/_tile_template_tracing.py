@@ -878,7 +878,7 @@ class TileTemplate:
     @property
     def metadata(self):
         if self.ir_level == "vmi":
-            constraints = []
+            constraints = [self._vmi_trace_specs_supported]
             if self.context_constraints:
                 constraints.append(self._context_constraints_match)
             constraints.extend(self.constraints)
@@ -914,6 +914,36 @@ class TileTemplate:
         for key, allowed_values in self.context_constraints:
             if context.get(key) not in allowed_values:
                 return False
+        return True
+
+    def _vmi_trace_specs_supported(self, **context) -> bool:
+        for name in self.param_names:
+            if context.get(f"{name}_kind") != "tile":
+                continue
+            if context.get(f"{name}_memory_space") != "ub":
+                return False
+            config = context.get(f"{name}_config")
+            if config is None:
+                return False
+            b_layout = getattr(config, "b_layout", "row_major")
+            s_layout = getattr(config, "s_layout", "none_box")
+            valid_shape = context.get(f"{name}_valid_shape")
+            shape = context.get(f"{name}_shape")
+            is_nd2nz_layout = s_layout == "row_major" and b_layout == "col_major"
+            is_row_plus_one_layout = (
+                is_nd2nz_layout
+                and valid_shape is not None
+                and shape is not None
+                and valid_shape != shape
+            )
+            if s_layout != "none_box" and not is_nd2nz_layout:
+                return False
+            if valid_shape is None:
+                return False
+            if any(not isinstance(dim, int) or dim < 0 for dim in valid_shape):
+                return False
+            if is_row_plus_one_layout:
+                continue
         return True
 
     def validate_context_attrs(self, context_attrs=None) -> None:

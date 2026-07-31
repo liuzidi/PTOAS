@@ -13,6 +13,7 @@ import unittest
 
 import ptodsl.tilelib as tilelib
 from ptodsl.tilelib import ScalarSpec, ScalarType, TileSpec, VectorSpec, ViewSpec, select
+from ptodsl.tilelib.registry import NoMatchingTemplate
 
 
 # op -> (template name, rendered op, parameter names, representative dtype[, candidate id])
@@ -573,6 +574,146 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertEqual(selected_store.name, "template_tstore_nd")
         store_mlir = selected_store.specialize(**store_specs).mlir_text()
         self.assertIn("pto.mte_ub_gm", store_mlir)
+
+    def test_rank1_row_major_load_store_views_render(self):
+        load_specs = {
+            "src": ViewSpec(
+                shape=(128,),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(1,),
+            ),
+            "dst": TileSpec(
+                shape=(1, 128),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(1, 128),
+            ),
+        }
+        selected_load = select("pto.tload", "a5", load_specs)
+        self.assertEqual(selected_load.name, "template_tload_nd2nd")
+        load_mlir = selected_load.specialize(**load_specs).mlir_text()
+        self.assertIn("pto.mte_gm_ub", load_mlir)
+
+        store_specs = {
+            "src": TileSpec(
+                shape=(1, 128),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(1, 128),
+            ),
+            "dst": ViewSpec(
+                shape=(128,),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(1,),
+            ),
+        }
+        selected_store = select("pto.tstore", "a5", store_specs)
+        self.assertEqual(selected_store.name, "template_tstore_nd")
+        store_mlir = selected_store.specialize(**store_specs).mlir_text()
+        self.assertIn("pto.mte_ub_gm", store_mlir)
+
+    def test_rank3_degenerate_middle_axis_load_store_views_render(self):
+        load_specs = {
+            "src": ViewSpec(
+                shape=(64, 1, 32),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(4096, 64, 1),
+            ),
+            "dst": TileSpec(
+                shape=(64, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 32),
+            ),
+        }
+        selected_load = select("pto.tload", "a5", load_specs)
+        self.assertEqual(selected_load.name, "template_tload_nd2nd")
+        load_mlir = selected_load.specialize(**load_specs).mlir_text()
+        self.assertIn("pto.mte_gm_ub", load_mlir)
+
+        store_specs = {
+            "src": TileSpec(
+                shape=(64, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 32),
+            ),
+            "dst": ViewSpec(
+                shape=(64, 1, 32),
+                dtype=ScalarType("f32"),
+                memory_space="gm",
+                strides=(4096, 64, 1),
+            ),
+        }
+        selected_store = select("pto.tstore", "a5", store_specs)
+        self.assertEqual(selected_store.name, "template_tstore_nd")
+        store_mlir = selected_store.specialize(**store_specs).mlir_text()
+        self.assertIn("pto.mte_ub_gm", store_mlir)
+
+    def test_tgather_index_fallback_renders(self):
+        cases = (
+            ("f32", "i32", 64),
+            ("f16", "i16", 128),
+            ("bf16", "i16", 128),
+        )
+        for data_dtype, index_dtype, cols in cases:
+            with self.subTest(data_dtype=data_dtype, index_dtype=index_dtype):
+                specs = {
+                    "src": TileSpec(
+                        shape=(1, cols),
+                        dtype=ScalarType(data_dtype),
+                        memory_space="ub",
+                    ),
+                    "dst": TileSpec(
+                        shape=(1, cols),
+                        dtype=ScalarType(data_dtype),
+                        memory_space="ub",
+                    ),
+                    "indices": TileSpec(
+                        shape=(1, cols),
+                        dtype=ScalarType(index_dtype),
+                        memory_space="ub",
+                    ),
+                    "tmp": TileSpec(
+                        shape=(1, cols),
+                        dtype=ScalarType(index_dtype),
+                        memory_space="ub",
+                    ),
+                }
+                selected = select("pto.tgather", "a5", specs)
+                self.assertEqual(selected.name, "template_tgather_index")
+                mlir = selected.specialize(**specs).mlir_text()
+                self.assertIn("pto.vgather2", mlir)
+                self.assertIn("pto.vsts", mlir)
+
+    def test_tgather_index_rejects_mismatched_offset_width(self):
+        specs = {
+            "src": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+            ),
+            "dst": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+            ),
+            "indices": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("i16"),
+                memory_space="ub",
+            ),
+            "tmp": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("i16"),
+                memory_space="ub",
+            ),
+        }
+        with self.assertRaises(NoMatchingTemplate):
+            select("pto.tgather", "a5", specs)
 
     def test_tstore_accepts_dynamic_valid_shape_metadata(self):
         dynamic_dim = -(2**63)

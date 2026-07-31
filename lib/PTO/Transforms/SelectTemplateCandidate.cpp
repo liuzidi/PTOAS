@@ -9,8 +9,10 @@
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/StringSwitch.h"
@@ -45,6 +47,66 @@ static bool candidateHasTag(DictionaryAttr candidate, StringRef tag) {
   });
 }
 
+static bool getStaticIntFromValue(Value value, int64_t &out) {
+  if (auto cOp = value.getDefiningOp<arith::ConstantIndexOp>()) {
+    out = cOp.value();
+    return true;
+  }
+  if (auto cInt = value.getDefiningOp<arith::ConstantIntOp>()) {
+    out = cInt.value();
+    return true;
+  }
+  return false;
+}
+
+static bool resolveStaticTileValidShape(Value value,
+                                        SmallVectorImpl<int64_t> &validShape) {
+  Value validRow;
+  Value validCol;
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+
+  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
+    validRow = alloc.getValidRow();
+    validCol = alloc.getValidCol();
+  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
+    validRow = materialize.getValidRow();
+    validCol = materialize.getValidCol();
+  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
+    validRow = subview.getValidRow();
+    validCol = subview.getValidCol();
+  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
+    validRow = popAic.getValidRow();
+    validCol = popAic.getValidCol();
+  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
+    validRow = popAiv.getValidRow();
+    validCol = popAiv.getValidCol();
+  } else if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(def)) {
+    auto result = dyn_cast<OpResult>(value);
+    if (!result)
+      return false;
+    auto yieldOp =
+        dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
+    if (!yieldOp || result.getResultNumber() >= yieldOp.getNumOperands())
+      return false;
+    return resolveStaticTileValidShape(yieldOp.getOperand(result.getResultNumber()),
+                                       validShape);
+  }
+
+  if (!validRow || !validCol)
+    return false;
+
+  int64_t row = ShapedType::kDynamic;
+  int64_t col = ShapedType::kDynamic;
+  if (!getStaticIntFromValue(validRow, row) ||
+      !getStaticIntFromValue(validCol, col))
+    return false;
+
+  validShape.assign({row, col});
+  return true;
+}
+
 static bool hasStaticFullTileValidShape(Operation *op) {
   for (Value operand : op->getOperands()) {
     auto tile = dyn_cast<pto::TileBufType>(operand.getType());
@@ -52,6 +114,12 @@ static bool hasStaticFullTileValidShape(Operation *op) {
       continue;
     ArrayRef<int64_t> shape = tile.getShape();
     ArrayRef<int64_t> validShape = tile.getValidShape();
+    SmallVector<int64_t, 2> resolvedValidShape;
+    if ((validShape.empty() ||
+         llvm::any_of(validShape, ShapedType::isDynamic)) &&
+        resolveStaticTileValidShape(operand, resolvedValidShape)) {
+      validShape = resolvedValidShape;
+    }
     if (shape.size() != validShape.size())
       return false;
     for (auto [shapeDim, validDim] : llvm::zip_equal(shape, validShape))
@@ -81,6 +149,11 @@ static bool isHardBoundaryFallbackOp(Operation *op) {
       .Default(false);
 }
 
+static bool isHardBoundaryFallback(Operation *op, DictionaryAttr candidate) {
+  return isHardBoundaryFallbackOp(op) ||
+         candidateHasTag(candidate, "hard_boundary");
+}
+
 static void recordSelection(Operation *op, DictionaryAttr candidate,
                             bool isVMI) {
   op->setAttr(kSelectedCandidateAttr, candidate);
@@ -91,7 +164,7 @@ static void recordSelection(Operation *op, DictionaryAttr candidate,
   if (isVMI)
     return;
 
-  bool hard = isHardBoundaryFallbackOp(op);
+  bool hard = isHardBoundaryFallback(op, candidate);
   op->setAttr(kVmiFusionBoundaryAttr,
               StringAttr::get(op->getContext(), hard ? "hard" : "local"));
   op->setAttr(kVmiFusionBoundaryReasonAttr,
@@ -126,7 +199,12 @@ struct SelectTemplateCandidatePass
         parsed.push_back(candidate);
       }
 
-      if (selectionPolicy == "prefer-vmi") {
+      const bool hardBoundary =
+          isHardBoundaryFallbackOp(op) ||
+          llvm::any_of(parsed, [](DictionaryAttr candidate) {
+            return candidateHasTag(candidate, "hard_boundary");
+          });
+      if (selectionPolicy == "prefer-vmi" && !hardBoundary) {
         for (DictionaryAttr candidate : parsed) {
           if (candidateHasTag(candidate, "vmi") &&
               candidateHasTag(candidate, "fusion_eligible") &&

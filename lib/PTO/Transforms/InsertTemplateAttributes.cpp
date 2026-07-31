@@ -219,6 +219,33 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
     out = constant.value();
     return true;
   }
+  if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(add.getLhs(), lhs) &&
+        getStaticIntFromValue(add.getRhs(), rhs)) {
+      out = lhs + rhs;
+      return true;
+    }
+  }
+  if (auto sub = value.getDefiningOp<arith::SubIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(sub.getLhs(), lhs) &&
+        getStaticIntFromValue(sub.getRhs(), rhs)) {
+      out = lhs - rhs;
+      return true;
+    }
+  }
+  if (auto mul = value.getDefiningOp<arith::MulIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(mul.getLhs(), lhs) &&
+        getStaticIntFromValue(mul.getRhs(), rhs)) {
+      out = lhs * rhs;
+      return true;
+    }
+  }
   return false;
 }
 

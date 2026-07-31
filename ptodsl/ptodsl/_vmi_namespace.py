@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 
 from ptoas.mlir.dialects import pto as _pto
@@ -483,6 +484,79 @@ def _variadic_mask(mask):
     return _raw_sequence(mask)
 
 
+def _vstore_accepts_updated_base_arg(fn) -> bool:
+    try:
+        parameters = tuple(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return False
+    return bool(parameters) and parameters[0] == "updated_base"
+
+
+def _emit_vstore_generated(
+    *,
+    updated_base,
+    values,
+    destination,
+    offset,
+    mask,
+    stride,
+    block_stride,
+    repeat_stride,
+    dist_mode,
+    group,
+    pmode,
+    loc,
+    ip,
+):
+    fn = _generated("vstore")
+    raw_stride = None if stride is None else _coerce_index_value(stride)
+    raw_block_stride = _i16_value(block_stride, context="pto.vmi.vstore(block_stride)")
+    raw_repeat_stride = _i16_value(repeat_stride, context="pto.vmi.vstore(repeat_stride)")
+    kwargs = {
+        "stride": raw_stride,
+        "block_stride": raw_block_stride,
+        "repeat_stride": raw_repeat_stride,
+        "dist_mode": dist_mode,
+        "group": group,
+        "pmode": pmode,
+        "loc": loc,
+        "ip": ip,
+    }
+    if _vstore_accepts_updated_base_arg(fn):
+        op = fn(
+            updated_base,
+            values,
+            destination,
+            offset,
+            mask,
+            **kwargs,
+        )
+        if updated_base is None:
+            return op
+        updated = getattr(op, "updated_base", None)
+        if updated is not None:
+            return updated
+        results = getattr(op, "results", None)
+        if results:
+            return results[0]
+        operation = getattr(op, "operation", None)
+        if operation is not None and getattr(operation, "results", None):
+            return operation.results[0]
+        return op
+    if updated_base is not None:
+        raise NotImplementedError(
+            "pto.vmi.vstore(..., post_update=True) requires generated VMI "
+            "Python bindings with an updated_base result"
+        )
+    return fn(
+        values,
+        destination,
+        offset,
+        mask,
+        **kwargs,
+    )
+
+
 def _required_mask(mask, *, context: str):
     if mask is None:
         raise TypeError(f"{context} requires a mask operand")
@@ -780,15 +854,15 @@ class _VMINamespace:
             # Produce the updated_base result (block-stride mode only): the
             # generated vstore builder takes the result type as `updated_base`.
             # Returns the updated dst pointer Value.
-            op = _generated("vstore")(
-                _type_of(dest),
-                _raw_sequence(values),
-                dest,
-                _coerce_index_value(offset),
-                _variadic_mask(mask),
-                stride=None if stride is None else _coerce_index_value(stride),
-                block_stride=_i16_value(block_stride, context="pto.vmi.vstore(block_stride)"),
-                repeat_stride=_i16_value(repeat_stride, context="pto.vmi.vstore(repeat_stride)"),
+            op = _emit_vstore_generated(
+                updated_base=_type_of(dest),
+                values=_raw_sequence(values),
+                destination=dest,
+                offset=_coerce_index_value(offset),
+                mask=_variadic_mask(mask),
+                stride=stride,
+                block_stride=block_stride,
+                repeat_stride=repeat_stride,
                 dist_mode=dist_mode,
                 group=group,
                 pmode=pmode,
@@ -796,15 +870,15 @@ class _VMINamespace:
                 ip=ip,
             )
             return _wrap_result(op)
-        return _generated("vstore")(
-            None,
-            _raw_sequence(values),
-            dest,
-            _coerce_index_value(offset),
-            _variadic_mask(mask),
-            stride=None if stride is None else _coerce_index_value(stride),
-            block_stride=_i16_value(block_stride, context="pto.vmi.vstore(block_stride)"),
-            repeat_stride=_i16_value(repeat_stride, context="pto.vmi.vstore(repeat_stride)"),
+        return _emit_vstore_generated(
+            updated_base=None,
+            values=_raw_sequence(values),
+            destination=dest,
+            offset=_coerce_index_value(offset),
+            mask=_variadic_mask(mask),
+            stride=stride,
+            block_stride=block_stride,
+            repeat_stride=repeat_stride,
             dist_mode=dist_mode,
             group=group,
             pmode=pmode,
