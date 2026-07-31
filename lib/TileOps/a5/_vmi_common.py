@@ -79,6 +79,52 @@ def _wrap_mask(value, dtype: ScalarType) -> _MaskValue:
     return _MaskValue(unwrap_surface_value(value), dtype)
 
 
+def row_reduce_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    workspace_shape=(),
+    dst_shape=(),
+    dst_valid_shape=(),
+    src_dtype=None,
+    workspace_dtype=None,
+    dst_dtype=None,
+    src_config=None,
+    dst_config=None,
+    **_,
+):
+    if (
+        src_dtype != "f32"
+        or workspace_dtype != "f32"
+        or dst_dtype != "f32"
+        or len(src_shape) != 2
+        or len(src_valid_shape) != 2
+        or len(workspace_shape) != 2
+        or len(dst_shape) != 2
+        or len(dst_valid_shape) != 2
+    ):
+        return False
+    rows, cols = src_shape
+    valid_rows, valid_cols = src_valid_shape
+    workspace_rows, workspace_cols = workspace_shape
+    return (
+        rows == valid_rows
+        and workspace_rows == rows
+        and workspace_cols >= 1
+        and dst_shape == (rows, 1)
+        and dst_valid_shape == (rows, 1)
+        and src_config is not None
+        and src_config.b_layout == "row_major"
+        and dst_config is not None
+        and dst_config.b_layout == "col_major"
+        and isinstance(cols, int)
+        and isinstance(valid_cols, int)
+        and cols > 0
+        and valid_cols > 0
+        and valid_cols <= cols
+        and valid_cols % f32.lanes == 0
+    )
+
+
 def _vreg_lanes(value: _VectorValue) -> int:
     return _pto_dialect.VMIVRegType(value.value.type).element_count
 
@@ -1205,27 +1251,29 @@ def emit_rsqrt_vmi(
 
 def _validate_row_reduce_tiles(
     src: _TileProxy, workspace: _TileProxy, dst: _TileProxy
-) -> CanonicalBlockMap:
+) -> tuple[int, int, int]:
     if (
         src.element_type != f32
         or workspace.element_type != f32
         or dst.element_type != f32
     ):
         raise ValueError("row-reduce VMI candidates currently support only f32")
-    if (
-        src._spec.b_layout != "row_major"
-        or workspace._spec.b_layout != "row_major"
-    ):
-        raise ValueError("row-reduce source and workspace must be row-major")
-    rows, cols = src._spec.shape
+    if src._spec.b_layout != "row_major":
+        raise ValueError("row-reduce source must be row-major")
+    rows, physical_cols = src._spec.shape
+    valid_rows, valid_cols = src._spec.effective_valid_shape
+    if valid_rows != rows:
+        raise ValueError("row-reduce VMI candidates do not support tail rows")
+    if valid_cols <= 0 or valid_cols > physical_cols:
+        raise ValueError("row-reduce valid columns must be within the source tile")
     workspace_rows, workspace_cols = workspace._spec.shape
-    if workspace_rows != rows or workspace_cols < cols:
-        raise ValueError(
-            "row-reduce workspace must have matching rows and at least source columns"
-        )
+    if workspace_rows != rows or workspace_cols < 1:
+        raise ValueError("row-reduce workspace must have matching rows")
     if dst._spec.shape != (rows, 1) or dst._spec.b_layout != "col_major":
         raise ValueError("row-reduce destination must be a col-major [rows, 1] tile")
-    return CanonicalBlockMap.from_tile(src, logical_lanes=cols)
+    if dst._spec.effective_valid_shape != (rows, 1):
+        raise ValueError("row-reduce destination valid shape must be [rows, 1]")
+    return rows, physical_cols, valid_cols
 
 
 def emit_row_reduce_vmi(
@@ -1235,23 +1283,17 @@ def emit_row_reduce_vmi(
     *,
     kind: str,
 ) -> None:
-    block_map = _validate_row_reduce_tiles(src, workspace, dst)
+    rows, physical_cols, valid_cols = _validate_row_reduce_tiles(src, workspace, dst)
     reduce_op = _vreduce_max if kind == "max" else _vreduce_add
-    merge_op = _vmax if kind == "max" else _vadd
 
     _prepare_tile_access(src, dst)
-    full_mask = _create_mask(block_map, f32, trace=src._trace)
+    full_mask = _create_mask_lanes(valid_cols, valid_cols, f32, trace=src._trace)
     scalar_mask = _create_mask_lanes(1, 1, f32, trace=src._trace)
-    with for_(0, block_map.rows, step=1) as row:
-        row_block_base = index_mul(row, block_map.blocks_per_row)
-        first_coordinate = block_map.coordinate(row_block_base)
-        accumulator = reduce_op(_vload(src, first_coordinate), full_mask)
-        for block_in_row in range(1, block_map.blocks_per_row):
-            coordinate = block_map.coordinate(
-                index_add(row_block_base, block_in_row)
-            )
-            reduced = reduce_op(_vload(src, coordinate), full_mask)
-            accumulator = merge_op(accumulator, reduced, scalar_mask)
+    with for_(0, rows, step=1) as row:
+        row_offset = index_mul(row, physical_cols)
+        accumulator = reduce_op(
+            _vload_linear(src, row_offset, lanes=valid_cols), full_mask
+        )
         _vstore_linear(accumulator, dst, row, scalar_mask)
 
 
@@ -1504,4 +1546,5 @@ __all__ = [
     "emit_sqrt_high_precision_vmi",
     "emit_sqrt_vmi",
     "f32",
+    "row_reduce_vmi_constraint",
 ]

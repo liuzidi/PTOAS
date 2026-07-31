@@ -17,6 +17,7 @@ from ._vmi_common import (  # noqa: E402
     Tile,
     canonical_vmi_template,
     emit_row_reduce_vmi,
+    row_reduce_vmi_constraint,
 )
 
 
@@ -25,6 +26,7 @@ from ._vmi_common import (  # noqa: E402
     op="trowsum",
     name="vmi_trowsum",
     dtypes=(("f32", "f32", "f32"),),
+    constraints=(row_reduce_vmi_constraint,),
 )
 def vmi_trowsum(src: Tile, workspace: Tile, dst: Tile):
     emit_row_reduce_vmi(src, workspace, dst, kind="sum")

@@ -765,7 +765,7 @@ template_tcvt_f16_to_ui8_1d = _register_tcvt_1d(
     op="pto.tcvt",
     target="a5",
     name="template_tcvt_f16_to_si8",
-    dtypes=[("f16", "si8")],
+    dtypes=[("f16", "si8"), ("f16", "i8")],
     iteration_axis="none",
     op_engine="vector",
     op_class="other",
@@ -808,6 +808,8 @@ def template_tcvt_f16_to_si8(src: pto.Tile, dst: pto.Tile):
                 sat=pto.VcvtSatMode.NOSAT,
                 part=pto.VcvtPartMode.EVEN,
             )
+            if dst.dtype == "i8":
+                vec_si8 = pto.vbitcast(vec_si8, pto.i8)
             pto.vsts(vec_si8, dst[row, col:], store_mask, dist=pto.VStoreDist.PK_B16)
 
 

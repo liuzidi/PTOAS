@@ -23,6 +23,7 @@ template_trowmax = register_row_extreme(
 from ._vmi_common import (  # noqa: E402
     canonical_vmi_template,
     emit_row_reduce_vmi,
+    row_reduce_vmi_constraint,
 )
 
 
@@ -31,6 +32,7 @@ from ._vmi_common import (  # noqa: E402
     op="trowmax",
     name="vmi_trowmax",
     dtypes=(("f32", "f32", "f32"),),
+    constraints=(row_reduce_vmi_constraint,),
 )
 def vmi_trowmax(src: pto.Tile, workspace: pto.Tile, dst: pto.Tile):
     emit_row_reduce_vmi(src, workspace, dst, kind="max")
