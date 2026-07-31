@@ -614,7 +614,8 @@ def tile_buf_type(shape, dtype, valid_shape=None, *,
                   slayout: str = "NoneBox",
                   fractal_size: int = 512,
                   pad: str = "Null",
-                  compact_mode: str | int = "Null") -> Type:
+                  compact_mode: str | int = "Null",
+                  compact: str | int | None = None) -> Type:
     """
     Construct a ``!pto.tile_buf<…>`` type via the Python bindings.
 
@@ -622,6 +623,8 @@ def tile_buf_type(shape, dtype, valid_shape=None, *,
     When ``valid_shape`` is omitted, construct a tile type without a ``valid=``
     suffix and let the type's logical shape stand on its own.
     ``blayout="ColMajor"`` prints as ``blayout=col_major``.
+    ``compact`` is a compatibility alias for ``compact_mode``. It accepts
+    ``"null"`` (the C++ default), ``"normal"``, or ``"row_plus_one"``.
 
     Requires an active MLIR context.
     """
@@ -632,6 +635,8 @@ def tile_buf_type(shape, dtype, valid_shape=None, *,
             f"Unknown address_space '{address_space}'; known: {list(_ADDR_SPACE)}"
         )
     space_attr = _pto.AddressSpaceAttr.get(space_enum)
+    if compact is not None:
+        compact_mode = compact
     cfg = _pto.TileBufConfigAttr.get(
         _pto.BLayoutAttr.get(getattr(_pto.BLayout, blayout)),
         _pto.SLayoutAttr.get(getattr(_pto.SLayout, slayout)),
