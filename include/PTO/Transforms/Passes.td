@@ -577,9 +577,11 @@ def SelectTemplateCandidate
     : Pass<"pto-select-template-candidate", "ModuleOp"> {
   let summary = "Select one implementation from each tile operation's candidates";
   let description = [{
-    Applies candidate-selection policy after fusion planning. `prefer-vmi`
-    selects a fusion-eligible VMI implementation when its shape capability is
-    sufficient, then falls back to an ordinary PTODSL implementation.
+    Applies candidate-selection policy after fusion planning. Hard-boundary
+    operations and candidates never select VMI implementations. For the
+    remaining operations, `prefer-vmi` selects a fusion-eligible VMI
+    implementation when its shape capability is sufficient, then falls back to
+    an ordinary PTODSL implementation.
     `ordinary-only` excludes VMI implementations. The selected implementation
     and any VMI fusion boundary are recorded for ExpandTileOp to consume.
   }];

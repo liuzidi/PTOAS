@@ -149,6 +149,11 @@ static bool isHardBoundaryFallbackOp(Operation *op) {
       .Default(false);
 }
 
+static bool isHardBoundaryFallback(Operation *op, DictionaryAttr candidate) {
+  return isHardBoundaryFallbackOp(op) ||
+         candidateHasTag(candidate, "hard_boundary");
+}
+
 static void recordSelection(Operation *op, DictionaryAttr candidate,
                             bool isVMI) {
   op->setAttr(kSelectedCandidateAttr, candidate);
@@ -159,7 +164,7 @@ static void recordSelection(Operation *op, DictionaryAttr candidate,
   if (isVMI)
     return;
 
-  bool hard = isHardBoundaryFallbackOp(op);
+  bool hard = isHardBoundaryFallback(op, candidate);
   op->setAttr(kVmiFusionBoundaryAttr,
               StringAttr::get(op->getContext(), hard ? "hard" : "local"));
   op->setAttr(kVmiFusionBoundaryReasonAttr,
@@ -194,7 +199,12 @@ struct SelectTemplateCandidatePass
         parsed.push_back(candidate);
       }
 
-      if (selectionPolicy == "prefer-vmi") {
+      const bool hardBoundary =
+          isHardBoundaryFallbackOp(op) ||
+          llvm::any_of(parsed, [](DictionaryAttr candidate) {
+            return candidateHasTag(candidate, "hard_boundary");
+          });
+      if (selectionPolicy == "prefer-vmi" && !hardBoundary) {
         for (DictionaryAttr candidate : parsed) {
           if (candidateHasTag(candidate, "vmi") &&
               candidateHasTag(candidate, "fusion_eligible") &&
