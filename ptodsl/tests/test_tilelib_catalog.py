@@ -689,6 +689,33 @@ class TileLibCatalogTest(unittest.TestCase):
                 self.assertIn("pto.vgather2", mlir)
                 self.assertIn("pto.vsts", mlir)
 
+    def test_tgather_index_accepts_rope_wider_index_row(self):
+        specs = {
+            "src": TileSpec(
+                shape=(1, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+            ),
+            "dst": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+            ),
+            "indices": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("i32"),
+                memory_space="ub",
+            ),
+            "tmp": TileSpec(
+                shape=(1, 64),
+                dtype=ScalarType("i32"),
+                memory_space="ub",
+            ),
+        }
+        selected = select("pto.tgather", "a5", specs)
+        self.assertEqual(selected.name, "template_tgather_index")
+        self.assertIn("pto.vgather2", selected.specialize(**specs).mlir_text())
+
     def test_tgather_index_rejects_mismatched_offset_width(self):
         specs = {
             "src": TileSpec(
@@ -799,6 +826,64 @@ class TileLibCatalogTest(unittest.TestCase):
                 }
                 selected = select(op, "a5", specs)
                 self.assertIn(expected_op, selected.specialize(**specs).mlir_text())
+
+    def test_row_reductions_accept_compact_workspace(self):
+        specs = {
+            "src": TileSpec(
+                shape=(8, 8),
+                dtype=ScalarType("f32"),
+                memory_space="vec",
+                valid_shape=(8, 8),
+            ),
+            "tmp": TileSpec(
+                shape=(8, 1),
+                dtype=ScalarType("f32"),
+                memory_space="vec",
+                valid_shape=(8, 1),
+                b_layout="col_major",
+            ),
+            "dst": TileSpec(
+                shape=(8, 1),
+                dtype=ScalarType("f32"),
+                memory_space="vec",
+                valid_shape=(8, 1),
+                b_layout="col_major",
+                s_layout="row_major",
+            ),
+        }
+        selected = select("pto.trowmax", "a5", specs)
+        self.assertEqual(selected.name, "template_trowmax")
+        self.assertIn("pto.vcmax", selected.specialize(**specs).mlir_text())
+
+    def test_vmi_trowmax_accepts_static_column_subregion(self):
+        specs = {
+            "src": TileSpec(
+                shape=(8, 512),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(8, 128),
+            ),
+            "workspace": TileSpec(
+                shape=(8, 128),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(8, 128),
+            ),
+            "dst": TileSpec(
+                shape=(8, 1),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(8, 1),
+                b_layout="col_major",
+            ),
+        }
+        selected = select(
+            "pto.trowmax", "a5", specs, candidate_id="vmi_trowmax"
+        )
+        mlir = selected.specialize(**specs).mlir_text()
+        self.assertIn("pto.vmi.vload", mlir)
+        self.assertIn("!pto.vmi.vreg<128xf32>", mlir)
+        self.assertIn("arith.constant 512", mlir)
 
     def test_declared_dtype_signatures_are_selectable(self):
         for op, entry in CATALOG.items():
@@ -1900,6 +1985,42 @@ class TileLibCatalogTest(unittest.TestCase):
                 mlir = selected.specialize(**specs).mlir_text()
                 self.assertEqual(selected.name, "template_trowprod")
                 self.assertEqual(mlir.count("pto.vintlv"), expected_stages)
+
+    def test_tmatmul_acc_accepts_i8_accumulate_signature(self):
+        specs = {
+            "acc_in": TileSpec(
+                shape=(16, 256),
+                dtype=ScalarType("i32"),
+                memory_space="acc",
+                valid_shape=(16, 256),
+                b_layout="col_major",
+                s_layout="row_major",
+            ),
+            "lhs": TileSpec(
+                shape=(16, 128),
+                dtype=ScalarType("i8"),
+                memory_space="left",
+                valid_shape=(16, 128),
+            ),
+            "rhs": TileSpec(
+                shape=(128, 256),
+                dtype=ScalarType("i8"),
+                memory_space="right",
+                valid_shape=(128, 256),
+                s_layout="col_major",
+            ),
+            "dst": TileSpec(
+                shape=(16, 256),
+                dtype=ScalarType("i32"),
+                memory_space="acc",
+                valid_shape=(16, 256),
+                b_layout="col_major",
+                s_layout="row_major",
+            ),
+        }
+        selected = select("pto.tmatmul.acc", "a5", specs)
+        self.assertEqual(selected.name, "template_tmatmul_acc")
+        self.assertIn("pto.mad_acc", selected.specialize(**specs).mlir_text())
 
     def test_tdequant_dtype_versions_render(self):
         # tdequant has one template per src dtype; the catalog entry only covers i16.

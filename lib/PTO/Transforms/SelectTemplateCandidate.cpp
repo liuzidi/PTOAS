@@ -106,13 +106,46 @@ static bool resolveDeclaredTpopTileValidShape(
   return true;
 }
 
+static bool resolvePriorStaticSetValidShape(Operation *useOp, Value value,
+                                            SmallVectorImpl<int64_t> &validShape) {
+  if (!useOp)
+    return false;
+
+  pto::SetValidShapeOp nearest;
+  for (Operation *user : value.getUsers()) {
+    auto setValidShape = dyn_cast<pto::SetValidShapeOp>(user);
+    if (!setValidShape || setValidShape.getSource() != value)
+      continue;
+    if (setValidShape->getBlock() != useOp->getBlock())
+      continue;
+    if (!setValidShape->isBeforeInBlock(useOp))
+      continue;
+    if (!nearest || nearest->isBeforeInBlock(setValidShape))
+      nearest = setValidShape;
+  }
+  if (!nearest)
+    return false;
+
+  int64_t row = ShapedType::kDynamic;
+  int64_t col = ShapedType::kDynamic;
+  if (!getStaticIntFromValue(nearest.getValidRow(), row) ||
+      !getStaticIntFromValue(nearest.getValidCol(), col))
+    return false;
+  validShape.assign({row, col});
+  return true;
+}
+
 static bool resolveStaticTileValidShape(Value value,
-                                        SmallVectorImpl<int64_t> &validShape) {
+                                        SmallVectorImpl<int64_t> &validShape,
+                                        Operation *useOp = nullptr) {
   Value validRow;
   Value validCol;
   Operation *def = value.getDefiningOp();
   if (!def)
     return false;
+
+  if (useOp && resolvePriorStaticSetValidShape(useOp, value, validShape))
+    return true;
 
   if (resolveDeclaredTpopTileValidShape(value, validShape))
     return true;
@@ -140,8 +173,8 @@ static bool resolveStaticTileValidShape(Value value,
         dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
     if (!yieldOp || result.getResultNumber() >= yieldOp.getNumOperands())
       return false;
-    return resolveStaticTileValidShape(yieldOp.getOperand(result.getResultNumber()),
-                                       validShape);
+    return resolveStaticTileValidShape(
+        yieldOp.getOperand(result.getResultNumber()), validShape);
   }
 
   if (!validRow || !validCol) {
@@ -175,7 +208,7 @@ static bool hasStaticFullTileValidShape(Operation *op) {
     SmallVector<int64_t, 2> resolvedValidShape;
     if ((validShape.empty() ||
          llvm::any_of(validShape, ShapedType::isDynamic)) &&
-        resolveStaticTileValidShape(operand, resolvedValidShape)) {
+        resolveStaticTileValidShape(operand, resolvedValidShape, op)) {
       validShape = resolvedValidShape;
     }
     if (shape.size() != validShape.size())

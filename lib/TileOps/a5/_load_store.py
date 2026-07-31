@@ -24,7 +24,7 @@ LOW_PRECISION_LOAD_STORE_DTYPES = ("f8e4m3", "f8e5m2", "hif8", "f4e1m2x2", "f4e2
 LOAD_STORE_DTYPES = tuple(
     (dtype, dtype) for dtype in NUMERIC_DTYPES + INTEGER_LOAD_STORE_DTYPES + LOW_PRECISION_LOAD_STORE_DTYPES
 )
-MAT_LOAD_DTYPES = (("f16", "f16"), ("bf16", "bf16"), ("f32", "f32"))
+MAT_LOAD_DTYPES = (("i8", "i8"), ("f16", "f16"), ("bf16", "bf16"), ("f32", "f32"))
 ACC_STORE_DTYPES = (
     ("f32", "f32"),
     ("f32", "f16"),
@@ -244,7 +244,7 @@ def tload_mat_nd2nz_constraint(src_kind, src_shape, src_memory_space, dst_kind, 
         return False
     if dst_config.b_layout != "col_major" or dst_config.s_layout != "row_major":
         return False
-    if dst_dtype not in {"f16", "bf16", "f32"}:
+    if dst_dtype not in {"i8", "f16", "bf16", "f32"}:
         return False
     if _view_rank(src_shape) != 5:
         return False
@@ -256,7 +256,7 @@ def tload_mat_dn2nz_constraint(src_kind, src_shape, src_memory_space, dst_kind, 
         return False
     if dst_config.b_layout != "col_major" or dst_config.s_layout != "row_major":
         return False
-    if dst_dtype not in {"f16", "bf16", "f32"}:
+    if dst_dtype not in {"i8", "f16", "bf16", "f32"}:
         return False
     if _view_rank(src_shape) != 5:
         return False

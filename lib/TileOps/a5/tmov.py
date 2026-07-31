@@ -20,6 +20,8 @@ def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_lay
 
 
 def _vmi_tmov_shape_supported(src_cols, dst_cols, dst_dtype, dst_config, **_):
+    if dst_dtype != "f32":
+        return False
     if dst_config.b_layout != "col_major":
         return True
     lanes = {"f32": 64, "f16": 128, "bf16": 128}[dst_dtype]
