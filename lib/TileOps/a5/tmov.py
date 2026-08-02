@@ -20,7 +20,7 @@ def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_lay
 
 
 def _vmi_tmov_shape_supported(src_cols, dst_cols, dst_dtype, dst_config, **_):
-    if dst_dtype != "f32":
+    if dst_dtype not in {"f32", "f16", "bf16"}:
         return False
     if dst_config.b_layout != "col_major":
         return True
@@ -70,8 +70,11 @@ def template_tmov(src: pto.Tile, dst: pto.Tile):
 
 from ._vmi_common import (  # noqa: E402
     _move as _vmi_move,
+    bf16,
     canonical_vmi_template,
     emit_elementwise_vmi,
+    f16,
+    f32,
 )
 from ptodsl._tile_template_tracing import (  # noqa: E402
     _require_vmi_trace,
@@ -96,7 +99,15 @@ from ptodsl._vmi_namespace import vmi as _vmi  # noqa: E402
 )
 def vmi_tmov(src: pto.Tile, dst: pto.Tile):
     if dst._spec.b_layout != "col_major":
-        emit_elementwise_vmi(dst, (src,), _vmi_move)
+        # Keep the implementation contract aligned with the candidate
+        # metadata above.  In particular, DSv4 uses bf16 ND-to-ND moves;
+        # emit_elementwise_vmi defaults to f32 when no dtype set is passed.
+        emit_elementwise_vmi(
+            dst,
+            (src,),
+            _vmi_move,
+            allowed_dtypes=(f32, f16, bf16),
+        )
         return
 
     if src.element_type != dst.element_type:

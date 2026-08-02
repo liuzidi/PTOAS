@@ -781,6 +781,34 @@ def check_tmov_nd2nz() -> None:
     expect("pto.vmi.vstore" in nd_text, "tmov ND->ND should still emit a vmi store")
     expect("arith.constant 1 : i16" not in nd_text, "tmov ND->ND must not emit block-stride operands")
 
+    # Regression: ordinary ND -> ND moves must honor the dtype set declared by
+    # the VMI candidate. DSv4 uses bf16 moves in this form; the helper used to
+    # reject them because emit_elementwise_vmi defaults to f32.
+    nd_bf16_spec = {
+        **half_nd_spec,
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+    nd_bf16_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tmov",
+        operand_specs=[nd_bf16_spec, nd_bf16_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(
+        "pto.vmi.vload" in nd_bf16_text and "pto.vmi.vstore" in nd_bf16_text,
+        "tmov bf16 ND->ND should instantiate the VMI elementwise move",
+    )
+    expect(
+        "!pto.vmi.vreg<64xbf16>" in nd_bf16_text,
+        "tmov bf16 ND->ND should use a 64-lane bf16 logical vreg",
+    )
+
 
 def check_legacy_vpto_compatibility() -> None:
     spec = TileSpec(TILE_SHAPE, f32)
