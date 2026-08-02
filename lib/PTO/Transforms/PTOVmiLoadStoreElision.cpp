@@ -60,10 +60,10 @@
 // is inferred from its consuming op: if all consumers share one mask, that mask
 // bounds the read set; if all are mask-free (e.g. vcvt) the read set is the full
 // vreg; otherwise (mixed, or an unresolvable mask) the vload is left alone. A
-// vmi.vstore carries its own mask and a pmode ("zero" default | "merge"): the
-// store's write lane set is the mask's prefix [0,N); under pmode=merge only those
-// lanes are written (inactive lanes keep the prior UB content), under pmode=zero
-// the whole region is defined (inactive lanes store 0).
+// vmi.vstore carries its own mask and a pmode ("zero" default | "merge").
+// Forwarding tracks only lanes whose memory value equals the source vreg. This
+// is the mask prefix [0,N) for both modes: under pmode=zero inactive memory
+// lanes become zero, but they are not necessarily zero in the source vreg.
 //
 // Lane sets are modeled as prefix intervals [0,N) (create_mask %N is a prefix
 // predicate); masks that cannot be statically resolved (constant_mask, masked
@@ -98,6 +98,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/VmiMemoryLocation.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -152,17 +153,11 @@ static Value getCanonicalTrackedValue(Value value) {
 // and load src) would WRONGLY establish forwarding. Such accesses must flush
 // the table and never act as a forward source/target.
 static bool isCompileTimeUB(Value base) {
-  Value canon = getCanonicalTrackedValue(base);
-  if (!canon)
-    return false;
-  // Block arguments are runtime pointers -> not a compile-time UB.
-  if (isa<BlockArgument>(canon))
-    return false;
-  if (auto pc = canon.getDefiningOp<pto::PointerCastOp>()) {
-    if (!pc.getOperands().empty())
-      return isa<arith::ConstantOp>(pc.getOperands()[0].getDefiningOp());
-  }
-  return false;
+  // Keep this gate in lock-step with the shared location model.  In
+  // particular, statically offset memref.subview/bind/cast views are still
+  // compile-time UB locations even though they are not direct pointer_cast
+  // results.
+  return pto::resolveVmiStorageRoot(base).has_value();
 }
 
 static bool areEquivalentValues(Value lhs, Value rhs) {
@@ -186,8 +181,9 @@ static bool areEquivalentValues(Value lhs, Value rhs) {
       return false;
     if (lp.getOperands().empty() || rp.getOperands().empty())
       return false;
-    if (lp.getOperands()[0] == rp.getOperands()[0] &&
-        lp.getResult().getType() == rp.getResult().getType())
+    auto lhsRoot = pto::resolveVmiStorageRoot(lp.getResult());
+    auto rhsRoot = pto::resolveVmiStorageRoot(rp.getResult());
+    if (lhsRoot && rhsRoot && *lhsRoot == *rhsRoot)
       return true;
   }
   // Two identical pure ops (same name, operands, attrs, result type) — e.g.
@@ -211,23 +207,28 @@ static bool areEquivalentValues(Value lhs, Value rhs) {
   return cl == cr;
 }
 
-// Storage-root identity deliberately ignores the pointer_cast result type.
-// Different memref views of the same constant UB address may overlap even when
-// they cannot be used as exact forwarding matches.
-static bool haveSameStorageRoot(Value lhs, Value rhs) {
-  Value cl = getCanonicalTrackedValue(lhs);
-  Value cr = getCanonicalTrackedValue(rhs);
-  auto lp = cl ? cl.getDefiningOp<pto::PointerCastOp>() : nullptr;
-  auto rp = cr ? cr.getDefiningOp<pto::PointerCastOp>() : nullptr;
-  if (!lp || !rp || lp.getOperands().empty() || rp.getOperands().empty())
-    return false;
-  auto lc = lp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
-  auto rc = rp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
-  return lc && rc && lc.getValue() == rc.getValue();
-}
-
 static bool areEquivalentMaskValues(Value lhs, Value rhs) {
   return areEquivalentValues(lhs, rhs);
+}
+
+static bool mayAliasStorageValues(Value lhs, Value rhs) {
+  auto lhsRoot = pto::resolveVmiStorageRoot(lhs);
+  auto rhsRoot = pto::resolveVmiStorageRoot(rhs);
+  return lhsRoot && rhsRoot &&
+         pto::mayAliasVmiStorageRoot(*lhsRoot, *rhsRoot);
+}
+
+static std::optional<pto::VmiStorageRoot> getStorageRoot(Value value) {
+  return pto::resolveVmiStorageRoot(value);
+}
+
+static bool isTileLibVmiPrincipalLoop(scf::ForOp loop) {
+  auto impl = loop->getAttrOfType<StringAttr>("pto.tilelib.impl");
+  auto source = loop->getAttrOfType<StringAttr>("pto.vmi.fusion.source");
+  return impl && impl.getValue() == "vmi" && source &&
+         source.getValue() == "tilelib" &&
+         loop->hasAttr("pto.vmi.fusion.principal_loop") &&
+         !loop->hasAttr("pto.vmi.fusion.boundary");
 }
 
 // ----------------------------------------------------------------------------
@@ -304,6 +305,38 @@ static unsigned getVRegWidth(Type t) {
   if (auto vt = dyn_cast<pto::VMIVRegType>(t))
     return static_cast<unsigned>(vt.getElementCount());
   return 0;
+}
+
+static std::optional<int64_t> getElementBytes(Type type) {
+  if (auto memref = dyn_cast<MemRefType>(type))
+    type = memref.getElementType();
+  if (auto vreg = dyn_cast<pto::VMIVRegType>(type))
+    type = vreg.getElementType();
+  if (type.isF32() || type.isInteger(32))
+    return 4;
+  if (type.isF16() || type.isBF16() || type.isInteger(16))
+    return 2;
+  if (type.isInteger(8) || type.isInteger(1))
+    return 1;
+  if (type.isInteger(64))
+    return 8;
+  return std::nullopt;
+}
+
+static std::optional<int64_t> getVRegAccessBytes(Type type) {
+  auto width = getVRegWidth(type);
+  auto elementBytes = getElementBytes(type);
+  if (!width || !elementBytes)
+    return std::nullopt;
+  return static_cast<int64_t>(width) * *elementBytes;
+}
+
+static std::optional<int64_t> getConstantInteger(Value value) {
+  if (auto constant = value.getDefiningOp<arith::ConstantIndexOp>())
+    return constant.value();
+  if (auto constant = value.getDefiningOp<arith::ConstantIntOp>())
+    return constant.value();
+  return std::nullopt;
 }
 
 // Classification of a vload's consumer for read-lane inference:
@@ -535,6 +568,7 @@ struct ContentEntry {
   Operation *op = nullptr;
   Value base;          // canonical UB (pointer_cast result, traced from dest/src)
   Value offset;
+  std::optional<pto::VmiAccessLocation> location;
   LaneRange lanes;     // read set (load) / write set (store)
   bool isLoad = false;
   Value sourceValue;    // store.value or load.result (forward target value)
@@ -545,6 +579,45 @@ struct ContentEntry {
   bool escapeMark = false;    // a store whose UB is read by a region-escaping op: keep
   bool stale = false;         // no longer participates as a forward target (merge partial write)
 };
+
+static std::optional<pto::VmiAccessLocation>
+getVmiAccessLocation(Value base, Value offset, int64_t accessBytes) {
+  if (accessBytes <= 0)
+    return std::nullopt;
+  auto root = pto::resolveVmiStorageRoot(base);
+  if (!root)
+    return std::nullopt;
+  return pto::VmiAccessLocation{*root, offset, accessBytes};
+}
+
+static bool locationsMayAlias(const ContentEntry &entry, Value base,
+                              Value offset, int64_t accessBytes) {
+  auto other = getVmiAccessLocation(base, offset, accessBytes);
+  if (entry.location && other)
+    return pto::mayAliasVmiAccess(*entry.location, *other);
+
+  auto lhsRoot = pto::resolveVmiStorageRoot(entry.base);
+  auto rhsRoot = pto::resolveVmiStorageRoot(base);
+  return lhsRoot && rhsRoot &&
+         pto::mayAliasVmiStorageRoot(*lhsRoot, *rhsRoot);
+}
+
+static bool locationsExactlyMatch(const ContentEntry &entry, Value base,
+                                  Value offset, int64_t accessBytes) {
+  auto other = getVmiAccessLocation(base, offset, accessBytes);
+  if (!entry.location || !other)
+    return false;
+  if (!(entry.location->root == other->root) ||
+      entry.location->accessBytes != other->accessBytes)
+    return false;
+
+  auto lhsOffset = getConstantInteger(entry.location->elementOffset);
+  auto rhsOffset = getConstantInteger(other->elementOffset);
+  if (lhsOffset && rhsOffset)
+    return *lhsOffset == *rhsOffset;
+  return areEquivalentValues(entry.location->elementOffset,
+                             other->elementOffset);
+}
 
 // Two-pass elision over a straight-line range (a fused scf.for body, or the
 // top-level ops of a fusion_region between two for's). Pass 1 builds a content
@@ -559,9 +632,9 @@ static bool elideOpRange(OpRange ops) {
 
   // ---- Pass 1: build + mark (forward scan, no IR mutation) ----
   // Match helpers operating on the live entry set (stale entries skipped).
-  auto sameLoc = [&](const ContentEntry &e, Value base, Value offset) {
-    return areEquivalentValues(e.base, base) &&
-           areEquivalentValues(e.offset, offset);
+  auto sameLoc = [&](const ContentEntry &e, Value base, Value offset,
+                     int64_t accessBytes) {
+    return locationsExactlyMatch(e, base, offset, accessBytes);
   };
 
   for (Operation &op : ops) {
@@ -572,7 +645,8 @@ static bool elideOpRange(OpRange ops) {
         // touch UBs we don't track. Record it non-matchable and flush so
         // neither it nor any earlier entry is forwarded across it.
         entries.push_back({load, load.getSource(), load.getOffset(),
-                           LaneRange::unknown(), true, load->getResult(0),
+                           std::nullopt, LaneRange::unknown(), true,
+                           load->getResult(0),
                            -1, false, false, /*stale=*/true});
         for (auto &e : entries)
           e.stale = true;
@@ -594,6 +668,8 @@ static bool elideOpRange(OpRange ops) {
       }
       Value base = load.getSource();
       Value offset = load.getOffset();
+      int64_t loadBytes =
+          getVRegAccessBytes(load->getResult(0).getType()).value_or(0);
 
       if (!isCompileTimeUB(base)) {
         // The load base is not a compile-time UB identity (a runtime pointer /
@@ -602,8 +678,9 @@ static bool elideOpRange(OpRange ops) {
         // base must NOT forward to it (the base comparing equal under SSA is
         // not a proof of identity). Record a non-matchable entry and flush so
         // nothing forwards across it.
-        entries.push_back({load, base, offset, LaneRange::unknown(), true,
-                           load->getResult(0), -1, false, false,
+        entries.push_back({load, base, offset, std::nullopt,
+                           LaneRange::unknown(), true, load->getResult(0),
+                           -1, false, false,
                            /*stale=*/true});
         for (auto &e : entries)
           e.stale = true;
@@ -613,8 +690,10 @@ static bool elideOpRange(OpRange ops) {
       if (readLanes.isUnknownSet()) {
         // Cannot reason; record a non-matchable entry so later vloads of the
         // same loc see it (and, lacking a cover, do not forward to it).
-        entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), -1, false, false, false});
+        entries.push_back(
+            {load, base, offset, getVmiAccessLocation(
+                                      base, offset, loadBytes),
+             readLanes, true, load->getResult(0), -1, false, false, false});
         continue;
       }
 
@@ -625,7 +704,7 @@ static bool elideOpRange(OpRange ops) {
         ContentEntry &e = entries[i];
         if (e.stale || e.eraseMark)
           continue;
-        if (!sameLoc(e, base, offset))
+        if (!sameLoc(e, base, offset, loadBytes))
           continue;
         // Need e.lanes to fully cover readLanes.
         if (!e.lanes.contains(readLanes))
@@ -639,12 +718,17 @@ static bool elideOpRange(OpRange ops) {
         break;
       }
       if (matchIdx >= 0) {
-        entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), matchIdx, true, false, false});
+        entries.push_back(
+            {load, base, offset, getVmiAccessLocation(
+                                      base, offset, loadBytes),
+             readLanes, true, load->getResult(0), matchIdx, true, false,
+             false});
         changed = true; // load will be forwarded + erased in Pass 2
       } else {
-        entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), -1, false, false, false});
+        entries.push_back(
+            {load, base, offset, getVmiAccessLocation(
+                                      base, offset, loadBytes),
+             readLanes, true, load->getResult(0), -1, false, false, false});
       }
       continue;
     }
@@ -671,13 +755,16 @@ static bool elideOpRange(OpRange ops) {
       }
       Value mask = store.getMask().empty() ? Value() : store.getMask().front();
       LaneRange writeLanes = resolveMaskLanes(mask);
-      // pmode: "merge" => only writeLanes written; "zero"(default)/absent =>
-      // whole region defined (inactive lanes store 0 -> treat as full cover).
-      bool pmodeMerge = false;
-      if (auto pma = store.getPmodeAttr())
-        pmodeMerge = pma.getValue().equals_insensitive("merge");
-      if (!pmodeMerge)
-        writeLanes = LaneRange::full(); // zero: entire UB defined
+      // In both merge and zero modes, only active lanes are equal to the
+      // source vreg and can be forwarded directly. Zero mode additionally
+      // defines inactive memory lanes as zero, but exploiting that requires
+      // synthesizing a zero-filled value and is intentionally out of scope.
+
+      int64_t storeBytes = store.getValues().empty()
+                               ? 0
+                               : getVRegAccessBytes(
+                                     store.getValues().front().getType())
+                                     .value_or(0);
 
       // Mark preceding same-loc entries by how this write touches their lanes:
       //  - fully covered -> a store is dead (eraseMark, unless it escapes); the
@@ -688,11 +775,12 @@ static bool elideOpRange(OpRange ops) {
       //    be read / escape).
       for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
         ContentEntry &e = entries[i];
-        if (!haveSameStorageRoot(e.base, base))
+        if (!locationsMayAlias(e, base, offset, storeBytes))
           continue;
-        // Without a byte-range alias model, a different offset or view on the
-        // same storage root may partially overlap this write.
-        if (!sameLoc(e, base, offset)) {
+        // A different byte range on the same storage root is independent. A
+        // partially overlapping range invalidates the old fact but does not
+        // make the old store dead.
+        if (!locationsExactlyMatch(e, base, offset, storeBytes)) {
           e.stale = true;
           continue;
         }
@@ -704,8 +792,10 @@ static bool elideOpRange(OpRange ops) {
           e.stale = true;
         }
       }
-      entries.push_back({store, base, offset, writeLanes, false,
-                         store.getValues().front(), -1, false, false, false});
+      entries.push_back({store, base, offset,
+                         getVmiAccessLocation(base, offset, storeBytes),
+                         writeLanes, false, store.getValues().front(), -1,
+                         false, false, false});
       continue;
     }
 
@@ -719,17 +809,18 @@ static bool elideOpRange(OpRange ops) {
         // mte_ub_gm reads a UB out of the region: its store is observable and
         // must survive even after forwarding. The read does not redefine the
         // UB, so entries keep matching.
-        Value canon = getCanonicalTrackedValue(esc);
+        auto escapeRoot = getStorageRoot(esc);
         for (auto &e : entries)
-          if (!e.isLoad && areEquivalentValues(e.base, canon))
+          if (!e.isLoad &&
+              (!escapeRoot || mayAliasStorageValues(e.base, esc)))
             e.escapeMark = true;
         continue;
       }
       if (isEscapeWriteToUB(&op, esc)) {
         // mte_gm_ub redefines the UB from GM: prior tracked content is invalid.
-        Value canon = getCanonicalTrackedValue(esc);
+        auto escapeRoot = getStorageRoot(esc);
         for (auto &e : entries)
-          if (areEquivalentValues(e.base, canon))
+          if (!escapeRoot || mayAliasStorageValues(e.base, esc))
             e.stale = true;
         continue;
       }
@@ -781,7 +872,8 @@ static bool elideInRegion(pto::FusionRegionOp region) {
   changed |= elideOpRange(body.without_terminator());
   // Each nested scf.for body.
   region.getBody().walk([&](scf::ForOp loop) {
-    if (loop->getParentOfType<pto::FusionRegionOp>() == region)
+    if (loop->getParentOfType<pto::FusionRegionOp>() == region &&
+        isTileLibVmiPrincipalLoop(loop))
       changed |= elideOpRange(loop.getBody()->without_terminator());
     return WalkResult::advance();
   });

@@ -19,18 +19,21 @@
 // producing the pto.fusion_region these passes consume) is exercised end-to-end
 // by the fa sample this test compiles.
 
-// RUN: ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
 // RUN:   --tile-lib-backend=ptodsl --pto-level=level2 --enable-op-fusion \
+// RUN:   --ptodsl-python-exe=%python_executable \
 // RUN:   --emit-vpto %S/../../vpto/cases/vmi/fa-softmax-dn-init/kernel.pto \
 // RUN:   -o /dev/null --mlir-print-ir-after=pto-vmi-loop-fusion 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=LOOP
-// RUN: ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
 // RUN:   --tile-lib-backend=ptodsl --pto-level=level2 --enable-op-fusion \
+// RUN:   --ptodsl-python-exe=%python_executable \
 // RUN:   --emit-vpto %S/../../vpto/cases/vmi/fa-softmax-dn-init/kernel.pto \
 // RUN:   -o /dev/null --mlir-print-ir-after=pto-vmi-load-store-elision 2>&1 \
 // RUN:   | FileCheck %s --check-prefixes=ELIDE,ELIDEVLD
-// RUN: ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --cann-output-version=9.0.0 --pto-arch=a5 --pto-backend=vpto \
 // RUN:   --tile-lib-backend=ptodsl --pto-level=level2 --enable-op-fusion \
+// RUN:   --ptodsl-python-exe=%python_executable \
 // RUN:   --emit-vpto %S/../../vpto/cases/vmi/fa-softmax-dn-init/kernel.pto \
 // RUN:   -o /dev/null --mlir-print-ir-after=pto-vmi-load-store-elision 2>&1 \
 // RUN:   | FileCheck %s --check-prefixes=ELIDE,ELIDESTO
