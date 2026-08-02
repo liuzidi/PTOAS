@@ -185,13 +185,37 @@ static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
     const int64_t groupId = nextGroupId++;
     SmallVector<const pto::FusionComputeNode *, 8> stableOrder =
         buildStableInGroupOrder(group->members);
-    for (auto [order, node] : llvm::enumerate(stableOrder)) {
-      node->op->setAttr(kFusionGroupIdAttr,
-                        IntegerAttr::get(IntegerType::get(ctx, 64), groupId));
-      node->op->setAttr(
-          kFusionOrderAttr,
-          IntegerAttr::get(IntegerType::get(ctx, 64),
-                           static_cast<int64_t>(order)));
+    DenseSet<Operation *> memberOps;
+    for (const pto::FusionComputeNode *node : stableOrder)
+      memberOps.insert(node->op);
+
+    // A local fallback is part of the same loose FusionRegion, but is not a
+    // VMI compute node. Give local-boundary ops between selected compute
+    // members the group's ordering metadata in block order so RegionGen
+    // contains them in the same contiguous span. PTOVmiLoopFusion will still
+    // stop at their non-VMI loop.
+    Operation *first = stableOrder.front()->op;
+    Operation *last = stableOrder.back()->op;
+    int64_t order = 0;
+    for (Operation *op = first; op; op = op->getNextNode()) {
+      bool include = memberOps.contains(op);
+      if (!include) {
+        FailureOr<pto::FusionOpSemantics> semanticsOr =
+            pto::getFusionOpSemantics(op);
+        include = succeeded(semanticsOr) &&
+                  semanticsOr->kind == pto::FusionOpKind::LocalBoundary;
+      }
+      if (!include) {
+        if (op == last)
+          break;
+        continue;
+      }
+      op->setAttr(kFusionGroupIdAttr,
+                  IntegerAttr::get(IntegerType::get(ctx, 64), groupId));
+      op->setAttr(kFusionOrderAttr,
+                  IntegerAttr::get(IntegerType::get(ctx, 64), order++));
+      if (op == last)
+        break;
     }
   }
 }
@@ -556,11 +580,10 @@ public:
 
 // VMI F3-adjacency strategy: every plannable compute node (already filtered
 // into computeNodes by PreFusionAnalysis via getFusionOpSemantics' whitelist)
-// is wrapped into a fusion group. This engine's ONLY group-break rule is F3
-// adjacency: if a non-plannable op (tload/tstore DMA, wait_flag/mem_bar sync,
-// any op outside the compute whitelist) sits between two plannable nodes in
-// block order, it closes the current group so the merge never crosses a
-// sync/DMA boundary. Adjacent plannable nodes always join the same group.
+// is wrapped into a loose fusion group. Hard non-plannable ops (tload/tstore
+// DMA, wait_flag/mem_bar sync, any unknown op) close the group. A local
+// fallback remains in the same loose group, but is not a compute node and
+// therefore still stops downstream VMI loop fusion.
 //
 // This layer does NOT do UB-overlap (MustAlias/NoAlias/partial-alias)
 // checking, unlike the deleted PTOPlanVmiFusionRegion pass. At this
@@ -589,20 +612,29 @@ public:
       return {};
 
     // Map node id -> whether the op immediately preceding it in block order
-    // is NOT a plannable compute node (i.e. a DMA/sync/unknown op sits between
-    // it and the previous plannable node). Such a node closes the open group.
+    // is a hard, non-plannable boundary. A local fallback stays in the loose
+    // group and is annotated by assignStableGroupMetadata; it will later stop
+    // VMI loop fusion without splitting the enclosing FusionRegion.
     DenseMap<unsigned, bool> precededByNonPlannable;
-    Operation *prevOp = nullptr;
     DenseMap<Operation *, unsigned> nodeIdByOp;
     for (const pto::FusionComputeNode &n : block.computeNodes)
       nodeIdByOp[n.op] = n.id;
+    bool sawCompute = false;
+    bool hardBoundarySinceCompute = false;
     for (Operation &op : *block.block) {
       auto it = nodeIdByOp.find(&op);
       if (it != nodeIdByOp.end()) {
         precededByNonPlannable[it->second] =
-            prevOp != nullptr && !nodeIdByOp.count(prevOp);
+            sawCompute && hardBoundarySinceCompute;
+        sawCompute = true;
+        hardBoundarySinceCompute = false;
+        continue;
       }
-      prevOp = &op;
+      FailureOr<pto::FusionOpSemantics> semanticsOr =
+          pto::getFusionOpSemantics(&op);
+      if (failed(semanticsOr) ||
+          semanticsOr->kind == pto::FusionOpKind::HardBoundary)
+        hardBoundarySinceCompute = true;
     }
 
     SmallVector<PlannedFusionGroup, 8> groups;

@@ -8,6 +8,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/TileShapeStateAnalysis.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -45,180 +46,6 @@ static bool candidateHasTag(DictionaryAttr candidate, StringRef tag) {
     auto value = dyn_cast<StringAttr>(attr);
     return value && value.getValue() == tag;
   });
-}
-
-static bool getStaticIntFromValue(Value value, int64_t &out) {
-  if (auto cOp = value.getDefiningOp<arith::ConstantIndexOp>()) {
-    out = cOp.value();
-    return true;
-  }
-  if (auto cInt = value.getDefiningOp<arith::ConstantIntOp>()) {
-    out = cInt.value();
-    return true;
-  }
-  return false;
-}
-
-static bool resolveDeclaredTpopTileValidShape(
-    Value value, SmallVectorImpl<int64_t> &validShape) {
-  if (!value.getDefiningOp<pto::DeclareTileOp>())
-    return false;
-
-  auto tileType = dyn_cast<pto::TileBufType>(value.getType());
-  if (!tileType || llvm::any_of(tileType.getShape(), ShapedType::isDynamic))
-    return false;
-
-  std::optional<SmallVector<int64_t, 2>> explicitValidShape;
-  bool hasTpopUser = false;
-  for (Operation *user : value.getUsers()) {
-    if (auto setValidShape = dyn_cast<pto::SetValidShapeOp>(user)) {
-      if (setValidShape.getSource() != value)
-        continue;
-
-      int64_t row = ShapedType::kDynamic;
-      int64_t col = ShapedType::kDynamic;
-      if (!getStaticIntFromValue(setValidShape.getValidRow(), row) ||
-          !getStaticIntFromValue(setValidShape.getValidCol(), col))
-        return false;
-
-      SmallVector<int64_t, 2> candidate{row, col};
-      if (explicitValidShape && *explicitValidShape != candidate)
-        return false;
-      explicitValidShape = std::move(candidate);
-      continue;
-    }
-
-    if (auto tpop = dyn_cast<pto::TPopOp>(user)) {
-      if (tpop.getTile() == value)
-        hasTpopUser = true;
-    }
-  }
-
-  if (explicitValidShape) {
-    validShape.assign(explicitValidShape->begin(), explicitValidShape->end());
-    return true;
-  }
-
-  if (!hasTpopUser)
-    return false;
-
-  validShape.assign(tileType.getShape().begin(), tileType.getShape().end());
-  return true;
-}
-
-static bool resolvePriorStaticSetValidShape(Operation *useOp, Value value,
-                                            SmallVectorImpl<int64_t> &validShape) {
-  if (!useOp)
-    return false;
-
-  pto::SetValidShapeOp nearest;
-  for (Operation *user : value.getUsers()) {
-    auto setValidShape = dyn_cast<pto::SetValidShapeOp>(user);
-    if (!setValidShape || setValidShape.getSource() != value)
-      continue;
-    if (setValidShape->getBlock() != useOp->getBlock())
-      continue;
-    if (!setValidShape->isBeforeInBlock(useOp))
-      continue;
-    if (!nearest || nearest->isBeforeInBlock(setValidShape))
-      nearest = setValidShape;
-  }
-  if (!nearest)
-    return false;
-
-  int64_t row = ShapedType::kDynamic;
-  int64_t col = ShapedType::kDynamic;
-  if (!getStaticIntFromValue(nearest.getValidRow(), row) ||
-      !getStaticIntFromValue(nearest.getValidCol(), col))
-    return false;
-  validShape.assign({row, col});
-  return true;
-}
-
-static bool resolveStaticTileValidShape(Value value,
-                                        SmallVectorImpl<int64_t> &validShape,
-                                        Operation *useOp = nullptr) {
-  Value validRow;
-  Value validCol;
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-
-  if (useOp && resolvePriorStaticSetValidShape(useOp, value, validShape))
-    return true;
-
-  if (resolveDeclaredTpopTileValidShape(value, validShape))
-    return true;
-
-  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
-    validRow = alloc.getValidRow();
-    validCol = alloc.getValidCol();
-  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
-    validRow = materialize.getValidRow();
-    validCol = materialize.getValidCol();
-  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
-    validRow = subview.getValidRow();
-    validCol = subview.getValidCol();
-  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
-    validRow = popAic.getValidRow();
-    validCol = popAic.getValidCol();
-  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
-    validRow = popAiv.getValidRow();
-    validCol = popAiv.getValidCol();
-  } else if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(def)) {
-    auto result = dyn_cast<OpResult>(value);
-    if (!result)
-      return false;
-    auto yieldOp =
-        dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
-    if (!yieldOp || result.getResultNumber() >= yieldOp.getNumOperands())
-      return false;
-    return resolveStaticTileValidShape(
-        yieldOp.getOperand(result.getResultNumber()), validShape);
-  }
-
-  if (!validRow || !validCol) {
-    if ((isa<pto::TPopFromAicOp, pto::TPopFromAivOp>(def))) {
-      auto tileType = dyn_cast<pto::TileBufType>(value.getType());
-      if (tileType && !llvm::any_of(tileType.getShape(), ShapedType::isDynamic)) {
-        validShape.assign(tileType.getShape().begin(), tileType.getShape().end());
-        return true;
-      }
-    }
-    return false;
-  }
-
-  int64_t row = ShapedType::kDynamic;
-  int64_t col = ShapedType::kDynamic;
-  if (!getStaticIntFromValue(validRow, row) ||
-      !getStaticIntFromValue(validCol, col))
-    return false;
-
-  validShape.assign({row, col});
-  return true;
-}
-
-static bool hasStaticFullTileValidShape(Operation *op) {
-  for (Value operand : op->getOperands()) {
-    auto tile = dyn_cast<pto::TileBufType>(operand.getType());
-    if (!tile)
-      continue;
-    ArrayRef<int64_t> shape = tile.getShape();
-    ArrayRef<int64_t> validShape = tile.getValidShape();
-    SmallVector<int64_t, 2> resolvedValidShape;
-    if ((validShape.empty() ||
-         llvm::any_of(validShape, ShapedType::isDynamic)) &&
-        resolveStaticTileValidShape(operand, resolvedValidShape, op)) {
-      validShape = resolvedValidShape;
-    }
-    if (shape.size() != validShape.size())
-      return false;
-    for (auto [shapeDim, validDim] : llvm::zip_equal(shape, validShape))
-      if (ShapedType::isDynamic(shapeDim) ||
-          ShapedType::isDynamic(validDim) || shapeDim != validDim)
-        return false;
-  }
-  return true;
 }
 
 static StringRef getTileOpName(Operation *op) {
@@ -299,7 +126,7 @@ struct SelectTemplateCandidatePass
         for (DictionaryAttr candidate : parsed) {
           if (candidateHasTag(candidate, "vmi") &&
               candidateHasTag(candidate, "fusion_eligible") &&
-              (hasStaticFullTileValidShape(op) ||
+              (pto::hasStaticFullTileValidShape(op) ||
                candidateHasTag(candidate, "supports_partial_valid_shape"))) {
             recordSelection(op, candidate, true);
             return WalkResult::advance();
