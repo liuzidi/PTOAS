@@ -38,6 +38,8 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
 
 enum class SchedulingBarrierKind {
   Movable,
@@ -92,7 +94,12 @@ static SchedulingBarrierKind classifySchedulingBarrier(Operation *op) {
     case pto::FusionOpKind::Compute:
       return SchedulingBarrierKind::Movable;
     case pto::FusionOpKind::LocalBoundary:
-      return SchedulingBarrierKind::LocalBoundary;
+      // Preserve the legacy scheduler's treatment of existing local
+      // semantics (for example reshape-like ops). Only an explicitly selected
+      // non-VMI fallback is a VMI scheduling barrier.
+      return op->hasAttr(kVmiFusionBoundaryAttr)
+                 ? SchedulingBarrierKind::LocalBoundary
+                 : SchedulingBarrierKind::Movable;
     case pto::FusionOpKind::HardBoundary:
       return SchedulingBarrierKind::HardBoundary;
     }
