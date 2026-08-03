@@ -34,6 +34,28 @@ module {
       outs(%dst : !pto.tile_buf<vec, 8x64xf32, valid=4x64>)
     return
   }
+
+  func.func @ptodsl_vmi_dynamic_validshape_fallback(%valid_row: index,
+                                                    %valid_col: index) {
+    %lhs = pto.alloc_tile valid_row = %valid_row valid_col = %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    %rhs = pto.alloc_tile valid_row = %valid_row valid_col = %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    %dst = pto.alloc_tile valid_row = %valid_row valid_col = %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    pto.set_validshape %lhs, %valid_row, %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    pto.set_validshape %rhs, %valid_row, %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    pto.set_validshape %dst, %valid_row, %valid_col
+      : !pto.tile_buf<vec, 8x64xf32, valid=?x?>
+    pto.tadd
+      ins(%lhs, %rhs
+          : !pto.tile_buf<vec, 8x64xf32, valid=?x?>,
+            !pto.tile_buf<vec, 8x64xf32, valid=?x?>)
+      outs(%dst : !pto.tile_buf<vec, 8x64xf32, valid=?x?>)
+    return
+  }
 }
 
 // PIPE: IR Dump After ExpandTileOp
@@ -46,4 +68,8 @@ module {
 // PIPE: func.func @ptodsl_vmi_tail_fallback
 // PIPE: pto.vadd
 // PIPE: func.func @ptodsl_vmi_static_type_tail_fallback
+// PIPE: pto.vadd
+// PIPE: func.func @ptodsl_vmi_dynamic_validshape_fallback
+// PIPE: pto.vmi.fusion.boundary = "local"
+// PIPE-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
 // PIPE: pto.vadd

@@ -14,6 +14,9 @@
 namespace mlir {
 namespace pto {
 
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
+
 static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
   return llvm::StringSwitch<FusionComputeFamily>(opName)
       .Cases("tadd", "tsub", "tmul", "tdiv", "tmax", "tmin",
@@ -81,12 +84,42 @@ FailureOr<FusionOpSemantics> getFusionOpSemantics(Operation *op) {
     return semantics;
   }
 
+  // Candidate selection runs before the VMI fusion planner. A non-VMI
+  // fallback remains a valid TileLib implementation, but it is not a VMI
+  // compute node: local fallbacks split a VMI loop-fusion run while remaining
+  // inside the loose FusionRegion; hard fallbacks split the enclosing region.
+  // The ordinary (non-VMI) fusion pipeline selects its candidates after
+  // planning, so this does not change legacy MI behavior.
+  if (auto boundary = op->getAttrOfType<StringAttr>(kVmiFusionBoundaryAttr)) {
+    semantics.kind = boundary.getValue() == "local"
+                         ? FusionOpKind::LocalBoundary
+                         : FusionOpKind::HardBoundary;
+    semantics.tileOutputs = collectNormalizedTileOutputs(op);
+
+    SmallVector<unsigned, 4> dpsInitOperandNumbers;
+    if (auto dpsIface = dyn_cast<pto::PTO_DpsInitOpInterface>(op)) {
+      for (OpOperand &dpsInit : dpsIface.getDpsInitsMutable())
+        dpsInitOperandNumbers.push_back(dpsInit.getOperandNumber());
+    }
+    for (OpOperand &operand : op->getOpOperands()) {
+      if (llvm::is_contained(dpsInitOperandNumbers,
+                             operand.getOperandNumber()))
+        continue;
+      Value value = operand.get();
+      if (isTileFusionTileValue(value))
+        semantics.tileInputs.push_back(value);
+      else
+        semantics.scalarInputs.push_back(value);
+    }
+    return semantics;
+  }
+
   // Whitelist-based compute classification. Any op NOT in
   // getFusionComputeFamily's whitelist is a HardBoundary, which means it is
   // excluded from computeNodes by FusionAnalysis and, in the
   // VMIUBDisjointStrategyEngine, appears as the "preceded-by-non-plannable"
   // F3 boundary that closes the current fusion group. This is what keeps
-  // sync/DMA/unknown ops (wait_flag, mem_bar, tload/tstore, tmov, ...) from
+  // sync/DMA/unknown ops (wait_flag, mem_bar, tload/tstore, ...) from
   // being merged across — they fall through here because they are Unknown, not
   // because they are listed.
   //

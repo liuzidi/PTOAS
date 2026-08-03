@@ -70,4 +70,37 @@ module {
     pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
     return
   }
+
+  // A selected non-VMI fallback is a boundary even when its TileOp name is
+  // otherwise a supported compute family.  Local fallback remains inside the
+  // loose region but stops VMI loop fusion; hard fallback splits the region.
+  // PLAN-LABEL: func.func @split_at_local_fallback
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.tadd {{.*}}pto.vmi.fusion.boundary = "local"
+  // PLAN: pto.tadd
+  // PLAN-NOT: pto.fusion_region
+  // PLAN-LABEL: func.func @split_at_hard_fallback
+  // PLAN-COUNT-2: pto.fusion_region
+  func.func @split_at_local_fallback() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%c, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>) {pto.vmi.fusion.boundary = "local"}
+    pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  func.func @split_at_hard_fallback() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%c, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>) {pto.vmi.fusion.boundary = "hard"}
+    pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
 }

@@ -38,6 +38,8 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
 
 enum class SchedulingBarrierKind {
   Movable,
@@ -92,7 +94,12 @@ static SchedulingBarrierKind classifySchedulingBarrier(Operation *op) {
     case pto::FusionOpKind::Compute:
       return SchedulingBarrierKind::Movable;
     case pto::FusionOpKind::LocalBoundary:
-      return SchedulingBarrierKind::LocalBoundary;
+      // Preserve the legacy scheduler's treatment of existing local
+      // semantics (for example reshape-like ops). Only an explicitly selected
+      // non-VMI fallback is a VMI scheduling barrier.
+      return op->hasAttr(kVmiFusionBoundaryAttr)
+                 ? SchedulingBarrierKind::LocalBoundary
+                 : SchedulingBarrierKind::Movable;
     case pto::FusionOpKind::HardBoundary:
       return SchedulingBarrierKind::HardBoundary;
     }
@@ -140,8 +147,9 @@ static bool canMoveEarlierAcross(Operation *movingOp, Operation *candidate) {
 
   switch (classifySchedulingBarrier(candidate)) {
   case SchedulingBarrierKind::Movable:
-  case SchedulingBarrierKind::LocalBoundary:
     return !hasTileDependency(movingOp, candidate);
+  case SchedulingBarrierKind::LocalBoundary:
+    return false;
   case SchedulingBarrierKind::HardBoundary:
     return false;
   }
@@ -158,8 +166,9 @@ static bool canMoveLaterAcross(Operation *movingOp, Operation *candidate) {
 
   switch (classifySchedulingBarrier(candidate)) {
   case SchedulingBarrierKind::Movable:
-  case SchedulingBarrierKind::LocalBoundary:
     return !hasTileDependency(movingOp, candidate);
+  case SchedulingBarrierKind::LocalBoundary:
+    return false;
   case SchedulingBarrierKind::HardBoundary:
     return false;
   }
@@ -239,10 +248,10 @@ collectScheduledGroups(Block &block, SmallVectorImpl<ScheduledGroup> &groups) {
 
     std::optional<int64_t> previousOrder;
     for (const GroupMember &member : group.members) {
-      if (classifySchedulingBarrier(member.op) !=
-          SchedulingBarrierKind::Movable) {
-        member.op->emitError("fusion scheduling metadata must only annotate "
-                             "movable compute ops");
+      SchedulingBarrierKind kind = classifySchedulingBarrier(member.op);
+      if (kind == SchedulingBarrierKind::HardBoundary) {
+        member.op->emitError("fusion scheduling metadata must not annotate "
+                             "hard-boundary ops");
         return failure();
       }
       if (previousOrder && *previousOrder == member.order) {
@@ -260,6 +269,9 @@ collectScheduledGroups(Block &block, SmallVectorImpl<ScheduledGroup> &groups) {
 static bool canPrefixMoveLaterAcross(
     ArrayRef<GroupMember> members, Operation *placement, Operation *barrier) {
   for (const GroupMember &prevMember : members) {
+    if (classifySchedulingBarrier(prevMember.op) ==
+        SchedulingBarrierKind::LocalBoundary)
+      return false;
     if (!canMoveLaterAcross(prevMember.op, barrier)) {
       return false;
     }
@@ -291,6 +303,11 @@ static void scheduleGroup(ScheduledGroup &group) {
   Operation *placement = group.members.front().op;
   for (GroupMember &member : llvm::drop_begin(group.members)) {
     Operation *op = member.op;
+    if (classifySchedulingBarrier(op) ==
+        SchedulingBarrierKind::LocalBoundary) {
+      placement = op;
+      continue;
+    }
     while (op != placement && op != placement->getNextNode()) {
       if (canMoveAfter(op, placement)) {
         op->moveAfter(placement);

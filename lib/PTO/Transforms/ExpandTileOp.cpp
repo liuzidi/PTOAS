@@ -32,6 +32,7 @@
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/TileLibService.h"
 #include "PTO/Transforms/TileOpExpansionUtils.h"
+#include "PTO/Transforms/TileShapeStateAnalysis.h"
 #include "Utils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -700,112 +701,6 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
   return false;
 }
 
-static bool resolveDeclaredTpopTileValidShape(
-    Value value, SmallVectorImpl<int64_t> &validShape) {
-  if (!value.getDefiningOp<pto::DeclareTileOp>())
-    return false;
-
-  auto tileType = dyn_cast<pto::TileBufType>(value.getType());
-  if (!tileType || llvm::any_of(tileType.getShape(), ShapedType::isDynamic))
-    return false;
-
-  std::optional<SmallVector<int64_t, 2>> explicitValidShape;
-  bool hasTpopUser = false;
-  for (Operation *user : value.getUsers()) {
-    if (auto setValidShape = dyn_cast<pto::SetValidShapeOp>(user)) {
-      if (setValidShape.getSource() != value)
-        continue;
-
-      int64_t row = ShapedType::kDynamic;
-      int64_t col = ShapedType::kDynamic;
-      if (!getStaticIntFromValue(setValidShape.getValidRow(), row) ||
-          !getStaticIntFromValue(setValidShape.getValidCol(), col))
-        return false;
-
-      SmallVector<int64_t, 2> candidate{row, col};
-      if (explicitValidShape && *explicitValidShape != candidate)
-        return false;
-      explicitValidShape = std::move(candidate);
-      continue;
-    }
-
-    if (auto tpop = dyn_cast<pto::TPopOp>(user)) {
-      if (tpop.getTile() == value)
-        hasTpopUser = true;
-    }
-  }
-
-  if (explicitValidShape) {
-    validShape.assign(explicitValidShape->begin(), explicitValidShape->end());
-    return true;
-  }
-
-  if (!hasTpopUser)
-    return false;
-
-  validShape.assign(tileType.getShape().begin(), tileType.getShape().end());
-  return true;
-}
-
-static bool resolveStaticTileValidShape(Value value,
-                                        SmallVectorImpl<int64_t> &validShape) {
-  Value validRow;
-  Value validCol;
-  Operation *def = value.getDefiningOp();
-  if (!def)
-    return false;
-
-  if (resolveDeclaredTpopTileValidShape(value, validShape))
-    return true;
-
-  if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
-    validRow = alloc.getValidRow();
-    validCol = alloc.getValidCol();
-  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
-    validRow = materialize.getValidRow();
-    validCol = materialize.getValidCol();
-  } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
-    validRow = subview.getValidRow();
-    validCol = subview.getValidCol();
-  } else if (auto popAic = dyn_cast<pto::TPopFromAicOp>(def)) {
-    validRow = popAic.getValidRow();
-    validCol = popAic.getValidCol();
-  } else if (auto popAiv = dyn_cast<pto::TPopFromAivOp>(def)) {
-    validRow = popAiv.getValidRow();
-    validCol = popAiv.getValidCol();
-  } else if (auto fusionRegion = dyn_cast<pto::FusionRegionOp>(def)) {
-    auto result = dyn_cast<OpResult>(value);
-    if (!result)
-      return false;
-    auto yieldOp =
-        dyn_cast<pto::YieldOp>(fusionRegion.getBody().front().getTerminator());
-    if (!yieldOp || result.getResultNumber() >= yieldOp.getNumOperands())
-      return false;
-    return resolveStaticTileValidShape(yieldOp.getOperand(result.getResultNumber()),
-                                       validShape);
-  }
-
-  if (!validRow || !validCol) {
-    if ((isa<pto::TPopFromAicOp, pto::TPopFromAivOp>(def))) {
-      auto tileType = dyn_cast<pto::TileBufType>(value.getType());
-      if (tileType && !llvm::any_of(tileType.getShape(), ShapedType::isDynamic)) {
-        validShape.assign(tileType.getShape().begin(), tileType.getShape().end());
-        return true;
-      }
-    }
-    return false;
-  }
-
-  int64_t row = ShapedType::kDynamic;
-  int64_t col = ShapedType::kDynamic;
-  if (!getStaticIntFromValue(validRow, row) ||
-      !getStaticIntFromValue(validCol, col))
-    return false;
-
-  validShape.assign({row, col});
-  return true;
-}
-
 static int64_t getStaticIntOrDynamic(OpFoldResult ofr) {
   if (isa<Attribute>(ofr)) {
     Attribute attr = cast<Attribute>(ofr);
@@ -929,7 +824,8 @@ static void populateViewShapeAndStrides(Value value,
   }
 }
 
-static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value) {
+static std::optional<OperandTypeInfo>
+buildOperandTypeInfo(Value value, Operation *useOp = nullptr) {
   Type ty = value.getType();
   // Tile operand — from TileBufType.
   if (auto tbTy = dyn_cast<pto::TileBufType>(ty)) {
@@ -946,6 +842,11 @@ static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value) {
     }
     else
       info.tileValidShape.assign(validShape.begin(), validShape.end());
+    if (llvm::any_of(info.tileValidShape, ShapedType::isDynamic)) {
+      SmallVector<int64_t, 2> resolvedValidShape;
+      if (pto::resolveStaticTileValidShape(value, resolvedValidShape, useOp))
+        info.tileValidShape = std::move(resolvedValidShape);
+    }
     info.tileMemorySpace = getMemorySpaceString(tbTy);
     if (auto config = tbTy.getConfigAttr()) {
       info.blayout = static_cast<int32_t>(config.getBLayout().getValue());
@@ -1035,7 +936,7 @@ static FailureOr<SpecKey> buildSpecKey(Operation *op) {
   key.targetArch = getTargetArchString(op);
 
   for (unsigned i = 0; i < op->getNumOperands(); ++i) {
-    auto info = buildOperandTypeInfo(op->getOperand(i));
+    auto info = buildOperandTypeInfo(op->getOperand(i), op);
     if (!info) {
       op->emitError("ExpandTileOp: cannot build specialization key for this "
                     "operand schema");
