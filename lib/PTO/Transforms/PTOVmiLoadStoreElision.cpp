@@ -576,7 +576,7 @@ struct ContentEntry {
   // Pass 1 marks:
   int forwardToIdx = -1; // >=0: this load forwards to entries[forwardToIdx].sourceValue
   bool eraseMark = false;     // this op should be erased in Pass 2 (dead load/store)
-  bool escapeMark = false;    // a store whose UB is read by a region-escaping op: keep
+  bool observedMark = false;  // a retained load/escape may observe this store: keep
   bool stale = false;         // no longer participates as a forward target (merge partial write)
 };
 
@@ -636,6 +636,20 @@ static bool elideOpRange(OpRange ops) {
                      int64_t accessBytes) {
     return locationsExactlyMatch(e, base, offset, accessBytes);
   };
+  auto markStoresObservedByLoad = [&](Value base, Value offset,
+                                      int64_t accessBytes,
+                                      const LaneRange &readLanes,
+                                      bool mayReadAnyTrackedUB = false) {
+    for (ContentEntry &e : entries) {
+      if (e.isLoad || e.eraseMark)
+        continue;
+      if (!mayReadAnyTrackedUB &&
+          !locationsMayAlias(e, base, offset, accessBytes))
+        continue;
+      if (readLanes.intersects(e.lanes))
+        e.observedMark = true;
+    }
+  };
 
   for (Operation &op : ops) {
     if (auto load = dyn_cast<pto::VMIvLoadOp>(op)) {
@@ -644,6 +658,9 @@ static bool elideOpRange(OpRange ops) {
         // read set cannot be bounded as a prefix interval, and the load may
         // touch UBs we don't track. Record it non-matchable and flush so
         // neither it nor any earlier entry is forwarded across it.
+        markStoresObservedByLoad(load.getSource(), load.getOffset(), 0,
+                                 LaneRange::unknown(),
+                                 /*mayReadAnyTrackedUB=*/true);
         entries.push_back({load, load.getSource(), load.getOffset(),
                            std::nullopt, LaneRange::unknown(), true,
                            load->getResult(0),
@@ -678,6 +695,9 @@ static bool elideOpRange(OpRange ops) {
         // base must NOT forward to it (the base comparing equal under SSA is
         // not a proof of identity). Record a non-matchable entry and flush so
         // nothing forwards across it.
+        markStoresObservedByLoad(base, offset, loadBytes,
+                                 LaneRange::unknown(),
+                                 /*mayReadAnyTrackedUB=*/true);
         entries.push_back({load, base, offset, std::nullopt,
                            LaneRange::unknown(), true, load->getResult(0),
                            -1, false, false,
@@ -689,7 +709,10 @@ static bool elideOpRange(OpRange ops) {
 
       if (readLanes.isUnknownSet()) {
         // Cannot reason; record a non-matchable entry so later vloads of the
-        // same loc see it (and, lacking a cover, do not forward to it).
+        // same loc see it (and, lacking a cover, do not forward to it). Since
+        // this load remains in the IR, every preceding aliasing store it may
+        // observe must also remain even if a later store overwrites the UB.
+        markStoresObservedByLoad(base, offset, loadBytes, readLanes);
         entries.push_back(
             {load, base, offset, getVmiAccessLocation(
                                       base, offset, loadBytes),
@@ -725,6 +748,10 @@ static bool elideOpRange(OpRange ops) {
              false});
         changed = true; // load will be forwarded + erased in Pass 2
       } else {
+        // The load could not be replaced. Preserve every preceding store that
+        // may contribute to the value it reads; a later covering store does
+        // not make such an already-observed store dead.
+        markStoresObservedByLoad(base, offset, loadBytes, readLanes);
         entries.push_back(
             {load, base, offset, getVmiAccessLocation(
                                       base, offset, loadBytes),
@@ -785,7 +812,7 @@ static bool elideOpRange(OpRange ops) {
           continue;
         }
         if (writeLanes.contains(e.lanes)) {
-          if (!e.isLoad && !e.escapeMark)
+          if (!e.isLoad && !e.observedMark)
             e.eraseMark = true;
           e.stale = true;
         } else if (writeLanes.intersects(e.lanes)) {
@@ -813,7 +840,7 @@ static bool elideOpRange(OpRange ops) {
         for (auto &e : entries)
           if (!e.isLoad &&
               (!escapeRoot || mayAliasStorageValues(e.base, esc)))
-            e.escapeMark = true;
+            e.observedMark = true;
         continue;
       }
       if (isEscapeWriteToUB(&op, esc)) {
