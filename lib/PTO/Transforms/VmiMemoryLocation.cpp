@@ -138,8 +138,13 @@ getStaticSubviewByteOffset(memref::SubViewOp subview, MemRefType sourceType) {
     return std::nullopt;
   for (auto [mixed, stride] : llvm::zip(mixedOffsets, strides)) {
     auto value = dyn_cast<Value>(mixed);
-    auto constant = value ? getStaticOffset(value) : std::optional<int64_t>(
-                                                     cast<IntegerAttr>(mixed).getInt());
+    std::optional<int64_t> constant;
+    if (value) {
+      constant = getStaticOffset(value);
+    } else if (auto attr = dyn_cast<Attribute>(mixed)) {
+      if (auto integer = dyn_cast<IntegerAttr>(attr))
+        constant = integer.getInt();
+    }
     if (!constant || stride < 0)
       return std::nullopt;
     int64_t term = 0;
