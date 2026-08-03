@@ -85,7 +85,7 @@ static SchedulingBarrierKind classifySchedulingBarrier(Operation *op) {
     return SchedulingBarrierKind::HardBoundary;
   if (isa<CallOpInterface>(op))
     return SchedulingBarrierKind::HardBoundary;
-  if (isa<pto::AllocTileOp>(op))
+  if (pto::isFusionTransparentScaffold(op))
     return SchedulingBarrierKind::Movable;
 
   FailureOr<pto::FusionOpSemantics> semanticsOr = pto::getFusionOpSemantics(op);
@@ -111,9 +111,11 @@ static SchedulingBarrierKind classifySchedulingBarrier(Operation *op) {
 }
 
 static bool hasTileDependency(Operation *opA, Operation *opB) {
-  // alloc_tile is a pure buffer allocation with no tile-level data dependency
-  // on any compute op — it does not consume or produce tile data.
-  if (isa<pto::AllocTileOp>(opA) || isa<pto::AllocTileOp>(opB))
+  // Structural scaffold carries SSA descriptors, not tile data. Directional
+  // SSA checks in canMoveEarlierAcross/canMoveLaterAcross still prevent moving
+  // a user before its descriptor definition or a definition after its user.
+  if (pto::isFusionTransparentScaffold(opA) ||
+      pto::isFusionTransparentScaffold(opB))
     return false;
 
   FailureOr<pto::FusionOpSemantics> aSemOr = pto::getFusionOpSemantics(opA);

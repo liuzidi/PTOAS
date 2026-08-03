@@ -46,6 +46,10 @@ struct FusionOpSemantics {
 };
 
 bool isSupportedPreFusionComputeOp(StringRef opName);
+/// Return true for structural operations that may live inside a loose fusion
+/// region without becoming VMI compute candidates themselves. These ops must
+/// not perform data movement or synchronization.
+bool isFusionTransparentScaffold(Operation *op);
 FailureOr<FusionOpSemantics> getFusionOpSemantics(Operation *op);
 
 } // namespace pto
