@@ -14404,6 +14404,22 @@ verifySupportedVMIToVPTOOps(ModuleOp module,
     if (auto maxi = dyn_cast<VMIMaxIOp>(op))
       return emitMaskableUnsupported(
           op, "pto.vmi.maxi", cast<VMIVRegType>(maxi.getResult().getType()));
+    if (auto scalarOp = dyn_cast<VMIAddSOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.vadds",
+          cast<VMIVRegType>(scalarOp.getResult().getType()));
+    if (auto scalarOp = dyn_cast<VMIMulSOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.vmuls",
+          cast<VMIVRegType>(scalarOp.getResult().getType()));
+    if (auto scalarOp = dyn_cast<VMIMaxSOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.vmaxs",
+          cast<VMIVRegType>(scalarOp.getResult().getType()));
+    if (auto scalarOp = dyn_cast<VMIMinSOp>(op))
+      return emitMaskableUnsupported(
+          op, "pto.vmi.vmins",
+          cast<VMIVRegType>(scalarOp.getResult().getType()));
     if (auto negf = dyn_cast<VMINegFOp>(op))
       return emitMaskableUnsupported(
           op, "pto.vmi.negf", cast<VMIVRegType>(negf.getResult().getType()));

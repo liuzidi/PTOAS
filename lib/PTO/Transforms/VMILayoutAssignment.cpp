@@ -868,6 +868,34 @@ struct LayoutSolver {
           return WalkResult::interrupt();
         return WalkResult::advance();
       }
+      if (auto scalarOp = dyn_cast<VMIAddSOp>(op)) {
+        if (failed(unite(scalarOp.getSrc(), scalarOp.getResult(), op)) ||
+            failed(requestMaskUse(scalarOp.getMaskMutable(),
+                                  getDataLayout(scalarOp.getSrc()), op)))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      }
+      if (auto scalarOp = dyn_cast<VMIMulSOp>(op)) {
+        if (failed(unite(scalarOp.getSrc(), scalarOp.getResult(), op)) ||
+            failed(requestMaskUse(scalarOp.getMaskMutable(),
+                                  getDataLayout(scalarOp.getSrc()), op)))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      }
+      if (auto scalarOp = dyn_cast<VMIMaxSOp>(op)) {
+        if (failed(unite(scalarOp.getSrc(), scalarOp.getResult(), op)) ||
+            failed(requestMaskUse(scalarOp.getMaskMutable(),
+                                  getDataLayout(scalarOp.getSrc()), op)))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      }
+      if (auto scalarOp = dyn_cast<VMIMinSOp>(op)) {
+        if (failed(unite(scalarOp.getSrc(), scalarOp.getResult(), op)) ||
+            failed(requestMaskUse(scalarOp.getMaskMutable(),
+                                  getDataLayout(scalarOp.getSrc()), op)))
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      }
       if (auto activePrefix = dyn_cast<VMIActivePrefixIndexOp>(op)) {
         if (failed(setNaturalLayout(activePrefix.getResult(),
                                     getContiguousLayout(), op)))

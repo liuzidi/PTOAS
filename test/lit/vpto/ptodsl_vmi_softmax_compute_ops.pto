@@ -113,7 +113,7 @@ module {
 // FINAL: pto.vecscope
 // FINAL: pto.vcmax
 // FINAL: pto.vsub
-// FINAL: pto.vmul
+// FINAL: pto.vmuls
 // FINAL: pto.vexp
 // FINAL: pto.vcadd
 // FINAL: pto.vcvt

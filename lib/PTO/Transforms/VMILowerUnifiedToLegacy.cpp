@@ -1136,6 +1136,9 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
         isa<VMIvLoadOp, VMIvStoreOp, VMIVsstbOp>(op) ||
         // Category C4
         isa<VMIPsetOp, VMIPgeOp, VMIPltOp>(op) ||
+        // Category C5. Keep arithmetic vector-scalar ops for direct VPTO
+        // instruction selection; only shifts still require legacy expansion.
+        isa<VMIShlSOp, VMIShrSOp>(op) ||
         // Category C6 — unified reduce (partial coverage)
         isa<VMIvcaddOp, VMIvcmaxOp, VMIvcminOp>(op) ||
         // Category C7 — fused multiply-add family → legacy fma
@@ -1151,10 +1154,29 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
     //   vgatherb, vmull
     // These are intentionally NOT added to the worklist — they flow through
     // to VMIToVPTO which must provide direct 1:N lowering patterns.
-    if (isa<VMIAddSOp, VMIMulSOp, VMIMaxSOp, VMIMinSOp, VMIShlSOp, VMIShrSOp,
-            VMIVaddcOp, VMIVaddcsOp,
-            VMIVintlvOp, VMIVdintlvOp, VMIVselrOp, VMIVgatherbOp, VMIVmullOp>(
-            op)) {
+    if (auto scalarOp = dyn_cast<VMIAddSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMulSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMaxSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMinSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+
+    if (isa<VMIVaddcOp, VMIVaddcsOp, VMIVintlvOp, VMIVdintlvOp, VMIVselrOp,
+            VMIVgatherbOp, VMIVmullOp>(op)) {
       op->emitRemark("VMI unified op has no legacy equivalent — "
                      "requires direct VMIToVPTO 1:N lowering");
     }
@@ -1329,6 +1351,78 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
           vop.getLoc(), vop.getValue(), vop.getDestination(), vop.getOffset(),
           vop.getBlockStride(), repeatStride, vop.getMask());
       vop->erase();
+      continue;
+    }
+
+    // ---- Category C5: vector-scalar ops ----
+
+    if (auto vop = dyn_cast<VMIAddSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        if (isFloatType(elemType))
+          return builder.create<VMIAddFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIAddIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
+      continue;
+    }
+
+    if (auto vop = dyn_cast<VMIMulSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        if (isFloatType(elemType))
+          return builder.create<VMIMulFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIMulIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
+      continue;
+    }
+
+    if (auto vop = dyn_cast<VMIMaxSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        if (isFloatType(elemType))
+          return builder.create<VMIMaxFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIMaxIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
+      continue;
+    }
+
+    if (auto vop = dyn_cast<VMIMinSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        if (isFloatType(elemType))
+          return builder.create<VMIMinFOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIMinIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
+      continue;
+    }
+
+    if (auto vop = dyn_cast<VMIShlSOp>(op)) {
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        return builder.create<VMIShLIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
+      continue;
+    }
+
+    if (auto vop = dyn_cast<VMIShrSOp>(op)) {
+      Type elemType = getVMIElementType(vop.getSrc());
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
+        auto intType = cast<IntegerType>(elemType);
+        if (!intType.isSigned())
+          return builder.create<VMIShRUIOp>(loc, ty, lhs, rhs).getResult();
+        return builder.create<VMIShRSIOp>(loc, ty, lhs, rhs).getResult();
+      };
+      (void)lowerVecScalar(vop, builder, createLegacy);
       continue;
     }
 

@@ -1207,8 +1207,9 @@ def VMINormalizeSignlessIntToUnsigned :
 def VMILowerUnifiedToLegacy : Pass<"vmi-lower-unified-to-legacy", "ModuleOp"> {
   let summary = "Lower unified VMI ops to legacy equivalents before layout assignment";
   let description = [{
-    Expands most unified v-prefixed VMI ops into their legacy (mask-less)
-    equivalents so downstream layout and VMIToVPTO passes only see legacy ops.
+    Expands unified v-prefixed VMI ops into legacy equivalents when that
+    preserves their semantics. Ops with a direct physical instruction or no
+    legacy equivalent remain unified for layout assignment and VMIToVPTO.
 
     Ops lowered (Category A–C6):
       A:  vci, vinterpret_cast, vsel, vbrc  →  iota, bitcast, select, broadcast/group_broadcast
@@ -1220,11 +1221,16 @@ def VMILowerUnifiedToLegacy : Pass<"vmi-lower-unified-to-legacy", "ModuleOp"> {
       C2: vcvt        →  legacy extf/truncf/fptosi/sitofp/extsi/extui/trunci
       C3: vload/vstore  →  legacy load/store variants
       C4: pset/pge    →  create_mask/create_group_mask
+      C5: partial-mask vadds/vmuls/vmaxs/vmins and all vshls/vshrs
+          → broadcast + legacy binary; full-mask arithmetic scalar ops are
+             preserved for direct VMIToVPTO lowering; vshrs selects shrui for
+             explicit unsigned elements and shrsi otherwise
       C6: vcadd/vcmax/vcmin  →  legacy reduce variants
 
-    Ops NOT lowered (no legacy equivalent — require direct VMIToVPTO 1:N patterns):
-      plt, vadds, vmuls, vmaxs, vmins, vshls, vshrs, vhist, vintlv, vdintlv, vselr,
+    Ops preserved for direct VMIToVPTO 1:N lowering:
+      plt, vhist, vintlv, vdintlv, vselr,
       vgather, vgatherb, vscatter,
+      full-mask vadds, vmuls, vmaxs, vmins,
       vexpdif, vaxpy, vlrelu, vprelu, vmull, vmula
   }];
   let constructor = "mlir::pto::createVMILowerUnifiedToLegacyPass()";

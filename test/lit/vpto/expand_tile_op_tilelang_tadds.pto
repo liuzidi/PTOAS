@@ -10,15 +10,15 @@
 //
 // RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
 
-// The unified PTODSL backend lowers the scalar operand through a VMI candidate,
-// broadcasting it with vdup and using the ordinary vector add.
+// The unified PTODSL backend lowers the scalar operand through a VMI candidate
+// and selects the native vector-scalar VPTO instruction for a full mask.
 // CHECK: func.func @TADDS
 // CHECK-NOT: pto.tadds ins
 // CHECK: pto.vecscope
-// CHECK: pto.vdup
+// CHECK-NOT: pto.vdup
 // CHECK: scf.for
 // CHECK: pto.vlds
-// CHECK: pto.vadd
+// CHECK: pto.vadds
 // CHECK: pto.vsts
 // CHECK: pto.tilelib.candidate = "vmi_tadds"
 
