@@ -73,6 +73,12 @@ add_mlir_dialect_library(PTOTransforms
   PTOInferVPTOVecScope.cpp
   TileShapeStateAnalysis.cpp
 
+  VecScopeMemBar/VecScopeMemoryFootprint.cpp
+  VecScopeMemBar/VecScopeMemBarAnalysis.cpp
+  VecScopeMemBar/VecScopeMemBarPlacement.cpp
+  VecScopeMemBar/VecScopeMemBarCodegen.cpp
+  VecScopeMemBar/PTOInsertVecScopeMemBarPass.cpp
+
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
