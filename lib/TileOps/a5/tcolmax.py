@@ -43,4 +43,4 @@ from ._vmi_common import (  # noqa: E402
     dtypes=(("f32", "f32"),),
 )
 def vmi_tcolmax(src: pto.Tile, dst: pto.Tile):
-    emit_col_reduce_vmi(src, dst, kind="max")
+    emit_col_reduce_vmi(src, dst, kind="max", split=4)

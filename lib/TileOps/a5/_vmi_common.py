@@ -535,11 +535,12 @@ VMI_TILELIB_REGISTRY = _VMITileTemplateRegistry()
 #   min -> vmin, init +inf (Padding<T>::Max)
 #   add -> vadd, init 0
 #   prod-> vmul, init 1
-# `emit_col_reduce_vmi` only exercises max/add today; min/prod map to vmi
-# merge ops that the VMI tilelib does not yet expose as elementwise-vector
-# forms (only the -s scalar variants), so they raise if used.
+# `emit_col_reduce_vmi` exercises max/min/add today; prod maps to a vmi
+# merge op the VMI tilelib does not yet expose as an elementwise-vector form
+# (only the -s scalar variant), so it raises if used.
 _REDUCE_MERGE_OP = {
     "max": _vmax,
+    "min": _vmin,
     "add": _vadd,
 }
 
@@ -1357,6 +1358,7 @@ def emit_col_reduce_vmi(
     dst: _TileProxy,
     *,
     kind: str,
+    split: int = 1,
 ) -> None:
     """Emit a ColReduce (tcolmax / tcolsum / tcolmin / ...) VMI candidate.
 
@@ -1383,6 +1385,29 @@ def emit_col_reduce_vmi(
     matching the pto-isa repeat loop. It must NOT be a Python ``range`` here:
     a trace-time ``range`` would statically unroll one merge per row (e.g. 127
     for ``rows=128``), producing a flat vmax chain with no surrounding loop.
+
+    ``split`` (1 or 2) controls the reduction width:
+
+    * ``split=1`` (default): one accumulator, ``scf.for c0..rows step 1``,
+      one merge per row. This is the fusion-friendly form: its loop header
+      (lb/ub/step) is structurally identical to the element-wise VMI candidates'
+      ``c0..N`` header, so ``PTOVmiLoopFusion`` merges them into one
+      ``scf.for``.
+    * ``split=2``: two accumulators (``acc_a``/``acc_b``) each seeded with the
+      reduce identity, ``scf.for c0..rows step 2`` where each iteration loads
+      two rows — row ``i`` merges into ``acc_a``, row ``i+1`` into ``acc_b`` —
+      and the two partial results are merged once after the loop
+      (``merge(acc_a, acc_b)``). This raises ILP (two independent vloads /
+      vmerges per iteration, exposing pipeline parallelism) at the cost of
+      **breaking fusion**: the ``step 2`` header no longer matches the
+      element-wise candidates' ``step 1`` header (see
+      ``PTOVmiLoopFusion::sameHeader``), so this reduce runs as a standalone
+      loop and is no longer folded into the softmax single-loop body. Use it
+      when the reduction itself is the rvec bottleneck and fusion is not
+      profitable.
+
+    ``split=2`` requires ``rows % 2 == 0``; otherwise it falls back to
+    ``split=1`` (the reduction is still correct, just single-way).
     """
     # Reduce identity element per kind (pto-isa InstrOp::InitVal /
     # a5 Padding<T>::Min/Max): max -> -inf (0xff800000), min -> +inf
@@ -1405,15 +1430,61 @@ def emit_col_reduce_vmi(
     # load needed (a vload would carry a Read memory effect and survive DCE,
     # duplicating the row-0 read the loop itself does).
     accumulator = _vconstant(reduce_identity, f32, lanes=block_map.cols)
-    # The whole reduction is a runtime scf.for from row 0 carrying the
-    # row-wide accumulator; each iteration does one element-wise merge over the
-    # full logical row. Row r maps to logical block r*blocks_per_row.
-    with for_(0, block_map.rows, step=1, state={"acc": accumulator}) as loop:
-        row_block_base = index_mul(loop.iv, block_map.blocks_per_row)
-        loaded = _vload(src, block_map.coordinate(row_block_base))
-        merged = merge_op(loop.state.acc, loaded, full_mask)
-        loop.yield_state(acc=merged)
-    accumulator = loop.results[0]
+
+    # Validate split: power-of-two widths 1/2/4/8 are supported, and split>1
+    # requires ``rows % split == 0`` so every iteration loads ``split`` real rows
+    # (no OOB tail). Any unsupported value / non-divisible row count silently
+    # falls back to split=1, which is always correct.
+    _SUPPORTED_SPLITS = (1, 2, 4, 8)
+    if split not in _SUPPORTED_SPLITS or block_map.rows % split != 0:
+        split = 1
+
+    if split >= 2:
+        # ``split`` independent row-wide accumulators, each carrying every
+        # ``split``-th row. step=split: iteration i loads rows i..i+split-1, one
+        # per accumulator (row i+k -> acc_k). The split merges per iteration are
+        # mutually independent (acc_k does not depend on acc_j's load for j!=k),
+        # exposing load/merge pipeline parallelism the single-way chain cannot.
+        # The final cross-accumulator merge is a ``split``-way reduction tree
+        # (split-1 extra merge ops) outside the loop. ``step`` no longer equals
+        # 1, so this header is not structurally equivalent to the element-wise
+        # candidates' ``c0..N step 1`` header and PTOVmiLoopFusion will NOT fold
+        # this reduce into the softmax single-loop body (see sameHeader).
+        acc_init = accumulator  # acc_0 already seeded above; seed the rest.
+        acc_names = [f"acc_{k}" for k in range(split)]
+        acc_state = {acc_names[0]: acc_init}
+        for k in range(1, split):
+            acc_state[acc_names[k]] = _vconstant(
+                reduce_identity, f32, lanes=block_map.cols
+            )
+        with for_(0, block_map.rows, step=split, state=acc_state) as loop:
+            row_base = index_mul(loop.iv, block_map.blocks_per_row)
+            next_state = {}
+            for k in range(split):
+                row_k = index_mul(index_add(loop.iv, k), block_map.blocks_per_row)
+                loaded_k = _vload(src, block_map.coordinate(row_k))
+                next_state[acc_names[k]] = merge_op(
+                    getattr(loop.state, acc_names[k]), loaded_k, full_mask
+                )
+            loop.yield_state(**next_state)
+        # Cross-accumulator merge tree: fold the split partials into one
+        # row-wide result. Sequential fold is correct (the merge op is
+        # associative & commutative for max/min/add); a balanced tree would
+        # expose a bit more ILP but the loop-internal parallelism already
+        # dominates the rvec gain.
+        accumulator = loop.results[0]
+        for k in range(1, split):
+            accumulator = merge_op(accumulator, loop.results[k], full_mask)
+    else:
+        # The whole reduction is a runtime scf.for from row 0 carrying the
+        # row-wide accumulator; each iteration does one element-wise merge over
+        # the full logical row. Row r maps to logical block r*blocks_per_row.
+        with for_(0, block_map.rows, step=1, state={"acc": accumulator}) as loop:
+            row_block_base = index_mul(loop.iv, block_map.blocks_per_row)
+            loaded = _vload(src, block_map.coordinate(row_block_base))
+            merged = merge_op(loop.state.acc, loaded, full_mask)
+            loop.yield_state(acc=merged)
+        accumulator = loop.results[0]
     # dst [1, cols] is one logical row; store via linear offset to avoid the
     # src/dst shape mismatch in CanonicalBlockCoordinate validation (src is
     # [rows, cols], dst is [1, cols]).
