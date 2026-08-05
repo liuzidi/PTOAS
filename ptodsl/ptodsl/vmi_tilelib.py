@@ -22,6 +22,7 @@ from .tilelib.templates.a5.tadds import vmi_tadds
 from .tilelib.templates.a5.tcvt import vmi_tcvt
 from .tilelib.templates.a5.tcolmax import vmi_tcolmax
 from .tilelib.templates.a5.tcolsum import vmi_tcolsum
+from .tilelib.templates.a5.tcolexpand import vmi_tcolexpand
 from .tilelib.templates.a5.tcolexpandadd import vmi_tcolexpandadd
 from .tilelib.templates.a5.tcolexpanddiv import vmi_tcolexpanddiv
 from .tilelib.templates.a5.tcolexpandmul import vmi_tcolexpandmul
@@ -46,6 +47,8 @@ from .tilelib.templates.a5.tneg import vmi_tneg
 from .tilelib.templates.a5.trecip import vmi_trecip
 from .tilelib.templates.a5.trsqrt import vmi_trsqrt, vmi_trsqrt_with_tmp
 from .tilelib.templates.a5.trowexpandsub import vmi_trowexpandsub
+from .tilelib.templates.a5.trowexpanddiv import vmi_trowexpanddiv
+from .tilelib.templates.a5.trowexpandmul import vmi_trowexpandmul
 from .tilelib.templates.a5.trowmax import vmi_trowmax
 from .tilelib.templates.a5.trowsum import vmi_trowsum
 from .tilelib.templates.a5.tsqrt import vmi_tsqrt
@@ -62,6 +65,7 @@ __all__ = [
     "vmi_tcvt",
     "vmi_tcolmax",
     "vmi_tcolsum",
+    "vmi_tcolexpand",
     "vmi_tcolexpandadd",
     "vmi_tcolexpanddiv",
     "vmi_tcolexpandmul",
@@ -86,6 +90,8 @@ __all__ = [
     "vmi_trsqrt",
     "vmi_trsqrt_with_tmp",
     "vmi_trowexpandsub",
+    "vmi_trowexpanddiv",
+    "vmi_trowexpandmul",
     "vmi_trowmax",
     "vmi_trowsum",
     "vmi_tsqrt",

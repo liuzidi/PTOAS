@@ -63,3 +63,21 @@ def template_tcolexpand(src: pto.Tile, dst: pto.Tile):
             mask, remained = pto.make_mask(dtype, remained)
             value = pto.vlds(src[0, col:])
             pto.vsts(value, dst[row, col:], mask)
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    col_expand_vmi_constraint,
+    emit_col_expand_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tcolexpand",
+    name="vmi_tcolexpand",
+    dtypes=(("f32", "f32"),),
+    constraints=(col_expand_vmi_constraint,),
+)
+def vmi_tcolexpand(src: pto.Tile, dst: pto.Tile):
+    emit_col_expand_vmi(src, dst)

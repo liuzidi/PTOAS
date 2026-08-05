@@ -35,11 +35,13 @@ from ptodsl._tile_template_tracing import (
     vsts,
 )
 from ptodsl.tilelib.registry import TileTemplateRegistry
+from ptodsl.tilelib.constraints import evaluate_candidate
 from ptodsl.vmi_tilelib import (
     VMI_TILELIB_REGISTRY,
     vmi_tadd_block64,
     vmi_tcolmax,
     vmi_tcolsum,
+    vmi_tcolexpand,
     vmi_tcolexpandsub,
     vmi_tcvt,
     vmi_tabs,
@@ -49,6 +51,8 @@ from ptodsl.vmi_tilelib import (
     vmi_texpands_f16,
     vmi_texpands_i32,
     vmi_tneg,
+    vmi_trowexpanddiv,
+    vmi_trowexpandmul,
     vmi_tsubs,
 )
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
@@ -253,6 +257,112 @@ def check_local_elementwise_candidates() -> dict[str, tuple[str, str]]:
                 == ("vmi", "fusion_eligible", "single_logical_row_loop"),
                 f"{candidate.name} should carry the canonical VMI fusion tags",
             )
+    return lowering_cases
+
+
+def check_local_broadcast_candidates() -> dict[str, tuple[str, str]]:
+    rows, cols = 8, 512
+    wide = TileSpec((rows, cols), f32)
+    compact = TileSpec((rows, 1), f32, b_layout="col_major")
+    column = TileSpec((1, cols), f32)
+    binary = (
+        (
+            "vmi_trowexpandmul",
+            vmi_trowexpandmul.specialize(src=wide, row_values=compact, dst=wide),
+            "pto.vmi.vmul",
+            "pto.vmul",
+        ),
+        (
+            "vmi_trowexpanddiv",
+            vmi_trowexpanddiv.specialize(
+                src=wide,
+                row_values=compact,
+                dst=wide,
+                context_attrs={"precisionType": "default"},
+            ),
+            "pto.vmi.vdiv",
+            "pto.vdiv",
+        ),
+    )
+    lowering_cases = {}
+    for name, artifact, vmi_op, vpto_op in binary:
+        artifact.verify()
+        text = artifact.mlir_text()
+        expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+        expect(text.count("pto.vmi.vload") == 2, f"{name} should load row and state")
+        expect(text.count("pto.vmi.vbrc") == 1, f"{name} should broadcast row state")
+        expect(text.count(vmi_op) == 1, f"{name} should emit {vmi_op}")
+        expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one row")
+        lowering_cases[name] = (text, vpto_op)
+
+    artifact = vmi_tcolexpand.specialize(src=column, dst=wide)
+    artifact.verify()
+    text = artifact.mlir_text()
+    expect(text.count("scf.for") == 1, "tcolexpand should contain one row loop")
+    expect(text.count("pto.vmi.vload") == 1, "tcolexpand should load once")
+    expect(
+        text.index("pto.vmi.vload") < text.index("scf.for"),
+        "tcolexpand source should be loop invariant",
+    )
+    expect(text.count("pto.vmi.vstore") == 1, "tcolexpand should store one row")
+    lowering_cases["vmi_tcolexpand"] = (text, "pto.vsts")
+
+    for op in ("trowexpandmul", "trowexpanddiv", "tcolexpand"):
+        candidates = VMI_TILELIB_REGISTRY.lookup(op, "a5")
+        expect(len(candidates) == 1, f"{op} should register one VMI candidate")
+        expect(
+            candidates[0].metadata.tags[:3]
+            == ("vmi", "fusion_eligible", "single_logical_row_loop"),
+            f"{op} should carry canonical VMI fusion tags",
+        )
+
+    row_specs = {"src": wide, "row_values": compact, "dst": wide}
+    expect(
+        evaluate_candidate(
+            vmi_trowexpanddiv,
+            row_specs,
+            "a5",
+            "pto.trowexpanddiv",
+            {"precisionType": "default"},
+        ).legal,
+        "default-precision DSv4 row expand should be a legal candidate",
+    )
+    expect(
+        not evaluate_candidate(
+            vmi_trowexpanddiv,
+            row_specs,
+            "a5",
+            "pto.trowexpanddiv",
+            {"precisionType": "high_precision"},
+        ).legal,
+        "high-precision row expand must remain a fallback",
+    )
+    row_major_state = TileSpec((rows, 1), f32)
+    expect(
+        not evaluate_candidate(
+            vmi_trowexpandmul,
+            {"src": wide, "row_values": row_major_state, "dst": wide},
+            "a5",
+            "pto.trowexpandmul",
+        ).legal,
+        "the VMI row-expand form must require col-major [rows, 1] state",
+    )
+    tail_wide = TileSpec((rows, cols), f32, valid_shape=(rows - 1, cols))
+    tail_compact = TileSpec(
+        (rows, 1),
+        f32,
+        valid_shape=(rows - 1, 1),
+        b_layout="col_major",
+    )
+    expect(
+        not evaluate_candidate(
+            vmi_trowexpandmul,
+            {"src": tail_wide, "row_values": tail_compact, "dst": tail_wide},
+            "a5",
+            "pto.trowexpandmul",
+        ).legal,
+        "tail row-expand form must remain a fallback",
+    )
     return lowering_cases
 
 
@@ -938,6 +1048,8 @@ def main() -> None:
     check_vmi_to_vpto_lowering("vmi_tadd_block128", wide_tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
     for name, (text, expected_op) in check_local_elementwise_candidates().items():
+        check_vmi_to_vpto_lowering(name, text, expected_op)
+    for name, (text, expected_op) in check_local_broadcast_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)
     check_col_reduce_candidate()
     check_col_expand_candidate()
