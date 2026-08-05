@@ -363,6 +363,45 @@ def check_local_broadcast_candidates() -> dict[str, tuple[str, str]]:
         ).legal,
         "tail row-expand form must remain a fallback",
     )
+    static_subregion = TileSpec(
+        (rows, cols), f32, valid_shape=(rows, 448)
+    )
+    static_subregion_dst = TileSpec((rows, 448), f32)
+    subregion_specs = {
+        "src": static_subregion,
+        "row_values": compact,
+        "dst": static_subregion_dst,
+    }
+    expect(
+        evaluate_candidate(
+            vmi_trowexpandmul,
+            subregion_specs,
+            "a5",
+            "pto.trowexpandmul",
+        ).legal,
+        "a static storage subregion should remain VMI eligible",
+    )
+    subregion_artifact = vmi_trowexpandmul.specialize(**subregion_specs)
+    subregion_artifact.verify()
+    subregion_text = subregion_artifact.mlir_text()
+    expect(
+        "arith.muli" in subregion_text,
+        "a storage subregion should preserve physical row strides",
+    )
+    unsafe_prefix = TileSpec((rows, 32), f32, valid_shape=(rows, 16))
+    expect(
+        not evaluate_candidate(
+            vmi_trowexpandmul,
+            {
+                "src": unsafe_prefix,
+                "row_values": compact,
+                "dst": TileSpec((rows, 16), f32),
+            },
+            "a5",
+            "pto.trowexpandmul",
+        ).legal,
+        "a prefix that overreads its physical row must remain a fallback",
+    )
     return lowering_cases
 
 

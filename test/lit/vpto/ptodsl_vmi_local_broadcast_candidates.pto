@@ -12,12 +12,17 @@
 
 module {
   func.func @local_broadcast_candidates() {
+    %c0 = arith.constant 0 : index
     %src = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
     %state = pto.alloc_tile : !pto.tile_buf<vec, 8x1xf32, blayout=col_major>
     %column = pto.alloc_tile : !pto.tile_buf<vec, 1x512xf32>
     %mul = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
     %div = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
     %expanded = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %storage = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %storage_subregion = pto.subview %storage[%c0, %c0] sizes [8, 448]
+      : !pto.tile_buf<vec, 8x512xf32> -> !pto.tile_buf<vec, 8x448xf32, valid=8x448>
+    %subregion_mul = pto.alloc_tile : !pto.tile_buf<vec, 8x448xf32>
 
     pto.trowexpandmul
       ins(%src, %state : !pto.tile_buf<vec, 8x512xf32>,
@@ -30,6 +35,11 @@ module {
     pto.tcolexpand
       ins(%column : !pto.tile_buf<vec, 1x512xf32>)
       outs(%expanded : !pto.tile_buf<vec, 8x512xf32>)
+    pto.trowexpandmul
+      ins(%storage_subregion, %state
+          : !pto.tile_buf<vec, 8x448xf32, valid=8x448>,
+            !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
+      outs(%subregion_mul : !pto.tile_buf<vec, 8x448xf32>)
     return
   }
 }
@@ -39,6 +49,8 @@ module {
 // EXPAND: call {{.*}}__vmi_trowexpanddiv
 // EXPAND-SAME: pto.tilelib.impl = "vmi"
 // EXPAND: call {{.*}}__vmi_tcolexpand
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_trowexpandmul
 // EXPAND-SAME: pto.tilelib.impl = "vmi"
 
 // INLINE-LABEL: func.func @local_broadcast_candidates

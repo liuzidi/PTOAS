@@ -535,6 +535,33 @@ class _VMITileTemplateRegistry(TileTemplateRegistry):
 VMI_TILELIB_REGISTRY = _VMITileTemplateRegistry()
 
 
+def _is_safe_static_row_prefix(
+    shape: tuple[int, ...],
+    valid_shape: tuple[int, ...],
+    *,
+    native_lanes: int,
+) -> bool:
+    """Whether a static valid row prefix can be read as whole physical chunks."""
+
+    if len(shape) != 2 or len(valid_shape) != 2:
+        return False
+    rows, physical_cols = shape
+    valid_rows, logical_cols = valid_shape
+    if not all(
+        isinstance(dim, int)
+        for dim in (rows, physical_cols, valid_rows, logical_cols)
+    ):
+        return False
+    if rows <= 0 or physical_cols <= 0 or valid_rows != rows:
+        return False
+    if logical_cols <= 0 or logical_cols > physical_cols:
+        return False
+    physical_read_cols = (
+        (logical_cols + native_lanes - 1) // native_lanes
+    ) * native_lanes
+    return valid_shape == shape or physical_read_cols <= physical_cols
+
+
 def row_expand_binary_vmi_constraint(
     src_shape=(),
     src_valid_shape=(),
@@ -561,13 +588,17 @@ def row_expand_binary_vmi_constraint(
         )
     ):
         return False
-    rows, cols = src_shape
+    rows, logical_cols = src_valid_shape
     return (
         rows > 0
-        and cols > 0
-        and src_valid_shape == src_shape
-        and dst_shape == src_shape
-        and dst_valid_shape == dst_shape
+        and logical_cols > 0
+        and _is_safe_static_row_prefix(
+            src_shape, src_valid_shape, native_lanes=f32.lanes
+        )
+        and _is_safe_static_row_prefix(
+            dst_shape, dst_valid_shape, native_lanes=f32.lanes
+        )
+        and dst_valid_shape == src_valid_shape
         and row_values_shape == (rows, 1)
         and row_values_valid_shape == row_values_shape
         and src_config is not None
@@ -1447,32 +1478,48 @@ def emit_row_expand_binary_vmi(
         or output.element_type != f32
     ):
         raise ValueError("row-expand VMI candidates currently support only f32")
-    if row_tensor._spec.shape != output._spec.shape:
-        raise ValueError("row-expand source and destination shapes must match")
     if (
         row_tensor._spec.b_layout != "row_major"
         or output._spec.b_layout != "row_major"
     ):
         raise ValueError("row-expand source and destination must be row-major")
-    rows, cols = row_tensor._spec.shape
+    logical_shape = row_tensor._spec.effective_valid_shape
+    if output._spec.effective_valid_shape != logical_shape:
+        raise ValueError(
+            "row-expand source and destination logical shapes must match"
+        )
+    if not _is_safe_static_row_prefix(
+        row_tensor._spec.shape,
+        logical_shape,
+        native_lanes=f32.lanes,
+    ) or not _is_safe_static_row_prefix(
+        output._spec.shape,
+        output._spec.effective_valid_shape,
+        native_lanes=f32.lanes,
+    ):
+        raise ValueError("row-expand logical row exceeds its physical storage")
+    rows, cols = logical_shape
     if (
         compact_row_state._spec.shape != (rows, 1)
+        or compact_row_state._spec.effective_valid_shape != (rows, 1)
         or compact_row_state._spec.b_layout != "col_major"
     ):
         raise ValueError(
             "row-expand compact state must be a col-major [rows, 1] tile"
         )
-    block_map = CanonicalBlockMap.from_tile(row_tensor, logical_lanes=cols)
+    src_physical_cols = row_tensor._spec.shape[1]
+    dst_physical_cols = output._spec.shape[1]
 
     _prepare_tile_access(row_tensor, compact_row_state, output)
-    full_mask = _create_mask(block_map, f32, trace=row_tensor._trace)
+    full_mask = _create_mask_lanes(cols, cols, f32, trace=row_tensor._trace)
     with for_(0, rows, step=1) as row:
         row_scalar = _vload_linear(compact_row_state, row, lanes=1)
         broadcast = _vbrc(row_scalar, lanes=cols)
-        coordinate = block_map.coordinate(row)
-        value = _vload(row_tensor, coordinate)
+        src_offset = index_mul(row, src_physical_cols)
+        dst_offset = index_mul(row, dst_physical_cols)
+        value = _vload_linear(row_tensor, src_offset, lanes=cols)
         result = operations[operation](value, broadcast, full_mask)
-        _vstore(result, output, coordinate, full_mask)
+        _vstore_linear(result, output, dst_offset, full_mask)
 
 
 def emit_row_expand_sub_vmi(
