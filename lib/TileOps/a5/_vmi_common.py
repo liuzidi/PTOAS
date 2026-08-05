@@ -114,11 +114,6 @@ def row_reduce_vmi_constraint(
     rows, cols = src_shape
     valid_rows, valid_cols = src_valid_shape
     workspace_rows, workspace_cols = workspace_shape
-    safe_read_cols = (
-        ((valid_cols + f32.lanes - 1) // f32.lanes) * f32.lanes
-        if isinstance(valid_cols, int) and valid_cols > 0
-        else 0
-    )
     return (
         isinstance(rows, int)
         and isinstance(cols, int)
@@ -129,7 +124,7 @@ def row_reduce_vmi_constraint(
         and valid_rows == rows
         and isinstance(valid_cols, int)
         and 0 < valid_cols <= cols
-        and (src_valid_shape == src_shape or safe_read_cols <= cols)
+        and src_valid_shape == src_shape
         and workspace_rows == rows
         and workspace_cols >= 1
         and workspace_valid_shape == workspace_shape
@@ -568,6 +563,36 @@ class _VMITileTemplateRegistry(TileTemplateRegistry):
 VMI_TILELIB_REGISTRY = _VMITileTemplateRegistry()
 
 
+_DTYPE_BYTEWIDTH = {
+    "f32": 4,
+    "i32": 4,
+    "ui32": 4,
+    "f16": 2,
+    "bf16": 2,
+    "i16": 2,
+    "ui16": 2,
+    "i8": 1,
+    "ui8": 1,
+}
+
+
+def full_physical_row_vmi_constraint(**metadata) -> bool:
+    """Reject sub-VL rows until unified masks survive physicalization."""
+
+    row_bytes = []
+    for name, shape in metadata.items():
+        if not name.endswith("_shape") or name.endswith("_valid_shape"):
+            continue
+        if not isinstance(shape, (tuple, list)) or len(shape) != 2:
+            continue
+        cols = shape[1]
+        dtype = metadata.get(f"{name[:-6]}_dtype")
+        bytewidth = _DTYPE_BYTEWIDTH.get(dtype)
+        if isinstance(cols, int) and cols > 0 and bytewidth is not None:
+            row_bytes.append(cols * bytewidth)
+    return not row_bytes or max(row_bytes) >= 256
+
+
 def _is_safe_static_row_prefix(
     shape: tuple[int, ...],
     valid_shape: tuple[int, ...],
@@ -709,9 +734,15 @@ def convert_vmi_constraint(
     ):
         return False
     rows, cols = src_shape
+    src_bytewidth = _DTYPE_BYTEWIDTH.get(src_dtype)
+    dst_bytewidth = _DTYPE_BYTEWIDTH.get(dst_dtype)
     return (
         rows > 0
         and cols > 0
+        and src_bytewidth is not None
+        and dst_bytewidth is not None
+        and cols * src_bytewidth >= 256
+        and cols * dst_bytewidth >= 256
         and allowed_round_modes is not None
         and round_mode in allowed_round_modes
         and sat_mode in ("ON", "OFF")
@@ -751,11 +782,18 @@ def canonical_vmi_template(
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
     tags: tuple[str, ...] | list[str] = (),
+    requires_full_physical_row: bool = True,
 ):
     """Register one canonical VMI implementation in this provider module."""
 
     def decorator(fn):
         qualified_op = _qualify_op_name(op)
+        effective_constraints = tuple(constraints)
+        if requires_full_physical_row:
+            effective_constraints = (
+                full_physical_row_vmi_constraint,
+                *effective_constraints,
+            )
         descriptor = _trace_tile_template(
             target=target,
             op=qualified_op,
@@ -763,7 +801,7 @@ def canonical_vmi_template(
             ir_level="vmi",
             dtypes=dtypes,
             context_constraints=context_constraints,
-            constraints=tuple(constraints),
+            constraints=effective_constraints,
             tags=tuple(tags),
         )(fn)
         _tilelib_registry.register(descriptor)
@@ -1531,17 +1569,35 @@ def emit_row_reduce_vmi(
     kind: str,
 ) -> None:
     rows, physical_cols, valid_cols = _validate_row_reduce_tiles(src, workspace, dst)
-    reduce_op = _vreduce_max if kind == "max" else _vreduce_add
+    if valid_cols != physical_cols:
+        raise ValueError("grouped row-reduce requires a full static source tile")
 
     _prepare_tile_access(src, dst)
-    full_mask = _create_mask_lanes(valid_cols, valid_cols, f32, trace=src._trace)
-    scalar_mask = _create_mask_lanes(1, 1, f32, trace=src._trace)
-    with for_(0, rows, step=1) as row:
-        row_offset = index_mul(row, physical_cols)
-        accumulator = reduce_op(
-            _vload_linear(src, row_offset, lanes=valid_cols), full_mask
+    total_lanes = rows * physical_cols
+    full_mask = _create_mask_lanes(
+        total_lanes, total_lanes, f32, trace=src._trace
+    )
+    source = _vload_linear(src, 0, lanes=total_lanes)
+    if kind == "max":
+        reduced_value = _vmi_builder.vcmax(
+            source.value, full_mask.value, group=rows
         )
-        _vstore_linear(accumulator, dst, row, scalar_mask)
+    else:
+        reduced_value = _vmi_builder.vcadd(
+            source.value, full_mask.value, group=rows, reassoc=True
+        )
+    reduced = _wrap_vreg(reduced_value, f32)
+
+    dst_ptr = dst._trace.ensure_tile_ptr(dst)
+    offset = dst._trace._coerce_index(0)
+    row_stride = dst._trace._coerce_index(1)
+    _vmi_builder.vstore(
+        reduced.value,
+        dst_ptr.value,
+        offset.value,
+        stride=row_stride.value,
+        group=rows,
+    )
 
 
 def emit_row_expand_binary_vmi(

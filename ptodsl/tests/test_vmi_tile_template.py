@@ -502,15 +502,17 @@ def check_provider_helper() -> None:
         "shape": list(NARROW_TILE_SHAPE),
         "valid_shape": list(NARROW_TILE_SHAPE),
     }
-    narrow = instantiate_candidate(
-        target="a5",
-        op_name="pto.tadd",
-        operand_specs=[narrow_tile_spec, narrow_tile_spec, narrow_tile_spec],
-        provider_module="ptodsl.vmi_tilelib",
-        context_attrs={},
-    ).mlir_text()
-    expect(narrow.count("scf.for") == 1, "narrow tadd should emit one logical row loop")
-    expect("!pto.vmi.vreg<32xf32>" in narrow, "narrow tadd should use a 32-lane logical vreg")
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tadd",
+            operand_specs=[narrow_tile_spec, narrow_tile_spec, narrow_tile_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ),
+        LookupError,
+        "custom constraints are not satisfied",
+    )
 
     scalar_spec = {"kind": "scalar", "dtype": "f32"}
     tmuls = instantiate_candidate(
@@ -576,9 +578,10 @@ def check_provider_helper() -> None:
         provider_module="ptodsl.vmi_tilelib",
         context_attrs={},
     ).mlir_text()
-    expect(rowmax.count("scf.for") == 1, "rowmax should emit only one runtime loop")
-    expect(rowmax.count("pto.vmi.vcmax") == 1, "rowmax should reduce one VL per row")
-    expect("!pto.vmi.vreg<1xf32>" in rowmax, "rowmax should produce 1-lane reductions")
+    expect("scf.for" not in rowmax, "rowmax should emit one grouped reduction")
+    expect(rowmax.count("pto.vmi.vcmax") == 1, "rowmax should reduce all row groups")
+    expect("group = 32" in rowmax, "rowmax should preserve 32 compact row groups")
+    expect("!pto.vmi.vreg<32xf32>" in rowmax, "rowmax should produce one value per row")
 
     row_expand = instantiate_candidate(
         target="a5",
@@ -589,11 +592,16 @@ def check_provider_helper() -> None:
     ).mlir_text()
     expect("pto.vmi.vbrc" in row_expand, "row expand should broadcast one value per row")
 
-    f16_tile_spec = {**raw_tile_spec, "dtype": "f16"}
+    convert_src_spec = {
+        **raw_tile_spec,
+        "shape": [32, 128],
+        "valid_shape": [32, 128],
+    }
+    f16_tile_spec = {**convert_src_spec, "dtype": "f16"}
     tcvt = instantiate_candidate(
         target="a5",
         op_name="pto.tcvt",
-        operand_specs=[raw_tile_spec, f16_tile_spec],
+        operand_specs=[convert_src_spec, f16_tile_spec],
         provider_module="ptodsl.vmi_tilelib",
         context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
@@ -745,7 +753,7 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
     return colmax, colsum, reduced_col_spec
 
 
-def check_row_reduce_candidates() -> dict[str, tuple[str, str]]:
+def check_row_reduce_candidates() -> dict[str, tuple[str, str, int]]:
     lowering_cases = {}
     for op_name, candidate, physical_op in (
         ("trowmax", vmi_trowmax, "pto.vcmax"),
@@ -759,28 +767,30 @@ def check_row_reduce_candidates() -> dict[str, tuple[str, str]]:
             artifact.verify()
             text = artifact.mlir_text()
             name = f"vmi_{op_name}_{cols}lanes"
-            expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+            expect("scf.for" not in text, f"{name} should use one grouped reduction")
             expect(
-                f"!pto.vmi.vreg<{cols}xf32>" in text,
-                f"{name} should use one logical row vreg",
+                f"!pto.vmi.vreg<{8 * cols}xf32>" in text,
+                f"{name} should reduce the complete logical row group",
             )
             expect(text.count("pto.vmi.vload") == 1, f"{name} should load one row")
-            expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one scalar")
-            lowering_cases[name] = (text, physical_op)
+            expect("group = 8" in text, f"{name} should preserve eight row groups")
+            expect(text.count("pto.vmi.vstore") == 1, f"{name} should store compact rows")
+            expected_physical_op = (
+                physical_op.replace("pto.vc", "pto.vcg")
+                if cols < f32.lanes
+                else physical_op
+            )
+            lowering_cases[name] = (text, expected_physical_op, 0)
 
     workspace = TileSpec((8, 128), f32)
     dst = TileSpec((8, 1), f32, b_layout="col_major")
     safe_subregion_src = TileSpec((8, 512), f32, valid_shape=(8, 128))
-    safe_subregion = vmi_trowmax.specialize(
-        src=safe_subregion_src, workspace=workspace, dst=dst
-    ).mlir_text()
-    expect(
-        "!pto.vmi.vreg<128xf32>" in safe_subregion,
-        "safe static column subregions should reduce their logical width",
-    )
-    expect(
-        "arith.constant 512" in safe_subregion,
-        "safe static column subregions should preserve physical row stride",
+    expect_raises(
+        lambda: vmi_trowmax.specialize(
+            src=safe_subregion_src, workspace=workspace, dst=dst
+        ).mlir_text(),
+        ValueError,
+        "grouped row-reduce requires a full static source tile",
     )
 
     partial_src = TileSpec((8, 32), f32, valid_shape=(8, 16))
@@ -868,8 +878,8 @@ def check_tcvt_bf16_candidate() -> None:
     raw_tile_spec = {
         "kind": "tile",
         "dtype": "f32",
-        "shape": [32, 64],
-        "valid_shape": [32, 64],
+        "shape": [32, 128],
+        "valid_shape": [32, 128],
         "memory_space": "ub",
         "config": {
             "b_layout": "row_major",
@@ -888,7 +898,7 @@ def check_tcvt_bf16_candidate() -> None:
         context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
     expect("pto.vmi.vcvt" in f16_text, "tcvt f32->f16 should lower to VMI conversion")
-    expect("vreg<64xf16>" in f16_text, "tcvt f32->f16 should target the f16 vreg type")
+    expect("vreg<128xf16>" in f16_text, "tcvt f32->f16 should target the f16 vreg type")
 
     bf16_text = instantiate_candidate(
         target="a5",
@@ -898,7 +908,25 @@ def check_tcvt_bf16_candidate() -> None:
         context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
     expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
-    expect("vreg<64xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
+    expect("vreg<128xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
+
+    subvl_src_spec = {
+        **raw_tile_spec,
+        "shape": [32, 64],
+        "valid_shape": [32, 64],
+    }
+    subvl_bf16_dst_spec = {**subvl_src_spec, "dtype": "bf16"}
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tcvt",
+            operand_specs=[subvl_src_spec, subvl_bf16_dst_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
+        ),
+        LookupError,
+        "custom constraints are not satisfied",
+    )
 
     forms = (
         ("bf16", "f32", "ROUND", 1),
@@ -1100,6 +1128,8 @@ def check_tmov_nd2nz() -> None:
     # reject them because emit_elementwise_vmi defaults to f32.
     nd_bf16_spec = {
         **half_nd_spec,
+        "shape": [128, 128],
+        "valid_shape": [128, 128],
         "config": {
             "b_layout": "row_major",
             "s_layout": "none_box",
@@ -1119,8 +1149,20 @@ def check_tmov_nd2nz() -> None:
         "tmov bf16 ND->ND should instantiate the VMI elementwise move",
     )
     expect(
-        "!pto.vmi.vreg<64xbf16>" in nd_bf16_text,
-        "tmov bf16 ND->ND should use a 64-lane bf16 logical vreg",
+        "!pto.vmi.vreg<128xbf16>" in nd_bf16_text,
+        "tmov bf16 ND->ND should use a full physical bf16 row",
+    )
+
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tmov",
+            operand_specs=[half_nd_spec, half_nd_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={},
+        ),
+        LookupError,
+        "custom constraints are not satisfied",
     )
 
 
@@ -1135,7 +1177,12 @@ def check_legacy_vpto_compatibility() -> None:
     expect("pto.vsts" in text, "legacy VPTO template should still emit vsts")
 
 
-def check_vmi_to_vpto_lowering(name: str, mlir_text: str, expected_op: str) -> None:
+def check_vmi_to_vpto_lowering(
+    name: str,
+    mlir_text: str,
+    expected_op: str,
+    expected_loop_count: int = 1,
+) -> None:
     ptoas = shutil.which("ptoas")
     expect(ptoas is not None, "ptoas must be available for VMI-to-VPTO regression coverage")
     with TemporaryDirectory() as temp_dir:
@@ -1162,7 +1209,10 @@ def check_vmi_to_vpto_lowering(name: str, mlir_text: str, expected_op: str) -> N
     )
     expect("pto.vmi." not in completed.stdout, f"{name} should contain no VMI ops after lowering")
     expect(expected_op in completed.stdout, f"{name} should lower to {expected_op}")
-    expect(completed.stdout.count("scf.for") == 1, f"{name} should preserve one flat loop")
+    expect(
+        completed.stdout.count("scf.for") == expected_loop_count,
+        f"{name} should lower to {expected_loop_count} principal loop(s)",
+    )
 
 
 def main() -> None:
@@ -1177,8 +1227,10 @@ def main() -> None:
         check_vmi_to_vpto_lowering(name, text, expected_op)
     for name, (text, expected_op) in check_local_broadcast_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)
-    for name, (text, expected_op) in check_row_reduce_candidates().items():
-        check_vmi_to_vpto_lowering(name, text, expected_op)
+    for name, (text, expected_op, expected_loop_count) in check_row_reduce_candidates().items():
+        check_vmi_to_vpto_lowering(
+            name, text, expected_op, expected_loop_count
+        )
     check_col_reduce_candidate()
     check_col_expand_candidate()
     check_tcvt_bf16_candidate()

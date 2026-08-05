@@ -28,6 +28,15 @@ def _vmi_tmov_shape_supported(src_cols, dst_cols, dst_dtype, dst_config, **_):
     return src_cols == dst_cols and dst_cols <= lanes
 
 
+def _vmi_tmov_physicalization_supported(dst_config, **metadata):
+    # ND->NZ has a dedicated block-store lowering with an explicit prefix
+    # predicate. Plain ND->ND uses the unified elementwise path, whose masks
+    # are not yet preserved for sub-VL logical rows.
+    if dst_config.b_layout == "col_major":
+        return True
+    return full_physical_row_vmi_constraint(dst_config=dst_config, **metadata)
+
+
 @tilelib.tile_template(
     op="pto.tmov",
     target="a5",
@@ -75,6 +84,7 @@ from ._vmi_common import (  # noqa: E402
     emit_elementwise_vmi,
     f16,
     f32,
+    full_physical_row_vmi_constraint,
 )
 from ptodsl._tile_template_tracing import (  # noqa: E402
     _require_vmi_trace,
@@ -90,8 +100,10 @@ from ptodsl._vmi_namespace import vmi as _vmi  # noqa: E402
     target="a5",
     op="tmov",
     name="vmi_tmov",
+    requires_full_physical_row=False,
     dtypes=(("f32", "f32"), ("f16", "f16"), ("bf16", "bf16")),
     constraints=(
+        _vmi_tmov_physicalization_supported,
         _vmi_tmov_shape_supported,
         tilelib.require_same_valid_shape("src", "dst"),
     ),

@@ -14,15 +14,19 @@ module {
     %tail_dst = pto.alloc_tile : !pto.tile_buf<vec, 8x128xbf16, valid=4x128>
     %f16 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf16>
     %i8 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xi8>
+    %subvl_src = pto.alloc_tile : !pto.tile_buf<vec, 8x64xf32>
+    %subvl_dst = pto.alloc_tile : !pto.tile_buf<vec, 8x64xbf16>
 
     pto.tcvt ins(%tail_src {rmode = #pto<round_mode RINT>} : !pto.tile_buf<vec, 8x128xf32, valid=4x128>)
       outs(%tail_dst : !pto.tile_buf<vec, 8x128xbf16, valid=4x128>)
     pto.tcvt ins(%f16 {rmode = #pto<round_mode TRUNC>} : !pto.tile_buf<vec, 8x128xf16>)
       outs(%i8 : !pto.tile_buf<vec, 8x128xi8>)
+    pto.tcvt ins(%subvl_src {rmode = #pto<round_mode RINT>} : !pto.tile_buf<vec, 8x64xf32>)
+      outs(%subvl_dst : !pto.tile_buf<vec, 8x64xbf16>)
     return
   }
 }
 
 // EXPAND-LABEL: func.func @local_convert_fallback
-// EXPAND-COUNT-2: pto.vmi.fusion.boundary = "local"
-// EXPAND-COUNT-2: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND-COUNT-3: pto.vmi.fusion.boundary = "local"
+// EXPAND-COUNT-3: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"

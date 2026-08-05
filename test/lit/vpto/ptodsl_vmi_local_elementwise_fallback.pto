@@ -15,6 +15,9 @@ module {
     %tail_fill = pto.alloc_tile : !pto.tile_buf<vec, 8x64xf32, valid=4x64>
     %f16_src = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf16>
     %f16_dst = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf16>
+    %subvl_lhs = pto.alloc_tile : !pto.tile_buf<vec, 8x32xf32>
+    %subvl_rhs = pto.alloc_tile : !pto.tile_buf<vec, 8x32xf32>
+    %subvl_dst = pto.alloc_tile : !pto.tile_buf<vec, 8x32xf32>
 
     pto.tsubs ins(%tail_src, %scalar : !pto.tile_buf<vec, 8x64xf32, valid=4x64>, f32)
       outs(%tail_dst : !pto.tile_buf<vec, 8x64xf32, valid=4x64>)
@@ -22,11 +25,20 @@ module {
       outs(%tail_fill : !pto.tile_buf<vec, 8x64xf32, valid=4x64>)
     pto.tabs ins(%f16_src : !pto.tile_buf<vec, 8x128xf16>)
       outs(%f16_dst : !pto.tile_buf<vec, 8x128xf16>)
+    pto.tadd ins(%subvl_lhs, %subvl_rhs
+        : !pto.tile_buf<vec, 8x32xf32>, !pto.tile_buf<vec, 8x32xf32>)
+      outs(%subvl_dst : !pto.tile_buf<vec, 8x32xf32>)
+    pto.tmov ins(%subvl_lhs : !pto.tile_buf<vec, 8x32xf32>)
+      outs(%subvl_rhs : !pto.tile_buf<vec, 8x32xf32>)
     return
   }
 }
 
 // EXPAND-LABEL: func.func @local_elementwise_fallback
+// EXPAND: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
 // EXPAND: pto.vmi.fusion.boundary = "local"
 // EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
 // EXPAND: pto.vmi.fusion.boundary = "local"
