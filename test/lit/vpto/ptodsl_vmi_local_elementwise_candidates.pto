@@ -1,0 +1,63 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL
+
+module {
+  func.func @local_elementwise_candidates(%scalar: f32, %scalar_i32: i32) {
+    %fill = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %fill_i32 = pto.alloc_tile : !pto.tile_buf<vec, 1x128xi32>
+    %src = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %sub = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %abs = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %neg = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+
+    pto.texpands ins(%scalar : f32)
+      outs(%fill : !pto.tile_buf<vec, 8x512xf32>)
+    pto.texpands ins(%scalar_i32 : i32)
+      outs(%fill_i32 : !pto.tile_buf<vec, 1x128xi32>)
+    pto.tsubs ins(%src, %scalar : !pto.tile_buf<vec, 8x512xf32>, f32)
+      outs(%sub : !pto.tile_buf<vec, 8x512xf32>)
+    pto.tabs ins(%sub : !pto.tile_buf<vec, 8x512xf32>)
+      outs(%abs : !pto.tile_buf<vec, 8x512xf32>)
+    pto.tneg ins(%abs : !pto.tile_buf<vec, 8x512xf32>)
+      outs(%neg : !pto.tile_buf<vec, 8x512xf32>)
+    return
+  }
+}
+
+// EXPAND: call {{.*}}__vmi_texpands
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_texpands_i32
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_tsubs
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_tabs
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_tneg
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+
+// INLINE-LABEL: func.func @local_elementwise_candidates
+// INLINE: pto.vmi.vbrc
+// INLINE: pto.vmi.vadds
+// INLINE: pto.vmi.vabs
+// INLINE: pto.vmi.vneg
+
+// FINAL-LABEL: func.func @local_elementwise_candidates
+// FINAL-NOT: pto.vmi.vbrc
+// FINAL-NOT: pto.vmi.vload
+// FINAL-NOT: pto.vmi.vadds
+// FINAL-NOT: pto.vmi.vabs
+// FINAL-NOT: pto.vmi.vneg
+// FINAL-NOT: pto.vmi.vstore
+// FINAL: pto.vdup
+// FINAL: pto.vadds
+// FINAL: pto.vabs
+// FINAL: pto.vneg

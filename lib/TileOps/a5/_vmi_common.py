@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from ptodsl import pto
 from ptodsl._surface_values import unwrap_surface_value
 from ptodsl._surface_types import Tile
+from ptodsl._runtime_scalar_ops import emit_runtime_binary_op
 from ptodsl._tile_template_tracing import (
     CanonicalBlockMap,
     CanonicalBlockCoordinate,
@@ -347,6 +348,11 @@ def _vadds(source: _VectorValue, scalar: _Value, mask: _MaskValue) -> _VectorVal
     return _vvec_scalar("vadds", source, scalar, mask)
 
 
+def _negate_scalar(scalar: _Value, dtype: ScalarType) -> _Value:
+    zero = _scalar_constant(0.0, dtype)
+    return _Value(emit_runtime_binary_op("sub", zero.value, scalar.value))
+
+
 def _vmuls(source: _VectorValue, scalar: _Value, mask: _MaskValue) -> _VectorValue:
     return _vvec_scalar("vmuls", source, scalar, mask)
 
@@ -606,6 +612,35 @@ def emit_elementwise_vmi(
         _vstore(result, dst, coordinate, mask)
 
 
+def emit_scalar_fill_vmi(
+    scalar: _Value,
+    dst: _TileProxy,
+    *,
+    allowed_dtypes: Sequence[ScalarType] = (f32,),
+) -> None:
+    """Broadcast a runtime scalar into each wide logical row of ``dst``."""
+
+    if not isinstance(dst, _TileProxy):
+        raise TypeError("scalar-fill VMI candidate destination must be a traced Tile")
+    if dst.element_type not in allowed_dtypes:
+        raise ValueError(
+            "VMI scalar-fill candidate dtype is not supported; "
+            f"got {dst.element_type}, expected one of {tuple(allowed_dtypes)}"
+        )
+    if dst._spec.b_layout != "row_major":
+        raise ValueError("VMI scalar-fill candidates require row-major tiles")
+
+    block_map = CanonicalBlockMap.from_tile(dst)
+    _prepare_tile_access(dst)
+    mask = _create_mask(block_map, dst.element_type, trace=dst._trace)
+    fill = _wrap_vreg(
+        _vmi_builder.vbrc(scalar.value, size=block_map.logical_lanes),
+        dst.element_type,
+    )
+    with for_(0, block_map.logical_block_count, step=1) as logical_block:
+        _vstore(fill, dst, block_map.coordinate(logical_block), mask)
+
+
 def _validate_elementwise_tiles(
     dst: _TileProxy,
     sources: Sequence[_TileProxy],
@@ -649,6 +684,18 @@ def _exp(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
     if len(values) != 1:
         raise ValueError("texp VMI candidate expects one source vector")
     return _vexp(values[0], mask)
+
+
+def _abs(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
+    if len(values) != 1:
+        raise ValueError("tabs VMI candidate expects one source vector")
+    return _vabs(values[0], mask)
+
+
+def _neg(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
+    if len(values) != 1:
+        raise ValueError("tneg VMI candidate expects one source vector")
+    return _vneg(values[0], mask)
 
 
 def _sub(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
@@ -1516,6 +1563,7 @@ __all__ = [
     "FLOAT_DTYPES",
     "Tile",
     "VMI_TILELIB_REGISTRY",
+    "_abs",
     "_add",
     "_context_attr",
     "_divide_by_scalar",
@@ -1527,6 +1575,8 @@ __all__ = [
     "_max",
     "_move",
     "_mul",
+    "_neg",
+    "_negate_scalar",
     "_operand_kinds_are",
     "_sub",
     "_vadds",
@@ -1536,6 +1586,7 @@ __all__ = [
     "_vmuls",
     "canonical_vmi_template",
     "emit_elementwise_vmi",
+    "emit_scalar_fill_vmi",
     "emit_col_expand_binary_vmi",
     "emit_col_reduce_vmi",
     "emit_convert_vmi",

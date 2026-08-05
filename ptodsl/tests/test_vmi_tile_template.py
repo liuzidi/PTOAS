@@ -42,7 +42,14 @@ from ptodsl.vmi_tilelib import (
     vmi_tcolsum,
     vmi_tcolexpandsub,
     vmi_tcvt,
+    vmi_tabs,
     vmi_texp_block64,
+    vmi_texpands,
+    vmi_texpands_bf16,
+    vmi_texpands_f16,
+    vmi_texpands_i32,
+    vmi_tneg,
+    vmi_tsubs,
 )
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
 
@@ -176,6 +183,77 @@ def check_candidate_ir() -> tuple[str, str, str]:
     expect(wide_texp_text.count("scf.for") == 1, "wide texp should still contain one row loop")
     expect("!pto.vmi.vreg<128xf32>" in wide_texp_text, "wide texp should use a 128-lane logical vreg")
     return tadd_text, wide_tadd_text, texp_text
+
+
+def check_local_elementwise_candidates() -> dict[str, tuple[str, str]]:
+    shape = (8, 512)
+    fill_candidates = (
+        ("vmi_texpands", vmi_texpands, f32),
+        ("vmi_texpands_f16", vmi_texpands_f16, f16),
+        ("vmi_texpands_bf16", vmi_texpands_bf16, bf16),
+        ("vmi_texpands_i32", vmi_texpands_i32, i32),
+    )
+    lowering_cases = {}
+    for name, candidate, dtype in fill_candidates:
+        spec = TileSpec(shape, dtype)
+        artifact = candidate.specialize(scalar=dtype, dst=spec)
+        artifact.verify()
+        text = artifact.mlir_text()
+        expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+        expect(text.count("pto.vmi.vbrc") == 1, f"{name} should broadcast once")
+        expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one logical row")
+        expect(
+            text.index("pto.vmi.vbrc") < text.index("scf.for"),
+            f"{name} should hoist its invariant broadcast",
+        )
+        lowering_cases[name] = (text, "pto.vdup")
+
+    f32_spec = TileSpec(shape, f32)
+    elementwise = (
+        (
+            "vmi_tsubs",
+            vmi_tsubs.specialize(src=f32_spec, scalar=f32, dst=f32_spec),
+            "pto.vmi.vadds",
+            "pto.vadds",
+        ),
+        (
+            "vmi_tabs",
+            vmi_tabs.specialize(src=f32_spec, dst=f32_spec),
+            "pto.vmi.vabs",
+            "pto.vabs",
+        ),
+        (
+            "vmi_tneg",
+            vmi_tneg.specialize(src=f32_spec, dst=f32_spec),
+            "pto.vmi.vneg",
+            "pto.vneg",
+        ),
+    )
+    for name, artifact, vmi_op, vpto_op in elementwise:
+        artifact.verify()
+        text = artifact.mlir_text()
+        expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+        expect(text.count("pto.vmi.vload") == 1, f"{name} should load one logical row")
+        expect(text.count(vmi_op) == 1, f"{name} should emit {vmi_op}")
+        expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one logical row")
+        lowering_cases[name] = (text, vpto_op)
+
+    tsubs_text = lowering_cases["vmi_tsubs"][0]
+    expect(tsubs_text.count("arith.subf") == 1, "tsubs should negate its scalar once")
+    expect(
+        tsubs_text.index("arith.subf") < tsubs_text.index("scf.for"),
+        "tsubs scalar negation should be loop invariant",
+    )
+    for op in ("texpands", "tsubs", "tabs", "tneg"):
+        candidates = VMI_TILELIB_REGISTRY.lookup(op, "a5")
+        expect(candidates, f"{op} should register at least one VMI candidate")
+        for candidate in candidates:
+            expect(
+                candidate.metadata.tags[:3]
+                == ("vmi", "fusion_eligible", "single_logical_row_loop"),
+                f"{candidate.name} should carry the canonical VMI fusion tags",
+            )
+    return lowering_cases
 
 
 def check_provider_helper() -> None:
@@ -859,6 +937,8 @@ def main() -> None:
     check_vmi_to_vpto_lowering("vmi_tadd_block64", tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_tadd_block128", wide_tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
+    for name, (text, expected_op) in check_local_elementwise_candidates().items():
+        check_vmi_to_vpto_lowering(name, text, expected_op)
     check_col_reduce_candidate()
     check_col_expand_candidate()
     check_tcvt_bf16_candidate()
