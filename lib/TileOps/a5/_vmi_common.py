@@ -485,11 +485,22 @@ def _vreduce_add(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     )
 
 
-def _vcvt(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValue:
+def _vcvt(
+    source: _VectorValue,
+    dst_dtype: ScalarType,
+    *,
+    rounding: str | None = None,
+    saturate: str | None = None,
+) -> _VectorValue:
     if not isinstance(dst_dtype, ScalarType):
         raise TypeError("_vcvt expects a tile-template destination ScalarType")
     return _wrap_vreg(
-        _vmi_builder.vcvt(source.value, to_dtype=_pto_dtype(dst_dtype)),
+        _vmi_builder.vcvt(
+            source.value,
+            to_dtype=_pto_dtype(dst_dtype),
+            rounding=rounding,
+            saturate=saturate,
+        ),
         dst_dtype,
     )
 
@@ -635,6 +646,55 @@ def col_expand_vmi_constraint(
         and cols > 0
         and src_shape == (1, cols)
         and src_valid_shape == src_shape
+        and dst_valid_shape == dst_shape
+        and src_config is not None
+        and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and dst_config is not None
+        and dst_config.b_layout == "row_major"
+        and dst_config.s_layout == "none_box"
+    )
+
+
+def convert_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    src_dtype=None,
+    src_config=None,
+    dst_shape=(),
+    dst_valid_shape=(),
+    dst_dtype=None,
+    dst_config=None,
+    round_mode=None,
+    sat_mode=None,
+    **_,
+):
+    """Accept static full row-major conversions with matching logical shape."""
+
+    supported_round_modes = {
+        ("bf16", "f32"): {"ROUND"},
+        ("f16", "f32"): {"RINT", "ROUND"},
+        ("i32", "f32"): {"RINT", "ROUND"},
+        ("f32", "bf16"): {"RINT", "ROUND"},
+        ("f32", "f16"): {"RINT", "ROUND"},
+        ("f32", "i32"): {"RINT", "ROUND", "TRUNC"},
+        ("i32", "f16"): {"ROUND"},
+    }
+    allowed_round_modes = supported_round_modes.get((src_dtype, dst_dtype))
+    if not all(
+        len(shape) == 2
+        for shape in (src_shape, src_valid_shape, dst_shape, dst_valid_shape)
+    ):
+        return False
+    rows, cols = src_shape
+    return (
+        rows > 0
+        and cols > 0
+        and allowed_round_modes is not None
+        and round_mode in allowed_round_modes
+        and sat_mode in ("ON", "OFF")
+        and src_valid_shape == src_shape
+        and dst_shape == src_shape
         and dst_valid_shape == dst_shape
         and src_config is not None
         and src_config.b_layout == "row_major"
@@ -1705,10 +1765,20 @@ def emit_col_expand_binary_vmi(
 
 
 def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
-    if src.element_type != f32:
-        raise ValueError("tcvt VMI candidate currently supports f32 source")
-    if dst.element_type not in (f16, bf16):
-        raise ValueError("tcvt VMI candidate currently supports f32 -> f16/bf16")
+    supported_forms = {
+        (bf16, f32),
+        (f16, f32),
+        (i32, f32),
+        (f32, bf16),
+        (f32, f16),
+        (f32, i32),
+        (i32, f16),
+    }
+    if (src.element_type, dst.element_type) not in supported_forms:
+        raise ValueError(
+            "tcvt VMI candidate does not support "
+            f"{src.element_type} -> {dst.element_type}"
+        )
     if src._spec.shape != dst._spec.shape:
         raise ValueError("tcvt source and destination shapes must match")
     if src._spec.b_layout != "row_major" or dst._spec.b_layout != "row_major":
@@ -1717,12 +1787,40 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
     block_map = CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
     _prepare_tile_access(src, dst)
-    dst_mask = _create_mask_lanes(
-        cols, cols, dst.element_type, trace=src._trace
-    )
+    dst_mask = _create_mask_lanes(cols, cols, dst.element_type, trace=src._trace)
+    round_mode = _context_attr(src, "round_mode", "RINT")
+    rounding = {
+        "RINT": "R",
+        "NONE": "R",
+        "ROUND": "A",
+        "TRUNC": "Z",
+    }.get(round_mode)
+    if rounding is None:
+        raise ValueError(f"tcvt VMI candidate does not support {round_mode} rounding")
+    sat_mode = _context_attr(src, "sat_mode", "OFF")
+    saturate = "SAT" if sat_mode == "ON" else "NOSAT"
     with for_(0, block_map.logical_block_count, step=1) as logical_block:
         coordinate = block_map.coordinate(logical_block)
-        converted = _vcvt(_vload(src, coordinate), dst.element_type)
+        kwargs = {}
+        if src.element_type == f32 and dst.element_type in (f16, bf16):
+            kwargs["rounding"] = rounding
+            kwargs["saturate"] = saturate
+        elif src.element_type == f32 and dst.element_type == i32:
+            kwargs["rounding"] = rounding
+            kwargs["saturate"] = saturate
+        elif src.element_type == i32 and dst.element_type == f32:
+            kwargs["rounding"] = rounding
+        source = _vload(src, coordinate)
+        if src.element_type == i32 and dst.element_type == f16:
+            widened = _vcvt(source, f32, rounding=rounding)
+            converted = _vcvt(
+                widened,
+                f16,
+                rounding=rounding,
+                saturate=saturate,
+            )
+        else:
+            converted = _vcvt(source, dst.element_type, **kwargs)
         _vstore(converted, dst, coordinate, dst_mask)
 
 
@@ -1752,6 +1850,7 @@ __all__ = [
     "_vmins",
     "_vmuls",
     "canonical_vmi_template",
+    "convert_vmi_constraint",
     "emit_elementwise_vmi",
     "emit_scalar_fill_vmi",
     "col_expand_vmi_constraint",

@@ -593,7 +593,7 @@ def check_provider_helper() -> None:
         op_name="pto.tcvt",
         operand_specs=[raw_tile_spec, f16_tile_spec],
         provider_module="ptodsl.vmi_tilelib",
-        context_attrs={"round_mode": "RINT"},
+        context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
     expect("pto.vmi.vcvt" in tcvt, "tcvt should lower to VMI conversion")
 
@@ -813,7 +813,7 @@ def check_col_expand_candidate() -> None:
 
 
 def check_tcvt_bf16_candidate() -> None:
-    """tcvt covers both f32->f16 and f32->bf16 cast on the canonical path."""
+    """tcvt covers the static DSv4 conversion forms on one row loop."""
     raw_tile_spec = {
         "kind": "tile",
         "dtype": "f32",
@@ -834,7 +834,7 @@ def check_tcvt_bf16_candidate() -> None:
         op_name="pto.tcvt",
         operand_specs=[raw_tile_spec, f16_dst_spec],
         provider_module="ptodsl.vmi_tilelib",
-        context_attrs={"round_mode": "RINT"},
+        context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
     expect("pto.vmi.vcvt" in f16_text, "tcvt f32->f16 should lower to VMI conversion")
     expect("vreg<64xf16>" in f16_text, "tcvt f32->f16 should target the f16 vreg type")
@@ -844,10 +844,46 @@ def check_tcvt_bf16_candidate() -> None:
         op_name="pto.tcvt",
         operand_specs=[raw_tile_spec, bf16_dst_spec],
         provider_module="ptodsl.vmi_tilelib",
-        context_attrs={"round_mode": "RINT"},
+        context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
     ).mlir_text()
     expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
     expect("vreg<64xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
+
+    forms = (
+        ("bf16", "f32", "ROUND", 1),
+        ("f16", "f32", "ROUND", 1),
+        ("i32", "f32", "ROUND", 1),
+        ("f32", "i32", "TRUNC", 1),
+        ("i32", "f16", "ROUND", 2),
+    )
+    for src_dtype, dst_dtype, round_mode, vcvt_count in forms:
+        src_spec = {**raw_tile_spec, "dtype": src_dtype}
+        dst_spec = {**raw_tile_spec, "dtype": dst_dtype}
+        text = instantiate_candidate(
+            target="a5",
+            op_name="pto.tcvt",
+            operand_specs=[src_spec, dst_spec],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={
+                "round_mode": round_mode,
+                "sat_mode": "ON" if (src_dtype, dst_dtype) == ("f32", "i32") else "OFF",
+            },
+        ).mlir_text()
+        expect(text.count("scf.for") == 1, f"tcvt {src_dtype}->{dst_dtype} needs one row loop")
+        expect(
+            text.count("pto.vmi.vcvt") == vcvt_count,
+            f"tcvt {src_dtype}->{dst_dtype} should emit {vcvt_count} conversion op(s)",
+        )
+        expect(
+            'rounding = "Z"' in text if round_mode == "TRUNC" else True,
+            f"tcvt {src_dtype}->{dst_dtype} should preserve truncation",
+        )
+        expect(
+            'saturate = "SAT"' in text
+            if (src_dtype, dst_dtype) == ("f32", "i32")
+            else True,
+            "tcvt f32->i32 should preserve saturation mode",
+        )
 
 
 def check_col_reduce_vmi_to_vpto_lowering() -> None:

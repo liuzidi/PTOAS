@@ -402,6 +402,7 @@ static LogicalResult lowerVCvt(VMICvtOp op, OpBuilder &builder) {
                                      saturateAttr)
             .getResult();
   } else if (direction == "fptosi") {
+    StringAttr roundingAttr = op.getRoundingAttr();
     result =
         builder
             .create<VMIFPToSIOp>(loc, resultType, source,
@@ -414,8 +415,10 @@ static LogicalResult lowerVCvt(VMICvtOp op, OpBuilder &builder) {
                                  op.getRoundingAttr(), saturateAttr)
             .getResult();
   } else if (direction == "sitofp") {
+    StringAttr roundingAttr = op.getRoundingAttr();
     result =
-        builder.create<VMISIToFPOp>(loc, resultType, source).getResult();
+        builder.create<VMISIToFPOp>(loc, resultType, source, roundingAttr)
+            .getResult();
   } else if (direction == "widen_int") {
     // Use source type signedness to decide signed vs unsigned extension.
     bool useSigned = true;

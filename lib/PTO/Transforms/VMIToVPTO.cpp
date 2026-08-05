@@ -12505,7 +12505,9 @@ struct OneToNVMISIToFPOpPattern : OpConversionPattern<VMISIToFPOp> {
 
     SmallVector<Value> results;
     results.reserve(resultTypes.size());
-    StringAttr rnd = rewriter.getStringAttr("R");
+    StringAttr rnd = op.getRoundingAttr();
+    if (!rnd)
+      rnd = rewriter.getStringAttr("R");
     for (auto [sourcePart, resultType] :
          llvm::zip_equal(sourceParts, resultTypes)) {
       auto sourceType = dyn_cast<VRegType>(sourcePart.getType());
