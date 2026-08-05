@@ -435,6 +435,16 @@ static llvm::cl::opt<bool> enableVMI(
     llvm::cl::desc("Enable VMI fusion and load/store elision on the VPTO path"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableVMILoopFusion(
+    "enable-vmi-loop-fusion",
+    llvm::cl::desc("Enable VMI loop fusion inside the VMI fusion pipeline"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableVMILoadStoreElision(
+    "enable-vmi-load-store-elision",
+    llvm::cl::desc(
+        "Enable VMI load/store elision inside the VMI fusion pipeline"),
+    llvm::cl::init(true));
 static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
     llvm::cl::desc("Control A5 tile fusion on level2/level3. Disabled by "
@@ -2936,7 +2946,10 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
          llvm::any_of(module.getOps<emitc::FuncOp>(), hasMultiBlockFunc);
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm);
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionOptimizations,
+                                      bool enableLoopFusion,
+                                      bool enableLoadStoreElision);
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
@@ -3118,7 +3131,9 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
     return WalkResult::advance();
   });
   if (enableVMI || containsVMI)
-    appendVMISemanticPipeline(kernelModulePM);
+    appendVMISemanticPipeline(kernelModulePM, enableVMI,
+                              enableVMILoopFusion,
+                              enableVMILoadStoreElision);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -3130,22 +3145,29 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   return success();
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm) {
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionOptimizations,
+                                      bool enableLoopFusion,
+                                      bool enableLoadStoreElision) {
   // Materialize unsigned carriers for sign-sensitive VMI ops before any
   // verifier, layout, or lowering pass sees signless integer element types.
   pm.addNestedPass<func::FuncOp>(
       pto::createVMINormalizeSignlessIntToUnsignedPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  if (enableVMI) {
+  if (enableFusionOptimizations) {
     // Optimize fusion regions while loads and stores are still unified VMI ops.
-    pm.addPass(pto::createPTOVmiLoopFusionPass());
-    pm.addPass(createCanonicalizerPass());
-    pm.addPass(createCSEPass());
-    pm.addNestedPass<func::FuncOp>(
-        pto::createPTOVmiLoadStoreElisionPass());
-    pm.addPass(createCanonicalizerPass());
-    pm.addPass(createCSEPass());
+    if (enableLoopFusion) {
+      pm.addPass(pto::createPTOVmiLoopFusionPass());
+      pm.addPass(createCanonicalizerPass());
+      pm.addPass(createCSEPass());
+    }
+    if (enableLoadStoreElision) {
+      pm.addNestedPass<func::FuncOp>(
+          pto::createPTOVmiLoadStoreElisionPass());
+      pm.addPass(createCanonicalizerPass());
+      pm.addPass(createCSEPass());
+    }
   }
   // Expand unified VMI ops before layout assignment so grouped vci becomes
   // the contiguous-only legacy group_iota producer. Layout assignment can

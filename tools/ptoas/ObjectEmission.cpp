@@ -564,6 +564,23 @@ static bool compileDeviceLLVMToObject(llvm::StringRef llPath,
   args.push_back("-mllvm");
   args.push_back(std::string("--cce-simt-fpmath-combine=") +
                  (enableSimtFastMath ? "true" : "false"));
+  // VPTO performs vector fusion before LLVM emission.  Disable Bisheng's
+  // independent VF pipeline so it cannot fuse or eliminate memory traffic a
+  // second time and obscure the effect of PTOAS's VMI fusion pipeline.
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-vf-fusion=false");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-vf-loop-extender=false");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-loop-fusion=false");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-vf-ldst-elimination=false");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-ub-dead-st-elimination=false");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-auto-sync=off");
+  args.push_back("-mllvm");
+  args.push_back("-cce-vf-enable-vf-ifelse-extender=false");
   args.push_back("-c");
   args.push_back("-x");
   args.push_back("ir");
