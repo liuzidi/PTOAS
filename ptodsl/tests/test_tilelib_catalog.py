@@ -855,7 +855,7 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertEqual(selected.name, "template_trowmax")
         self.assertIn("pto.vcmax", selected.specialize(**specs).mlir_text())
 
-    def test_vmi_trowmax_accepts_static_column_subregion(self):
+    def test_vmi_trowmax_accepts_static_safe_column_subregion(self):
         specs = {
             "src": TileSpec(
                 shape=(8, 512),
@@ -884,6 +884,34 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertIn("pto.vmi.vload", mlir)
         self.assertIn("!pto.vmi.vreg<128xf32>", mlir)
         self.assertIn("arith.constant 512", mlir)
+
+    def test_vmi_trowmax_accepts_narrow_full_shape(self):
+        specs = {
+            "src": TileSpec(
+                shape=(64, 32),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 32),
+            ),
+            "workspace": TileSpec(
+                shape=(64, 128),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 128),
+            ),
+            "dst": TileSpec(
+                shape=(64, 1),
+                dtype=ScalarType("f32"),
+                memory_space="ub",
+                valid_shape=(64, 1),
+                b_layout="col_major",
+            ),
+        }
+        selected = select("pto.trowmax", "a5", specs, candidate_id="vmi_trowmax")
+        mlir = selected.specialize(**specs).mlir_text()
+        self.assertIn("pto.vmi.vload", mlir)
+        self.assertIn("!pto.vmi.vreg<32xf32>", mlir)
+        self.assertIn("arith.constant 32", mlir)
 
     def test_declared_dtype_signatures_are_selectable(self):
         for op, entry in CATALOG.items():

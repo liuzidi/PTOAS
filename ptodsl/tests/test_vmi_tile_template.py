@@ -53,6 +53,8 @@ from ptodsl.vmi_tilelib import (
     vmi_tneg,
     vmi_trowexpanddiv,
     vmi_trowexpandmul,
+    vmi_trowmax,
+    vmi_trowsum,
     vmi_tsubs,
 )
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
@@ -743,6 +745,55 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
     return colmax, colsum, reduced_col_spec
 
 
+def check_row_reduce_candidates() -> dict[str, tuple[str, str]]:
+    lowering_cases = {}
+    for op_name, candidate, physical_op in (
+        ("trowmax", vmi_trowmax, "pto.vcmax"),
+        ("trowsum", vmi_trowsum, "pto.vcadd"),
+    ):
+        for cols in (8, 32, 128):
+            src = TileSpec((8, cols), f32)
+            workspace = TileSpec((8, max(cols, 128)), f32)
+            dst = TileSpec((8, 1), f32, b_layout="col_major")
+            artifact = candidate.specialize(src=src, workspace=workspace, dst=dst)
+            artifact.verify()
+            text = artifact.mlir_text()
+            name = f"vmi_{op_name}_{cols}lanes"
+            expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+            expect(
+                f"!pto.vmi.vreg<{cols}xf32>" in text,
+                f"{name} should use one logical row vreg",
+            )
+            expect(text.count("pto.vmi.vload") == 1, f"{name} should load one row")
+            expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one scalar")
+            lowering_cases[name] = (text, physical_op)
+
+    workspace = TileSpec((8, 128), f32)
+    dst = TileSpec((8, 1), f32, b_layout="col_major")
+    safe_subregion_src = TileSpec((8, 512), f32, valid_shape=(8, 128))
+    safe_subregion = vmi_trowmax.specialize(
+        src=safe_subregion_src, workspace=workspace, dst=dst
+    ).mlir_text()
+    expect(
+        "!pto.vmi.vreg<128xf32>" in safe_subregion,
+        "safe static column subregions should reduce their logical width",
+    )
+    expect(
+        "arith.constant 512" in safe_subregion,
+        "safe static column subregions should preserve physical row stride",
+    )
+
+    partial_src = TileSpec((8, 32), f32, valid_shape=(8, 16))
+    expect_raises(
+        lambda: vmi_trowsum.specialize(
+            src=partial_src, workspace=workspace, dst=dst
+        ).mlir_text(),
+        ValueError,
+        "every physical lane",
+    )
+    return lowering_cases
+
+
 def check_col_expand_candidate() -> None:
     """ColExpandBinary (tcolexpandsub/add/mul/div) broadcasts a [1, VL] column
     result across every row of a [rows, VL] tile, mirroring pto-isa
@@ -1125,6 +1176,8 @@ def main() -> None:
     for name, (text, expected_op) in check_local_elementwise_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)
     for name, (text, expected_op) in check_local_broadcast_candidates().items():
+        check_vmi_to_vpto_lowering(name, text, expected_op)
+    for name, (text, expected_op) in check_row_reduce_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)
     check_col_reduce_candidate()
     check_col_expand_candidate()

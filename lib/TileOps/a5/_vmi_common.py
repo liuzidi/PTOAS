@@ -80,16 +80,22 @@ def _wrap_mask(value, dtype: ScalarType) -> _MaskValue:
     return _MaskValue(unwrap_surface_value(value), dtype)
 
 
+def _has_null_pad(value) -> bool:
+    return str(value).lower() in {"null", "0", "0x0", "0x00"}
+
+
 def row_reduce_vmi_constraint(
     src_shape=(),
     src_valid_shape=(),
     workspace_shape=(),
+    workspace_valid_shape=(),
     dst_shape=(),
     dst_valid_shape=(),
     src_dtype=None,
     workspace_dtype=None,
     dst_dtype=None,
     src_config=None,
+    workspace_config=None,
     dst_config=None,
     **_,
 ):
@@ -100,6 +106,7 @@ def row_reduce_vmi_constraint(
         or len(src_shape) != 2
         or len(src_valid_shape) != 2
         or len(workspace_shape) != 2
+        or len(workspace_valid_shape) != 2
         or len(dst_shape) != 2
         or len(dst_valid_shape) != 2
     ):
@@ -107,22 +114,37 @@ def row_reduce_vmi_constraint(
     rows, cols = src_shape
     valid_rows, valid_cols = src_valid_shape
     workspace_rows, workspace_cols = workspace_shape
+    safe_read_cols = (
+        ((valid_cols + f32.lanes - 1) // f32.lanes) * f32.lanes
+        if isinstance(valid_cols, int) and valid_cols > 0
+        else 0
+    )
     return (
-        rows == valid_rows
+        isinstance(rows, int)
+        and isinstance(cols, int)
+        and isinstance(workspace_rows, int)
+        and isinstance(workspace_cols, int)
+        and rows > 0
+        and cols > 0
+        and valid_rows == rows
+        and isinstance(valid_cols, int)
+        and 0 < valid_cols <= cols
+        and (src_valid_shape == src_shape or safe_read_cols <= cols)
         and workspace_rows == rows
         and workspace_cols >= 1
+        and workspace_valid_shape == workspace_shape
         and dst_shape == (rows, 1)
         and dst_valid_shape == (rows, 1)
         and src_config is not None
         and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and _has_null_pad(src_config.pad_value)
+        and workspace_config is not None
+        and _has_null_pad(workspace_config.pad_value)
         and dst_config is not None
         and dst_config.b_layout == "col_major"
-        and isinstance(cols, int)
-        and isinstance(valid_cols, int)
-        and cols > 0
-        and valid_cols > 0
-        and valid_cols <= cols
-        and valid_cols % f32.lanes == 0
+        and dst_config.s_layout == "none_box"
+        and _has_null_pad(dst_config.pad_value)
     )
 
 
@@ -1479,13 +1501,21 @@ def _validate_row_reduce_tiles(
         raise ValueError("row-reduce source must be row-major")
     rows, physical_cols = src._spec.shape
     valid_rows, valid_cols = src._spec.effective_valid_shape
-    if valid_rows != rows:
-        raise ValueError("row-reduce VMI candidates do not support tail rows")
-    if valid_cols <= 0 or valid_cols > physical_cols:
-        raise ValueError("row-reduce valid columns must be within the source tile")
+    if valid_rows != rows or valid_cols <= 0 or valid_cols > physical_cols:
+        raise ValueError("row-reduce valid shape must fit the physical source tile")
+    safe_read_cols = ((valid_cols + f32.lanes - 1) // f32.lanes) * f32.lanes
+    if (
+        src._spec.effective_valid_shape != src._spec.shape
+        and safe_read_cols > physical_cols
+    ):
+        raise ValueError(
+            "row-reduce source must contain every physical lane read by its mask"
+        )
     workspace_rows, workspace_cols = workspace._spec.shape
     if workspace_rows != rows or workspace_cols < 1:
         raise ValueError("row-reduce workspace must have matching rows")
+    if workspace._spec.effective_valid_shape != workspace._spec.shape:
+        raise ValueError("row-reduce VMI candidates require a full workspace tile")
     if dst._spec.shape != (rows, 1) or dst._spec.b_layout != "col_major":
         raise ValueError("row-reduce destination must be a col-major [rows, 1] tile")
     if dst._spec.effective_valid_shape != (rows, 1):
