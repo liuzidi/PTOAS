@@ -36,8 +36,8 @@ module {
 // EXPAND-LABEL: func.func @narrow_rowsum
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowsum
 // FINAL-LABEL: func.func @narrow_rowmax
-// FINAL: pto.pge_b32 "PAT_VL32"
-// FINAL: pto.vcmax
+// FINAL: %[[MAX_MASK:.*]] = pto.pge_b32 "PAT_VL32"
+// FINAL: pto.vcmax {{.*}}, %[[MAX_MASK]]
 // FINAL-LABEL: func.func @narrow_rowsum
-// FINAL: pto.pge_b32 "PAT_VL8"
-// FINAL: pto.vcadd
+// FINAL: %[[SUM_MASK:.*]] = pto.pge_b32 "PAT_VL8"
+// FINAL: pto.vcadd {{.*}}, %[[SUM_MASK]]
