@@ -470,18 +470,23 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
     expect("pto.vecscope" not in colmax, "colmax template must remain scope-free")
     expect(colmax.count("scf.for") == 1, "colmax should emit one runtime reduce loop")
     expect(colmax.count("scf.yield") == 1, "colmax should yield the merged accumulator")
+    # The vmi_tcolmax candidate uses split=4 (rows=32 is divisible by 4): the
+    # loop carries 4 independent VL-wide accumulators (step=4), each loaded and
+    # merged once per iteration (4 vload + 4 vmax inside the loop), then merged
+    # by a 3-way vmax tree outside the loop (3 more vmax). The accumulator seed
+    # is a vbr of the identity, not a dummy vload (a vload carries a Read memory
+    # effect and cannot be DCE'd, so a dummy load would duplicate the row-0
+    # read).
     expect(
-        "iter_args" in colmax and "!pto.vmi.vreg<64xf32>" in colmax,
-        "colmax should carry a VL-wide vreg accumulator through the loop",
+        "step %c4" in colmax and "iter_args" in colmax,
+        "colmax split=4 should step by 4 and carry loop-carried accumulators",
     )
-    expect(colmax.count("pto.vmi.vmax") == 1, "colmax should issue one VMI max inside the loop")
     expect(
-        colmax.count("pto.vmi.vload") == 1,
-        "colmax should load exactly one row per iteration inside the loop "
-        "(the accumulator seed is a vbr of the identity, not a dummy vload — a "
-        "vload carries a Read memory effect and cannot be DCE'd, so a dummy "
-        "load would duplicate the row-0 read)",
+        colmax.count("!pto.vmi.vreg<64xf32>") >= 4,
+        "colmax split=4 should carry at least 4 VL-wide vreg accumulators",
     )
+    expect(colmax.count("pto.vmi.vmax") == 7, "colmax split=4 should issue 4 in-loop + 3 merge vmax")
+    expect(colmax.count("pto.vmi.vload") == 4, "colmax split=4 should load 4 rows per iteration")
     expect(colmax.count("pto.vmi.vstore") == 1, "colmax should store the reduced result once")
     expect("pto.vmi.vcmax" not in colmax, "colmax must not collapse to a 1-lane vcmax")
     expect("pto.vmi.vreduce_max" not in colmax, "colmax must not collapse to a 1-lane vreduce")
@@ -514,6 +519,111 @@ def check_col_reduce_candidate() -> tuple[str, str, str]:
         "expects 2 operands, got 3",
     )
     return colmax, colsum, reduced_col_spec
+
+
+def check_col_reduce_split() -> None:
+    """The vmi_tcolmax / vmi_tcolmin candidates default to split=4, running 4
+    independent VL-wide accumulators when ``rows % 4 == 0``. When the row count
+    is NOT divisible by 4, split silently falls back to 1 (single-way, always
+    correct) — this exercises both paths so a regression that breaks the
+    fallback (e.g. emitting a step=4 loop over a non-divisible trip, which would
+    OOB the tail rows) is caught here, not on a real kernel.
+
+    tcolmin mirrors tcolmax (vmax->vmin, -inf identity -> +inf identity).
+    """
+    base_spec = {
+        "kind": "tile",
+        "dtype": "f32",
+        "memory_space": "ub",
+        "config": {
+            "b_layout": "row_major",
+            "s_layout": "none_box",
+            "s_fractal_size": 512,
+            "pad_value": "0x0",
+        },
+    }
+
+    # rows=128 is divisible by 4 -> split=4 active (step=4, 4 accumulators).
+    divisible_src = {**base_spec, "shape": [128, 64], "valid_shape": [128, 64]}
+    dst_spec = {**base_spec, "shape": [1, 64], "valid_shape": [1, 64]}
+
+    colmax = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmax",
+        operand_specs=[divisible_src, dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(
+        "step %c4" in colmax,
+        "tcolmax split=4 should step by 4 when rows % 4 == 0",
+    )
+    expect(
+        colmax.count("pto.vmi.vmax") == 4 + 3,
+        "tcolmax split=4 should issue 4 in-loop vmax + 3 merge vmax (128 rows)",
+    )
+
+    colmin = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmin",
+        operand_specs=[divisible_src, dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(
+        "step %c4" in colmin,
+        "tcolmin split=4 should step by 4 when rows % 4 == 0",
+    )
+    expect(
+        colmin.count("pto.vmi.vmin") == 4 + 3,
+        "tcolmin split=4 should issue 4 in-loop vmin + 3 merge vmin (128 rows)",
+    )
+
+    # rows=10 is NOT divisible by 4 -> fallback to split=1 (single-way, step=1,
+    # one accumulator, one merge per row). This must not emit step=4 (which
+    # would skip the tail rows / OOB the half-open scf.for).
+    nondivisible_src = {**base_spec, "shape": [10, 64], "valid_shape": [10, 64]}
+    colmax_fb = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmax",
+        operand_specs=[nondivisible_src, dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(
+        "step %c4" not in colmax_fb,
+        "tcolmax should NOT use step=4 when rows % 4 != 0 (fallback to split=1)",
+    )
+    expect(
+        "step %c1" in colmax_fb,
+        "tcolmax fallback should step by 1 (split=1 single-way)",
+    )
+    expect(
+        colmax_fb.count("pto.vmi.vmax") == 1,
+        "tcolmax split=1 fallback should issue one vmax op in the loop body "
+        "(the loop runs 10 iterations but the body is a template, not unrolled)",
+    )
+    expect(
+        colmax_fb.count("pto.vmi.vload") == 1,
+        "tcolmax split=1 fallback should load one row per iteration in the loop body",
+    )
+
+    colmin_fb = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcolmin",
+        operand_specs=[nondivisible_src, dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={},
+    ).mlir_text()
+    expect(
+        "step %c4" not in colmin_fb,
+        "tcolmin should NOT use step=4 when rows % 4 != 0 (fallback to split=1)",
+    )
+    expect(
+        "step %c1" in colmin_fb,
+        "tcolmin fallback should step by 1 (split=1 single-way)",
+    )
+
 
 
 def check_col_expand_candidate() -> None:
@@ -860,6 +970,7 @@ def main() -> None:
     check_vmi_to_vpto_lowering("vmi_tadd_block128", wide_tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
     check_col_reduce_candidate()
+    check_col_reduce_split()
     check_col_expand_candidate()
     check_tcvt_bf16_candidate()
     check_col_reduce_vmi_to_vpto_lowering()

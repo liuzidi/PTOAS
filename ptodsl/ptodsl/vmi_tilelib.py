@@ -21,6 +21,7 @@ from .tilelib.templates.a5.tadd import vmi_tadd_block64
 from .tilelib.templates.a5.tadds import vmi_tadds
 from .tilelib.templates.a5.tcvt import vmi_tcvt
 from .tilelib.templates.a5.tcolmax import vmi_tcolmax
+from .tilelib.templates.a5.tcolmin import vmi_tcolmin
 from .tilelib.templates.a5.tcolsum import vmi_tcolsum
 from .tilelib.templates.a5.tcolexpandadd import vmi_tcolexpandadd
 from .tilelib.templates.a5.tcolexpanddiv import vmi_tcolexpanddiv
@@ -52,6 +53,7 @@ __all__ = [
     "vmi_tadds",
     "vmi_tcvt",
     "vmi_tcolmax",
+    "vmi_tcolmin",
     "vmi_tcolsum",
     "vmi_tcolexpandadd",
     "vmi_tcolexpanddiv",
