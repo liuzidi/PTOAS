@@ -761,20 +761,25 @@ def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> 
     without mutating IR; Pass 2 reverses to replace loads' uses with the
     recorded source value and erase dead loads/stores (use_empty-guarded). The
     canonical tracked value is resolved through the `pto.pointer_cast`/
-    `pto.castptr` UB alias chain; a `pto.vmi.vload` has no mask operand so its
-    read lane set is inferred from its consuming op (mask-free consumers like
-    vcvt => full vreg). `create_mask %N` is a prefix predicate, so lane sets are
-    modeled as prefix intervals [0,N): store->load forward when the store's
-    write set contains the load's read set with no intervening intersecting
-    write; vload->vload dedup when read sets match with no intervening
-    intersecting write; merge-pmode stores only invalidate the lane interval
-    they write (partial overlap marks entries stale but not dead, so a later
-    vload of mixed content correctly does NOT forward — badref guard). Stores
-    whose UB escapes the region (read by a later mte_ub_gm) are marked
-    non-erasable and preserved. This first version primarily forwards consumer
-    loads; producer stores are erased only when the local analysis also proves
-    them dead, so it does not claim complete UB store-load roundtrip removal.
-    Must run after `PTOVmiLoopFusion` + CSE and before
+    `pto.castptr` UB alias chain, decomposing the address into a constant or an
+    affine `addi(muli(%iv, c), b)` key so two accesses with the same affine
+    (iv, baseOffset, coeff) are the same UB. A `pto.vmi.vload` has no mask
+    operand so its read lane set is inferred from its consuming op (mask-free
+    consumers like vcvt => full vreg). `create_mask %N` is a prefix predicate,
+    so lane sets are modeled as prefix intervals [0,N): store->load forward when
+    the store's write set contains the load's read set with no intervening
+    intersecting write; vload->vload dedup when read sets match with no
+    intervening intersecting write; merge-pmode stores only invalidate the lane
+    interval they write (partial overlap marks entries stale but not dead, so a
+    later vload of mixed content correctly does NOT forward — badref guard).
+    Stores whose UB escapes the region (read by a later mte_ub_gm) are marked
+    non-erasable and preserved. CONTENT vs OBSERVABILITY are tracked separately:
+    a vload is a pure read so it never invalidates a preceding store's content, but
+    a store whose UB a later unknown/affine load MAY alias is marked non-erasable
+    (a later overwrite-DSE must not delete it). This first version primarily
+    forwards consumer loads; producer stores are erased only when the local
+    analysis also proves them dead, so it does not claim complete UB store-load
+    roundtrip removal. Must run after `PTOVmiLoopFusion` + CSE and before
     `VMILowerUnifiedToLegacy` (which lowers `pto.vmi.vload/vstore` to
     `pto.vlds/vsts`).
   }];
