@@ -39,6 +39,19 @@ module {
       outs(%dst : !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
     return
   }
+
+  func.func @shape_narrowing_subview_rowmax() {
+    %c0 = arith.constant 0 : index
+    %parent = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %src = pto.subview %parent[%c0, %c0] sizes [8, 128]
+      : !pto.tile_buf<vec, 8x512xf32> -> !pto.tile_buf<vec, 8x128xf32>
+    %workspace = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf32>
+    %dst = pto.alloc_tile : !pto.tile_buf<vec, 8x1xf32, blayout=col_major>
+    pto.trowmax
+      ins(%src, %workspace : !pto.tile_buf<vec, 8x128xf32>, !pto.tile_buf<vec, 8x128xf32>)
+      outs(%dst : !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
+    return
+  }
 }
 
 // FALLBACK-LABEL: func.func @partial_rowsum
@@ -48,5 +61,8 @@ module {
 // FALLBACK: pto.vmi.fusion.boundary = "local"
 // FALLBACK-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
 // FALLBACK-LABEL: func.func @padded_rowsum
+// FALLBACK: pto.vmi.fusion.boundary = "local"
+// FALLBACK-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// FALLBACK-LABEL: func.func @shape_narrowing_subview_rowmax
 // FALLBACK: pto.vmi.fusion.boundary = "local"
 // FALLBACK-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"

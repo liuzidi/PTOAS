@@ -72,6 +72,24 @@ static bool isHardBoundaryFallback(Operation *op, DictionaryAttr candidate) {
          candidateHasTag(candidate, "hard_boundary");
 }
 
+static bool hasMaterializationSensitiveSubview(Operation *op) {
+  return llvm::any_of(op->getOperands(), [](Value operand) {
+    auto subview = operand.getDefiningOp<pto::SubViewOp>();
+    if (!subview)
+      return false;
+    auto sourceType = dyn_cast<pto::TileBufType>(subview.getSource().getType());
+    auto resultType = dyn_cast<pto::TileBufType>(operand.getType());
+    if (!sourceType || !resultType)
+      return false;
+
+    // PTOMaterializeTileHandles preserves the parent's physical extent for
+    // shape-narrowing subviews and represents the slice as valid_shape. A VMI
+    // candidate selected from the pre-materialization result type would see a
+    // false full-shape proof and can become illegal at ExpandTileOp.
+    return sourceType.getShape() != resultType.getShape();
+  });
+}
+
 static void recordSelection(Operation *op, DictionaryAttr candidate,
                             bool isVMI) {
   op->setAttr(kSelectedCandidateAttr, candidate);
@@ -127,6 +145,8 @@ struct SelectTemplateCandidatePass
           if (candidateHasTag(candidate, "vmi") &&
               candidateHasTag(candidate, "fusion_eligible") &&
               (pto::hasStaticFullTileValidShape(op) ||
+               candidateHasTag(candidate, "supports_partial_valid_shape")) &&
+              (!hasMaterializationSensitiveSubview(op) ||
                candidateHasTag(candidate, "supports_partial_valid_shape"))) {
             recordSelection(op, candidate, true);
             return WalkResult::advance();
