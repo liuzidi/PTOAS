@@ -93,7 +93,11 @@ module {
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmuls
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_texp
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowsum
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tcvt
+// The f16 destination row is only 128 bytes, so unified masks cannot yet
+// preserve this conversion safely. It must remain a local PTODSL fallback.
+// EXPAND: call @__pto_tilelang_a5_tcvt
+// EXPAND-SAME: pto.tilelib.impl = "ptodsl"
+// EXPAND-SAME: pto.vmi.fusion.boundary = "local"
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsub
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmax
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmul
@@ -107,7 +111,6 @@ module {
 // INLINE: pto.vmi.vmuls
 // INLINE: pto.vmi.vexp
 // INLINE: pto.vmi.vcadd
-// INLINE: pto.vmi.vcvt
 
 // FINAL-LABEL: func.func @ptodsl_vmi_softmax_compute_ops
 // FINAL: pto.vecscope
