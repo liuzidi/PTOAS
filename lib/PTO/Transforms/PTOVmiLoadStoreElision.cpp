@@ -38,7 +38,10 @@
 //     forward to a preceding store). But a vload MAY OBSERVE a preceding store's
 //     UB, so any store whose base MAY alias the load's base is marked non-erasable
 //     (a later overwrite-DSE must not delete it). A vstore is a WRITE: an
-//     untrackable/affine store flushes tracked content (it may alias anything).
+//     untrackable store flushes tracked content, while a trackable store marks
+//     every may-alias entry stale (an affine store may alias any tracked UB).
+//     Only must-alias, same-location writes may additionally prove an earlier
+//     store dead.
 //   - Transparency is decided by a CLOSED policy, not dialect prefixes:
 //       * region-bearing op, func.call, vload/vstore, and the explicit sync/DMA
 //         name set (mte_*/set_flag/mem_bar/...) are NEVER transparent;
@@ -926,7 +929,10 @@ static bool elideOpRange(OpRange ops) {
         continue;
       }
 
-      // Mark preceding same-loc entries by how this write touches their lanes:
+      // Mark preceding may-alias entries by how this write touches them:
+      //  - may-alias but not must-alias -> the entry is stale. The write may
+      //    redefine its content at runtime, but cannot prove the earlier store
+      //    dead, so overwrite-DSE is not allowed.
       //  - fully covered -> a store is dead (eraseMark), unless it escapes or
       //    is non-erasable (may be observed by an unknown/affine read); the
       //    entry stops matching (stale).
@@ -936,8 +942,13 @@ static bool elideOpRange(OpRange ops) {
       //    be read / escape).
       for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
         ContentEntry &e = entries[i];
-        if (!basesMustAlias(resolveBaseIdentity(e.base), id))
+        BaseIdentity entryId = resolveBaseIdentity(e.base);
+        if (!basesMayAlias(entryId, id))
           continue;
+        if (!basesMustAlias(entryId, id)) {
+          e.stale = true;
+          continue;
+        }
         // Without a byte-range alias model, a different offset or view on the
         // same storage root may partially overlap this write.
         if (!sameLoc(e, base, offset)) {

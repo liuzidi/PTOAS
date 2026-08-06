@@ -772,6 +772,9 @@ def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> 
     intervening intersecting write; merge-pmode stores only invalidate the lane
     interval they write (partial overlap marks entries stale but not dead, so a
     later vload of mixed content correctly does NOT forward — badref guard).
+    Forwarding requires must-alias bases. A store invalidates every may-alias
+    entry; when the bases may alias but do not must-alias, the old entry is only
+    marked stale and is not eligible for overwrite dead-store elimination.
     Stores whose UB escapes the region (read by a later mte_ub_gm) are marked
     non-erasable and preserved. CONTENT vs OBSERVABILITY are tracked separately:
     a vload is a pure read so it never invalidates a preceding store's content, but
