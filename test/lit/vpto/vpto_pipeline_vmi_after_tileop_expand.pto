@@ -10,8 +10,8 @@
 
 // CHECK: IR Dump After ExpandTileOp
 // CHECK: IR Dump After VMIToVPTO
-// CHECK: IR Dump After VPTOPtrNormalize
 // CHECK: IR Dump After PTOInferVPTOVecScope
+// CHECK: IR Dump After VPTOPtrNormalize
 // CHECK: IR Dump After LoopInvariantCodeMotion
 
 module {

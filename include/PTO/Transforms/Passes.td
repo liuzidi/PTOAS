@@ -988,12 +988,11 @@ def PTOInferVPTOVecScope
       "Infer missing pto.vecscope regions for VPTO vector operation clusters";
   let description = [{
     Runs near the VPTO emission boundary after VMI physicalization and the
-    existing pre-emission canonicalization, pointer normalization, and
-    wrapper-op expansion, but before VMI LICM and final cleanup. The pass
-    greedily clusters contiguous VPTO vector operations into `pto.vecscope`
-    regions while preserving explicit vector-scope carriers and treating
-    DMA/copy/sync, unresolved calls, terminators, and forbidden operations as
-    boundaries.
+    existing pre-emission canonicalization, before pointer normalization and
+    wrapper-op expansion. The pass greedily clusters contiguous VPTO vector
+    operations into `pto.vecscope` regions while preserving explicit
+    vector-scope carriers and treating DMA/copy/sync, unresolved calls,
+    terminators, and forbidden operations as boundaries.
 
     The inferred `pto.vecscope` form remains resultless. Values whose type is
     `!pto.vreg`, `!pto.mask`, or `!pto.align` must not escape the inferred
@@ -1003,6 +1002,27 @@ def PTOInferVPTOVecScope
   let dependentDialects = ["mlir::func::FuncDialect",
                            "mlir::pto::PTODialect",
                            "mlir::arith::ArithDialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOInsertVecScopeMemBar
+    : Pass<"pto-insert-vecscope-mem-bar", "func::FuncOp"> {
+  let summary = "Insert memory barriers for VPTO vecscope memory hazards";
+  let description = [{
+    Inserts `pto.mem_bar` barriers for analyzable memory hazards between
+    vector UB loads/stores inside `pto.vecscope` and `pto.strict_vecscope`
+    regions. A read-only analysis phase builds the access/hazard schedule;
+    the codegen phase inserts barriers. Statically modelled domains drive
+    insertion on proven non-empty dependence; dynamic loop bounds fall back
+    conservatively.
+    Runs after vecscope inference, before `VPTOPtrNormalize`.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::affine::AffineDialect",
                            "mlir::memref::MemRefDialect",
                            "mlir::scf::SCFDialect"];
 }

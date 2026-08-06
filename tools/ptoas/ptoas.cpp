@@ -484,6 +484,12 @@ static llvm::cl::opt<bool> enableSoftPostUpdate(
     llvm::cl::desc("Enable VPTO soft post-update optimization"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> enableVecScopeMemBar(
+    "enable-vecscope-mem-bar",
+    llvm::cl::desc("Insert pto.mem_bar for VPTO vecscope memory hazards "
+                   "(default: off)"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> emitAddPtrTrace(
     "emit-addptr-trace",
     llvm::cl::desc("Emit addptr trace comments in generated C++ output"),
@@ -2952,6 +2958,13 @@ static void prepareVPTOForEmission(PassManager &pm) {
       pto::createPTOUnrollSIMTForPass());
   kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTOInferVPTOVecScopePass());
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      createVPTOExpandWrapperOpsPass());
+  if (enableVecScopeMemBar)
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOAnalyzeSIMTPersistentFragmentPass());
@@ -2963,10 +2976,7 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createVPTOOptimizeVcvtPass());
   kernelModulePM.addPass(pto::createVPTOMaskSimplifyPass());
   kernelModulePM.addPass(createReconcileUnrealizedCastsPass());
-  kernelModulePM.addNestedPass<func::FuncOp>(
-      createVPTOExpandWrapperOpsPass());
-  kernelModulePM.addNestedPass<func::FuncOp>(
-      pto::createPTOInferVPTOVecScopePass());
+  kernelModulePM.addPass(createCSEPass());
   if (enableSoftPostUpdate) {
     kernelModulePM.addPass(pto::createVPTOSoftPostUpdatePass());
   }
