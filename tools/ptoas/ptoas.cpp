@@ -3055,7 +3055,8 @@ buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion,
 
 static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
                                  bool emitHostStub,
-                                 const pto::CANNVersion &cannVersion) {
+                                 const pto::CANNVersion &cannVersion,
+                                 bool useVMIFusionPipeline) {
   if (emitVPTO) {
     result.kind = PTOASCompileResultKind::Text;
     llvm::raw_string_ostream os(result.textOutput);
@@ -3099,6 +3100,8 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.objectEmissionOptions.disableBishengVFFusion =
+      useVMIFusionPipeline;
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
@@ -3456,7 +3459,8 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
-                                 context.getCANNVersionOrDefault());
+                                 context.getCANNVersionOrDefault(),
+                                 useVMIFusionPipeline);
   }
 
   // Main PassManager
@@ -3660,7 +3664,8 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
-                                 context.getCANNVersionOrDefault());
+                                 context.getCANNVersionOrDefault(),
+                                 useVMIFusionPipeline);
   }
 
   if (failed(pm.run(*module))) {

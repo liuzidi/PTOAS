@@ -728,6 +728,8 @@ struct ContentEntry {
   LaneRange lanes;     // read set (load) / write set (store)
   bool isLoad = false;
   Value sourceValue;    // store.value or load.result (forward target value)
+  Value storeMask;      // original store mask; null for loads
+  StringAttr storePmode; // original store pmode; null for loads
 
   // Pass 1 marks:
   int forwardToIdx = -1; // >=0: this load forwards to entries[forwardToIdx].sourceValue
@@ -773,7 +775,7 @@ static bool elideOpRange(OpRange ops) {
           if (!e.isLoad)
             e.nonErasable = true;
         entries.push_back({load, load.getSource(), load.getOffset(),
-                           LaneRange::unknown(), true, load->getResult(0),
+                           LaneRange::unknown(), true, load->getResult(0), {}, {},
                            -1, false, false, /*stale=*/true,
                            /*nonErasable=*/false});
         continue;
@@ -810,7 +812,8 @@ static bool elideOpRange(OpRange ops) {
             e.nonErasable = true;
         // Record a non-matchable entry (it never acts as a forward target).
         entries.push_back({load, base, offset, LaneRange::unknown(), true,
-                           load->getResult(0), -1, false, false, /*stale=*/true,
+                           load->getResult(0), {}, {}, -1, false, false,
+                           /*stale=*/true,
                            /*nonErasable=*/false});
         continue;
       }
@@ -837,7 +840,7 @@ static bool elideOpRange(OpRange ops) {
       }
       if (matchIdx >= 0) {
         entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), matchIdx, true, false, false,
+                           load->getResult(0), {}, {}, matchIdx, true, false, false,
                            false});
         changed = true; // load will be forwarded + erased in Pass 2
       } else {
@@ -854,7 +857,8 @@ static bool elideOpRange(OpRange ops) {
           if (!e.isLoad && basesMayAlias(id, resolveBaseIdentity(e.base)))
             e.nonErasable = true;
         entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), -1, false, false, false, false});
+                           load->getResult(0), {}, {}, -1, false, false, false,
+                           false});
       }
       continue;
     }
@@ -885,8 +889,9 @@ static bool elideOpRange(OpRange ops) {
       // pmode: "merge" => only writeLanes written; "zero"(default)/absent =>
       // whole region defined (inactive lanes store 0 -> treat as full cover).
       bool pmodeMerge = false;
-      if (auto pma = store.getPmodeAttr())
-        pmodeMerge = pma.getValue().equals_insensitive("merge");
+      StringAttr pmode = store.getPmodeAttr();
+      if (pmode)
+        pmodeMerge = pmode.getValue().equals_insensitive("merge");
       if (!pmodeMerge)
         writeLanes = LaneRange::full(); // zero: entire UB defined
 
@@ -894,12 +899,12 @@ static bool elideOpRange(OpRange ops) {
       // the same location writes the SAME effective lane set and the SAME SSA
       // value, this store writes nothing new to memory (the earlier store
       // already established that content), so it is redundant and dead. We
-      // require the SAME SSA value (not a structural equivalence) and equal
-      // effective lanes; equal effective lanes subsumes "same pmode" under this
-      // model, because pmode=zero forces a full write set — a zero store and a
-      // merge store can only share effective lanes when both are full or both
-      // are the same prefix. The earlier store must be live (not stale/erased),
-      // guaranteeing no intervening write touched these lanes.
+      // require the SAME SSA value (not a structural equivalence), equivalent
+      // original masks, and the same pmode. Comparing only normalized lanes is
+      // insufficient: zero-pmode stores with different masks both normalize to
+      // full, but write different active-source/inactive-zero lane content. The
+      // earlier store must be live (not stale/erased), guaranteeing no
+      // intervening write touched these lanes.
       Value curValue = store.getValues().front();
       bool redundant = false;
       for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
@@ -908,9 +913,9 @@ static bool elideOpRange(OpRange ops) {
           continue;
         if (!sameLoc(e, base, offset))
           continue;
-        if (e.lanes.isUnknownSet() || writeLanes.isUnknownSet())
+        if (!areEquivalentMaskValues(e.storeMask, mask))
           continue;
-        if (e.lanes.upperBound != writeLanes.upperBound)
+        if (e.storePmode != pmode)
           continue;
         if (e.sourceValue != curValue)
           continue;
@@ -923,7 +928,8 @@ static bool elideOpRange(OpRange ops) {
         // the same content, so the earlier store stays the canonical forward
         // target / content source.
         entries.push_back({store, base, offset, writeLanes, false, curValue,
-                           -1, /*eraseMark=*/true, false, /*stale=*/true,
+                           mask, pmode, -1, /*eraseMark=*/true, false,
+                           /*stale=*/true,
                            /*nonErasable=*/false});
         changed = true;
         continue;
@@ -966,8 +972,8 @@ static bool elideOpRange(OpRange ops) {
         }
       }
       entries.push_back({store, base, offset, writeLanes, false,
-                         store.getValues().front(), -1, false, false, false,
-                         false});
+                         store.getValues().front(), mask, pmode, -1, false,
+                         false, false, false});
       continue;
     }
 
