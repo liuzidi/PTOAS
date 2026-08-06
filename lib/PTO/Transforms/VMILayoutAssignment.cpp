@@ -491,6 +491,16 @@ struct LayoutSolver {
     return getContiguousLayout();
   }
 
+  VMILayoutAttr getKnownDataLayout(Value value) {
+    unsigned id = addDataValue(value);
+    if (id == ~0u)
+      return {};
+    unsigned root = find(id);
+    if (dataNodes[root].naturalLayout)
+      return dataNodes[root].naturalLayout;
+    return dataNodes[root].preferredLayout;
+  }
+
   void requestDataUse(OpOperand &operand, VMILayoutAttr layout,
                       bool late = false,
                       DataLayoutSeedPhase phase = DataLayoutSeedPhase::Other) {
@@ -1203,8 +1213,12 @@ struct LayoutSolver {
         auto sourceType = cast<VMIVRegType>(extf.getSource().getType());
         auto resultType = cast<VMIVRegType>(extf.getResult().getType());
         VMILayoutSupport supports;
-        FailureOr<VMICastLayoutFact> fact =
-            supports.getPreferredCastLayoutFact(sourceType, resultType);
+        FailureOr<VMICastLayoutFact> fact = failure();
+        if (VMILayoutAttr sourceLayout = getKnownDataLayout(extf.getSource()))
+          fact = supports.getCastLayoutFactForSourceLayout(
+              sourceType, resultType, sourceLayout);
+        if (failed(fact))
+          fact = supports.getPreferredCastLayoutFact(sourceType, resultType);
         if (succeeded(fact)) {
           if (failed(setPreferredLayout(extf.getResult(), fact->resultLayout,
                                         op, getCastSeedPhase(*fact))))
