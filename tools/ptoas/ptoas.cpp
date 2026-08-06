@@ -445,6 +445,12 @@ static llvm::cl::opt<bool> enableVMILoadStoreElision(
     llvm::cl::desc(
         "Enable VMI load/store elision inside the VMI fusion pipeline"),
     llvm::cl::init(true));
+
+static llvm::cl::opt<bool> disableBishengVFFusion(
+    "disable-bisheng-vf-fusion",
+    llvm::cl::desc("Disable Bisheng VF, loop-fusion, and load/store "
+                   "elimination for VPTO device compilation"),
+    llvm::cl::init(false));
 static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
     "enable-op-fusion",
     llvm::cl::desc("Control A5 tile fusion on level2/level3. Disabled by "
@@ -3111,7 +3117,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 
   result.vptoStubSource = std::move(stubSource);
   result.objectEmissionOptions.disableBishengVFFusion =
-      useVMIFusionPipeline;
+      useVMIFusionPipeline || disableBishengVFFusion;
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
