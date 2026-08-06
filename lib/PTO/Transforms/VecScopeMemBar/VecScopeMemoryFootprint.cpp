@@ -462,27 +462,13 @@ FailureOr<VecMemoryAccessDescriptor>
 vecscopemembar::buildAccessDescriptor(Operation *op, ArrayRef<Value> ivs) {
   VecMemoryAccessDescriptor desc;
 
-  if (auto vldas = dyn_cast<pto::VldasOp>(op)) {
+  if (auto uvld = dyn_cast<pto::UvldOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
-    desc.base = vldas.getSource();
-    desc.addressSpace = getTypeAddressSpace(desc.base.getType());
-    desc.conservativeByteSize = 32;
+    fillContiguous(desc, uvld.getSource(), uvld.getOffset(),
+                   elementByteSize(uvld.getSource().getType()),
+                   vregElementCount(uvld.getResult().getType()), ivs);
     return desc;
   }
-
-  if (auto vldus = dyn_cast<pto::VldusOp>(op)) {
-    desc.kind = VecScopeAccessKind::Load;
-    Value source = vldus.getSource();
-    desc.base = source;
-    desc.addressSpace = getTypeAddressSpace(source.getType());
-    auto bytes = elementByteSize(source.getType());
-    auto count = vregElementCount(vldus.getResult().getType());
-    if (bytes && count)
-      desc.conservativeByteSize = *bytes * *count;
-    desc.byteOffset = AffineByteExpr();
-    return desc;
-  }
-
   if (auto vlds = dyn_cast<pto::VldsOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
     fillContiguous(desc, vlds.getSource(), vlds.getOffset(),
