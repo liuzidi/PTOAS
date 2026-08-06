@@ -31,6 +31,19 @@ module {
       outs(%neg : !pto.tile_buf<vec, 8x512xf32>)
     return
   }
+
+  func.func @local_elementwise_native_chunks() {
+    %src0 = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+    %src1 = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+    %sum = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+    %neg = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+
+    pto.tadd ins(%src0, %src1 : !pto.tile_buf<vec, 1x256xf32>, !pto.tile_buf<vec, 1x256xf32>)
+      outs(%sum : !pto.tile_buf<vec, 1x256xf32>)
+    pto.tneg ins(%sum : !pto.tile_buf<vec, 1x256xf32>)
+      outs(%neg : !pto.tile_buf<vec, 1x256xf32>)
+    return
+  }
 }
 
 // EXPAND: call {{.*}}__vmi_texpands
@@ -49,6 +62,14 @@ module {
 // INLINE: pto.vmi.vadds
 // INLINE: pto.vmi.vabs
 // INLINE: pto.vmi.vneg
+// INLINE-LABEL: func.func @local_elementwise_native_chunks
+// INLINE: scf.for
+// INLINE: !pto.vmi.vreg<64xf32>
+// INLINE-NOT: !pto.vmi.vreg<256xf32>
+// INLINE: pto.vmi.vadd
+// INLINE: scf.for
+// INLINE: pto.vmi.vneg
+// INLINE: return
 
 // FINAL-LABEL: func.func @local_elementwise_candidates
 // FINAL-NOT: pto.vmi.vbrc
@@ -61,3 +82,10 @@ module {
 // FINAL: pto.vadds
 // FINAL: pto.vabs
 // FINAL: pto.vneg
+// FINAL-LABEL: func.func @local_elementwise_native_chunks
+// FINAL-NOT: pto.vmi.
+// FINAL: scf.for
+// FINAL: pto.vadd
+// FINAL: scf.for
+// FINAL: pto.vneg
+// FINAL: return

@@ -188,6 +188,60 @@ def check_candidate_ir() -> tuple[str, str, str]:
     wide_texp_text = wide_texp.mlir_text()
     expect(wide_texp_text.count("scf.for") == 1, "wide texp should still contain one row loop")
     expect("!pto.vmi.vreg<128xf32>" in wide_texp_text, "wide texp should use a 128-lane logical vreg")
+
+    one_row = specialize_tadd(shape=(1, 256))
+    one_row.verify()
+    one_row_text = one_row.mlir_text()
+    expect(
+        one_row_text.count("scf.for") == 1,
+        "one-row multi-VL tadd should contain one flat chunk loop",
+    )
+    expect(
+        "arith.constant 256 : index" in one_row_text
+        and "arith.constant 64 : index" in one_row_text,
+        "one-row 256-lane tadd should step through native-sized offsets",
+    )
+    expect(
+        "!pto.vmi.vreg<64xf32>" in one_row_text,
+        "one-row multi-VL tadd should keep native f32 vregs",
+    )
+    expect(
+        "!pto.vmi.vreg<256xf32>" not in one_row_text,
+        "one-row multi-VL tadd should not materialize a wide logical vreg",
+    )
+
+    non_divisible = specialize_tadd(shape=(1, 96))
+    non_divisible.verify()
+    non_divisible_text = non_divisible.mlir_text()
+    expect(
+        "!pto.vmi.vreg<96xf32>" in non_divisible_text,
+        "non-divisible one-row widths should retain the logical-row path",
+    )
+    expect(
+        "arith.constant 1 : index" in non_divisible_text,
+        "non-divisible one-row widths should still iterate once by row",
+    )
+
+    one_row_fill_spec = TileSpec((1, 256), f32)
+    one_row_fill = vmi_texpands.specialize(
+        scalar=f32, dst=one_row_fill_spec
+    )
+    one_row_fill.verify()
+    one_row_fill_text = one_row_fill.mlir_text()
+    expect(
+        "arith.constant 256 : index" in one_row_fill_text
+        and "arith.constant 64 : index" in one_row_fill_text,
+        "one-row scalar fill should step through native-sized offsets",
+    )
+    expect(
+        "!pto.vmi.vreg<64xf32>" in one_row_fill_text,
+        "one-row scalar fill should broadcast one native f32 vreg",
+    )
+    expect(
+        one_row_fill_text.index("pto.vmi.vbrc")
+        < one_row_fill_text.index("scf.for"),
+        "one-row scalar fill should hoist its native broadcast",
+    )
     return tadd_text, wide_tadd_text, texp_text
 
 

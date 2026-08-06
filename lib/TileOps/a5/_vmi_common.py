@@ -819,7 +819,12 @@ def emit_elementwise_vmi(
     logical_lanes: int | None = None,
     allowed_dtypes: Sequence[ScalarType] = (f32,),
 ) -> None:
-    """Emit one flat logical-row loop for a standalone elementwise candidate."""
+    """Emit one flat principal loop for a standalone elementwise candidate.
+
+    Multi-row tiles retain the logical-row domain used by VMI fusion. A static
+    one-row f32 tile can use the equivalent native-chunk domain so physical
+    lowering keeps a compact hardware loop instead of unrolling a wide vreg.
+    """
 
     if not sources:
         raise ValueError("emit_elementwise_vmi requires at least one source tile")
@@ -831,6 +836,21 @@ def emit_elementwise_vmi(
         logical_lanes=logical_lanes,
         allowed_dtypes=allowed_dtypes,
     )
+
+    rows, cols = dst._spec.shape
+    native_lanes = dst.element_type.lanes
+    if (
+        logical_lanes == cols
+        and rows == 1
+        and dst.element_type == f32
+        and cols > native_lanes
+        and cols % native_lanes == 0
+    ):
+        _emit_elementwise_contiguous_blocks_vmi(
+            dst, sources, compute, block_lanes=native_lanes
+        )
+        return
+
     block_map = CanonicalBlockMap.from_tile(dst, logical_lanes=logical_lanes)
 
     _prepare_tile_access(*sources, dst)
@@ -840,6 +860,32 @@ def emit_elementwise_vmi(
         values = tuple(_vload(source, coordinate) for source in sources)
         result = compute(values, mask)
         _vstore(result, dst, coordinate, mask)
+
+
+def _emit_elementwise_contiguous_blocks_vmi(
+    dst: _TileProxy,
+    sources: Sequence[_TileProxy],
+    compute: ElementwiseCompute,
+    *,
+    block_lanes: int,
+) -> None:
+    """Keep a full one-row, multi-VL elementwise tile as one chunk loop."""
+
+    rows, cols = dst._spec.shape
+    if rows != 1 or cols % block_lanes != 0:
+        raise ValueError("contiguous VMI blocks require one exactly tiled row")
+
+    _prepare_tile_access(*sources, dst)
+    mask = _create_mask_lanes(
+        block_lanes, block_lanes, dst.element_type, trace=dst._trace
+    )
+    with for_(0, cols, step=block_lanes) as offset:
+        values = tuple(
+            _vload_linear(source, offset, lanes=block_lanes)
+            for source in sources
+        )
+        result = compute(values, mask)
+        _vstore_linear(result, dst, offset, mask)
 
 
 def emit_scalar_fill_vmi(
@@ -859,6 +905,26 @@ def emit_scalar_fill_vmi(
         )
     if dst._spec.b_layout != "row_major":
         raise ValueError("VMI scalar-fill candidates require row-major tiles")
+
+    rows, cols = dst._spec.shape
+    native_lanes = dst.element_type.lanes
+    if (
+        rows == 1
+        and dst.element_type == f32
+        and cols > native_lanes
+        and cols % native_lanes == 0
+    ):
+        _prepare_tile_access(dst)
+        mask = _create_mask_lanes(
+            native_lanes, native_lanes, dst.element_type, trace=dst._trace
+        )
+        fill = _wrap_vreg(
+            _vmi_builder.vbrc(scalar.value, size=native_lanes),
+            dst.element_type,
+        )
+        with for_(0, cols, step=native_lanes) as offset:
+            _vstore_linear(fill, dst, offset, mask)
+        return
 
     block_map = CanonicalBlockMap.from_tile(dst)
     _prepare_tile_access(dst)
