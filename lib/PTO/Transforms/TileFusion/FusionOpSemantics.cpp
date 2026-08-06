@@ -26,7 +26,8 @@ static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
              FusionComputeFamily::Elementwise)
       .Cases("tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins",
              FusionComputeFamily::Elementwise)
-      .Case("texp", FusionComputeFamily::Elementwise)
+      .Cases("texp", "tabs", "tneg", "trecip", "tsqrt", "trsqrt",
+             FusionComputeFamily::Elementwise)
       .Case("tmov", FusionComputeFamily::Elementwise)
       .Case("texpands", FusionComputeFamily::ScalarExpand)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv",

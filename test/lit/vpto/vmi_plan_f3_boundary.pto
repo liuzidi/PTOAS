@@ -68,6 +68,29 @@ module {
     return
   }
 
+  // Unary elementwise VMI candidates are compute nodes, not F3 boundaries.
+  // PLAN-LABEL: func.func @merge_through_unary_elementwise
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.tabs
+  // PLAN: pto.tneg
+  // PLAN: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_through_unary_elementwise() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %e = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tabs ins(%c : !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tneg ins(%d : !pto.tile_buf<vec, 64x64xf32>) outs(%e : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%e, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
   // PLAN-LABEL: func.func @merge_through_alloc_and_subview
   // PLAN: pto.fusion_region
   // PLAN: pto.tadd

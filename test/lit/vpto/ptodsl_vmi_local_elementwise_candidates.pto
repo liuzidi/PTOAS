@@ -7,7 +7,10 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-fusion-region-gen 2>&1 | FileCheck %s --check-prefix=REGION
 // RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-vmi-loop-fusion 2>&1 | FileCheck %s --check-prefix=FUSION
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-vmi-load-store-elision 2>&1 | FileCheck %s --check-prefix=ELIDE
 // RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL
 
 module {
@@ -57,6 +60,14 @@ module {
 // EXPAND: call {{.*}}__vmi_tneg
 // EXPAND-SAME: pto.tilelib.impl = "vmi"
 
+// REGION-LABEL: func.func @local_elementwise_native_chunks
+// REGION: pto.fusion_region
+// REGION: pto.tadd
+// REGION: pto.tneg
+// REGION: pto.yield() : () -> ()
+// REGION-NOT: pto.fusion_region
+// REGION: return
+
 // INLINE-LABEL: func.func @local_elementwise_candidates
 // INLINE: pto.vmi.vbrc
 // INLINE: pto.vmi.vadds
@@ -70,6 +81,21 @@ module {
 // INLINE: scf.for
 // INLINE: pto.vmi.vneg
 // INLINE: return
+
+// FUSION-LABEL: func.func @local_elementwise_native_chunks
+// FUSION: pto.fusion_region
+// FUSION: scf.for
+// FUSION: pto.vmi.vadd
+// FUSION-NOT: scf.for
+// FUSION: pto.vmi.vneg
+// FUSION-NOT: scf.for
+// FUSION: return
+
+// ELIDE-LABEL: func.func @local_elementwise_native_chunks
+// ELIDE: pto.fusion_region
+// ELIDE: %[[SUM:.*]] = pto.vmi.vadd
+// ELIDE: pto.vmi.vneg %[[SUM]]
+// ELIDE: return
 
 // FINAL-LABEL: func.func @local_elementwise_candidates
 // FINAL-NOT: pto.vmi.vbrc
@@ -86,6 +112,5 @@ module {
 // FINAL-NOT: pto.vmi.
 // FINAL: scf.for
 // FINAL: pto.vadd
-// FINAL: scf.for
 // FINAL: pto.vneg
 // FINAL: return
