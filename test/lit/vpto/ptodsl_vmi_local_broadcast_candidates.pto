@@ -50,8 +50,10 @@ module {
 // EXPAND-SAME: pto.tilelib.impl = "vmi"
 // EXPAND: call {{.*}}__vmi_tcolexpand
 // EXPAND-SAME: pto.tilelib.impl = "vmi"
-// EXPAND: call {{.*}}__vmi_trowexpandmul
-// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__template_trowexpandmul
+// EXPAND-SAME: pto.tilelib.impl = "ptodsl"
+// EXPAND-SAME: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
 
 // INLINE-LABEL: func.func @local_broadcast_candidates
 // INLINE: scf.for
