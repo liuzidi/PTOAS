@@ -2190,6 +2190,12 @@ LogicalResult VMISIToFPOp::verify() {
   if (!resultType.getElementType().isF32()) {
     return emitOpError("requires f32 result element type");
   }
+  if (auto roundingAttr = (*this)->getAttrOfType<StringAttr>("rounding")) {
+    StringRef rounding = roundingAttr.getValue();
+    if (rounding != "R" && rounding != "A" && rounding != "H" &&
+        rounding != "Z")
+      return emitOpError("rounding attr must be R, A, H, or Z");
+  }
   return success();
 }
 
@@ -4210,9 +4216,10 @@ LogicalResult VMICvtOp::verify() {
   // --- rounding ---
   if (auto roundingAttr = (*this)->getAttrOfType<StringAttr>("rounding")) {
     if (dir != CvtDirection::FpNarrow && dir != CvtDirection::FpToSi &&
-        dir != CvtDirection::FpToUi) {
+        dir != CvtDirection::FpToUi && dir != CvtDirection::SiToFp) {
       return emitOpError("'rounding' attribute is only valid for floating-point "
-                         "narrowing or floating-point-to-integer conversions");
+                         "narrowing, floating-point-to-integer, or "
+                         "signed-integer-to-floating-point conversions");
     }
     StringRef rnd = roundingAttr.getValue();
     if (rnd.size() != 1) {

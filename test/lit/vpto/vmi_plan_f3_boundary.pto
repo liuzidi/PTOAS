@@ -11,12 +11,10 @@
 // Replaces the deleted vmi_plan_boundary.pto / vmi_plan_inter_region_sync.pto
 // which targeted the removed PTOPlanVmiFusionRegion pass.
 //
-// The engine's group-break rule is F3 adjacency: a hard non-plannable op
-// (sync/DMA/treshape/unknown op) sitting between two plannable compute nodes
-// closes the current group. pto.alloc_tile and pto.subview are deliberate
-// exceptions: they are pure resource/view declarations which PTOOpScheduling
-// can move out of the compute span. See the CONTRACT comment in
-// FusionOpSemantics.cpp.
+// The engine's group-break rule is F3 adjacency across a real non-plannable
+// boundary. Structural alloc/view scaffold and pure scalar/index plumbing are
+// transparent; sync/DMA/calls and unknown PTO operations still close the
+// current group.
 //
 //   MERGE  - two adjacent pto.tadd, no op between them -> ONE fusion_region,
 //            empty yield (nothing escapes).
@@ -76,6 +74,7 @@ module {
     return
   }
 
+  // Allocations and subviews are transparent structural scaffold.
   // PLAN-LABEL: func.func @merge_through_alloc_tile
   // PLAN: pto.fusion_region
   // PLAN: pto.alloc_tile
@@ -115,6 +114,52 @@ module {
     return
   }
 
+  // Unary elementwise VMI candidates are compute nodes, not F3 boundaries.
+  // PLAN-LABEL: func.func @merge_through_unary_elementwise
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: pto.tabs
+  // PLAN: pto.tneg
+  // PLAN: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_through_unary_elementwise() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %e = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tabs ins(%c : !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tneg ins(%d : !pto.tile_buf<vec, 64x64xf32>) outs(%e : !pto.tile_buf<vec, 64x64xf32>)
+    pto.tadd ins(%e, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  // PLAN-LABEL: func.func @merge_through_alloc_and_subview
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN: arith.constant
+  // PLAN: pto.alloc_tile
+  // PLAN: pto.subview
+  // PLAN: pto.tmul
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_through_alloc_and_subview() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    %wide = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 8x256xf32>, !pto.tile_buf<vec, 8x256xf32>) outs(%wide : !pto.tile_buf<vec, 8x256xf32>)
+    %c0 = arith.constant 0 : index
+    %out = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+    %row = pto.subview %wide[%c0, %c0] sizes [1, 256]
+      : !pto.tile_buf<vec, 8x256xf32> -> !pto.tile_buf<vec, 1x256xf32>
+    pto.tmul ins(%row, %row : !pto.tile_buf<vec, 1x256xf32>, !pto.tile_buf<vec, 1x256xf32>) outs(%out : !pto.tile_buf<vec, 1x256xf32>)
+    return
+  }
+
   // A selected non-VMI fallback is a boundary even when its TileOp name is
   // otherwise a supported compute family.  Local fallback remains inside the
   // loose region but stops VMI loop fusion; hard fallback splits the region.
@@ -145,6 +190,27 @@ module {
     pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
     pto.tadd ins(%c, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>) {pto.vmi.fusion.boundary = "hard"}
     pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  // Structural scaffold must not hide a real hard boundary. The hard fallback
+  // stays outside both regions; the subview remains available to the second
+  // region without making the two compute runs one group.
+  // PLAN-LABEL: func.func @split_at_hard_fallback_with_scaffold
+  // PLAN-COUNT-2: pto.fusion_region
+  // PLAN: return
+  func.func @split_at_hard_fallback_with_scaffold() {
+    %c0 = arith.constant 0 : index
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 8x256xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 8x256xf32>, !pto.tile_buf<vec, 8x256xf32>) outs(%c : !pto.tile_buf<vec, 8x256xf32>)
+    pto.tadd ins(%c, %a : !pto.tile_buf<vec, 8x256xf32>, !pto.tile_buf<vec, 8x256xf32>) outs(%d : !pto.tile_buf<vec, 8x256xf32>) {pto.vmi.fusion.boundary = "hard"}
+    %row = pto.subview %d[%c0, %c0] sizes [1, 256]
+      : !pto.tile_buf<vec, 8x256xf32> -> !pto.tile_buf<vec, 1x256xf32>
+    %out = pto.alloc_tile : !pto.tile_buf<vec, 1x256xf32>
+    pto.tmul ins(%row, %row : !pto.tile_buf<vec, 1x256xf32>, !pto.tile_buf<vec, 1x256xf32>) outs(%out : !pto.tile_buf<vec, 1x256xf32>)
     return
   }
 }

@@ -559,6 +559,8 @@ static void appendOpContextAttrs(
     if (auto roundMode = getTCvtRoundModeString(tcvt)) {
       attrs.emplace_back("round_mode", *roundMode);
     }
+    attrs.emplace_back("sat_mode",
+                       stringifySaturationMode(tcvt.getSatMode()).str());
   }
   if (auto trandom = dyn_cast<pto::TRandomOp>(op)) {
     attrs.emplace_back("rounds", std::to_string(trandom.getRounds()));

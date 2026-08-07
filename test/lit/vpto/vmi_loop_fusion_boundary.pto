@@ -44,14 +44,14 @@ module {
         %row = pto.vmi.vload %ub[%off] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
         %acc = pto.vmi.vmax %arg5, %row, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
         scf.yield %acc : !pto.vmi.vreg<64xf32>
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       pto.vmi.vstore %f1, %ub[%c0], %mask : !pto.vmi.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<64xpred>
       %f2 = scf.for %arg4 = %c0 to %c128 step %c1 iter_args(%arg5 = %init) -> (!pto.vmi.vreg<64xf32>) {
         %off = arith.muli %arg4, %c64 : index
         %row = pto.vmi.vload %ub[%off] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
         %acc = pto.vmi.vmax %arg5, %row, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
         scf.yield %acc : !pto.vmi.vreg<64xf32>
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       pto.yield(%f2) : (!pto.vmi.vreg<64xf32>) -> ()
     } : !pto.vmi.vreg<64xf32>
     return
@@ -81,14 +81,14 @@ module {
         %row = pto.vmi.vload %ub[%off] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
         %acc = pto.vmi.vmax %arg5, %row, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
         scf.yield %acc : !pto.vmi.vreg<64xf32>
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       %hoist = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
       %f2 = scf.for %arg4 = %c0 to %c128 step %c1 iter_args(%arg5 = %init) -> (!pto.vmi.vreg<64xf32>) {
         %off = arith.muli %arg4, %c64 : index
         %row = pto.vmi.vload %ub[%off] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
         %acc = pto.vmi.vmax %arg5, %row, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
         scf.yield %acc : !pto.vmi.vreg<64xf32>
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       pto.yield(%f2) : (!pto.vmi.vreg<64xf32>) -> ()
     } : !pto.vmi.vreg<64xf32>
     return
@@ -109,9 +109,9 @@ module {
     %c128 = arith.constant 128 : index
     %result = pto.fusion_region {
       scf.for %i = %c0 to %c128 step %c1 {
-      } {pto.tilelib.candidate = "vmi_tsub", pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.tileop = "tsub"}
+      } {pto.tilelib.candidate = "vmi_tsub", pto.tilelib.impl = "vmi", pto.vmi.fusion.principal_loop, pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.tileop = "tsub"}
       scf.for %i = %c0 to %c128 step %c1 {
-      } {pto.tilelib.candidate = "vmi_texp", pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.tileop = "texp"}
+      } {pto.tilelib.candidate = "vmi_texp", pto.tilelib.impl = "vmi", pto.vmi.fusion.principal_loop, pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.tileop = "texp"}
       pto.yield(%c0) : (index) -> ()
     } : index
     return
@@ -128,8 +128,8 @@ module {
     %n1 = arith.addi %n, %c1 : index
     %n2 = arith.addi %n, %c2 : index
     %unused = pto.fusion_region {
-      scf.for %i = %c0 to %n1 step %c1 {}
-      scf.for %i = %c0 to %n2 step %c1 {}
+      scf.for %i = %c0 to %n1 step %c1 {} {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
+      scf.for %i = %c0 to %n2 step %c1 {} {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       pto.yield(%c0) : (index) -> ()
     } : index
     return
@@ -147,10 +147,10 @@ module {
     pto.fusion_region {
       %a = scf.for %i = %c0 to %c4 step %c1 iter_args(%x = %c0) -> index {
         scf.yield %i : index
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       %b = scf.for %i = %c0 to %c4 step %c1 iter_args(%x = %a) -> index {
         scf.yield %x : index
-      }
+      } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       pto.yield(%b) : (index) -> ()
     } : index
     return
@@ -169,8 +169,25 @@ module {
     %c1 = arith.constant 1 : index
     %c4 = arith.constant 4 : index
     %unused = pto.fusion_region {
-      scf.for %i = %c0 to %c4 step %c1 {}
+      scf.for %i = %c0 to %c4 step %c1 {} {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
       func.call @unknown_effect() : () -> ()
+      scf.for %i = %c0 to %c4 step %c1 {} {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
+      pto.yield(%c0) : (index) -> ()
+    } : index
+    return
+  }
+
+  // Provenance is mandatory: ordinary or hand-written loops in a loose
+  // fusion region are not assumed to be TileLib VMI principal loops.
+  // LOOP-LABEL: func.func @unmarked_loops_are_ignored
+  // LOOP-COUNT-2: scf.for
+  // LOOP-NOT: scf.for
+  func.func @unmarked_loops_are_ignored() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c4 = arith.constant 4 : index
+    %unused = pto.fusion_region {
+      scf.for %i = %c0 to %c4 step %c1 {}
       scf.for %i = %c0 to %c4 step %c1 {}
       pto.yield(%c0) : (index) -> ()
     } : index

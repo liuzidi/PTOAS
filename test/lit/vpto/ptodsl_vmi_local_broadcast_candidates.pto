@@ -1,0 +1,78 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi --implicit-check-not=pto.vecscope
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL
+
+module {
+  func.func @local_broadcast_candidates() {
+    %c0 = arith.constant 0 : index
+    %src = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %state = pto.alloc_tile : !pto.tile_buf<vec, 8x1xf32, blayout=col_major>
+    %column = pto.alloc_tile : !pto.tile_buf<vec, 1x512xf32>
+    %mul = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %div = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %expanded = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %storage = pto.alloc_tile : !pto.tile_buf<vec, 8x512xf32>
+    %storage_subregion = pto.subview %storage[%c0, %c0] sizes [8, 448]
+      : !pto.tile_buf<vec, 8x512xf32> -> !pto.tile_buf<vec, 8x448xf32, valid=8x448>
+    %subregion_mul = pto.alloc_tile : !pto.tile_buf<vec, 8x448xf32>
+
+    pto.trowexpandmul
+      ins(%src, %state : !pto.tile_buf<vec, 8x512xf32>,
+                         !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
+      outs(%mul : !pto.tile_buf<vec, 8x512xf32>)
+    pto.trowexpanddiv
+      ins(%mul, %state : !pto.tile_buf<vec, 8x512xf32>,
+                         !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
+      outs(%div : !pto.tile_buf<vec, 8x512xf32>)
+    pto.tcolexpand
+      ins(%column : !pto.tile_buf<vec, 1x512xf32>)
+      outs(%expanded : !pto.tile_buf<vec, 8x512xf32>)
+    pto.trowexpandmul
+      ins(%storage_subregion, %state
+          : !pto.tile_buf<vec, 8x448xf32, valid=8x448>,
+            !pto.tile_buf<vec, 8x1xf32, blayout=col_major>)
+      outs(%subregion_mul : !pto.tile_buf<vec, 8x448xf32>)
+    return
+  }
+}
+
+// EXPAND: call {{.*}}__vmi_trowexpandmul
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_trowexpanddiv
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__vmi_tcolexpand
+// EXPAND-SAME: pto.tilelib.impl = "vmi"
+// EXPAND: call {{.*}}__template_trowexpandmul
+// EXPAND-SAME: pto.tilelib.impl = "ptodsl"
+// EXPAND-SAME: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+
+// INLINE-LABEL: func.func @local_broadcast_candidates
+// INLINE: scf.for
+// INLINE: pto.vmi.vbrc
+// INLINE: pto.vmi.vmul
+// INLINE: scf.for
+// INLINE: pto.vmi.vbrc
+// INLINE: pto.vmi.vdiv
+// INLINE: pto.vmi.vload
+// INLINE: scf.for
+// INLINE: pto.vmi.vstore
+
+// FINAL-LABEL: func.func @local_broadcast_candidates
+// FINAL-NOT: pto.vmi.vload
+// FINAL-NOT: pto.vmi.vbrc
+// FINAL-NOT: pto.vmi.vmul
+// FINAL-NOT: pto.vmi.vdiv
+// FINAL-NOT: pto.vmi.vstore
+// FINAL: pto.vdup
+// FINAL: pto.vmul
+// FINAL: pto.vdiv
+// FINAL: pto.vsts

@@ -606,7 +606,8 @@ def VMIFPToUIOp : VMI_Op<"fptoui", [Pure]> {
 
 def VMISIToFPOp : VMI_Op<"sitofp", [Pure]> {
   let summary = "VMI signed integer to floating-point elementwise conversion";
-  let arguments = (ins VMI_VRegTypeConstraint:$source);
+  let arguments = (ins VMI_VRegTypeConstraint:$source,
+                   OptionalAttr<StrAttr>:$rounding);
   let results = (outs VMI_VRegTypeConstraint:$result);
   let hasVerifier = 1;
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
@@ -1393,12 +1394,11 @@ def VMICvtOp : VMI_Op<"vcvt", [Pure]> {
     - int → int, |dst| < |src|: integer truncation         (replaces trunci)
 
     Attributes:
-    - `rounding`: rounding mode for fp narrowing and fp-to-integer
-      conversions. Narrowing accepts R=nearest-even, A=away-from-zero,
-      H=half-up, Z=toward-zero; fp-to-integer accepts the hardware modes
-      R/A/F/C/Z.
-    - `saturate`: "SAT" or "NOSAT"; required for fp narrowing, integer
-      narrowing, and fp-to-int conversion.
+    - `rounding`: physical rounding mode (R/A/H/Z) for fp narrowing,
+      fp-to-integer, and signed-int-to-fp conversions. Narrowing accepts
+      R/A/H/Z; fp-to-integer accepts R/A/F/C/Z.
+    - `saturate`: "SAT" or "NOSAT"; required where the conversion contract
+      permits or requires saturation.
     - `pmode`: predication mode ("merge" | "zero").
 
     Signless integer element types use unsigned semantics. Thus fp→signless

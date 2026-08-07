@@ -31,6 +31,7 @@ from ._vmi_common import (  # noqa: E402
     target="a5",
     op="trowmax",
     name="vmi_trowmax",
+    requires_full_physical_row=False,
     dtypes=(("f32", "f32", "f32"),),
     constraints=(row_reduce_vmi_constraint,),
 )

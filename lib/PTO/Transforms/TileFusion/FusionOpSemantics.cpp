@@ -8,6 +8,9 @@
 
 #include "PTO/Transforms/TileFusion/FusionOpSemantics.h"
 
+#include "mlir/Interfaces/CallInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 
@@ -23,7 +26,8 @@ static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
              FusionComputeFamily::Elementwise)
       .Cases("tadds", "tsubs", "tmuls", "tdivs", "tmaxs", "tmins",
              FusionComputeFamily::Elementwise)
-      .Case("texp", FusionComputeFamily::Elementwise)
+      .Cases("texp", "tabs", "tneg", "trecip", "tsqrt", "trsqrt",
+             FusionComputeFamily::Elementwise)
       .Case("tmov", FusionComputeFamily::Elementwise)
       .Case("texpands", FusionComputeFamily::ScalarExpand)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv",
@@ -39,6 +43,35 @@ static FusionComputeFamily getFusionComputeFamily(StringRef opName) {
 
 bool isSupportedPreFusionComputeOp(StringRef opName) {
   return getFusionComputeFamily(opName) != FusionComputeFamily::Unknown;
+}
+
+bool isFusionTransparentScaffold(Operation *op) {
+  if (!op || op->hasTrait<OpTrait::IsTerminator>() ||
+      !op->getRegions().empty() || isa<CallOpInterface>(op))
+    return false;
+
+  // These PTO operations only construct logical storage/view descriptors.
+  // Keeping them in a loose region is required to preserve SSA dominance
+  // when a later compute consumes the descriptor they define.
+  if (isa<pto::AllocTileOp, pto::SubViewOp, pto::MakeTensorViewOp,
+          pto::PartitionViewOp>(op))
+    return true;
+
+  // Scalar/index plumbing from other dialects is transparent when it is
+  // effect-free. Unknown PTO operations remain conservative boundaries: a
+  // new tile/data-movement op must be classified explicitly above or as a
+  // supported compute family.
+  if (op->getDialect() == op->getContext()->getLoadedDialect<pto::PTODialect>())
+    return false;
+  if (!isMemoryEffectFree(op))
+    return false;
+
+  // Keep this generic allowance narrow: it exists for arith/index plumbing,
+  // not for moving arbitrary tensor/memref transformations into a region.
+  return llvm::all_of(op->getOperandTypes(),
+                      [](Type type) { return type.isIntOrIndexOrFloat(); }) &&
+         llvm::all_of(op->getResultTypes(),
+                      [](Type type) { return type.isIntOrIndexOrFloat(); });
 }
 
 static bool isTileFusionTileValue(Value value) {

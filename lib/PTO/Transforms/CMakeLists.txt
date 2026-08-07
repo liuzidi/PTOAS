@@ -72,6 +72,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOOutlineSIMTSections.cpp
   PTOInferVPTOVecScope.cpp
   TileShapeStateAnalysis.cpp
+  VmiMemoryLocation.cpp
 
   VecScopeMemBar/VecScopeMemoryFootprint.cpp
   VecScopeMemBar/VecScopeMemBarAnalysis.cpp

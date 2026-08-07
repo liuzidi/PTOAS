@@ -25,6 +25,7 @@ from ._vmi_common import (  # noqa: E402
     target="a5",
     op="trowsum",
     name="vmi_trowsum",
+    requires_full_physical_row=False,
     dtypes=(("f32", "f32", "f32"),),
     constraints=(row_reduce_vmi_constraint,),
 )

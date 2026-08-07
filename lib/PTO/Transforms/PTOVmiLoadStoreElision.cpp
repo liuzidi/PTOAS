@@ -111,6 +111,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/VmiMemoryLocation.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -132,6 +133,15 @@ using namespace mlir;
 using namespace mlir::pto;
 
 namespace {
+
+static bool isTileLibVmiPrincipalLoop(scf::ForOp loop) {
+  auto impl = loop->getAttrOfType<StringAttr>("pto.tilelib.impl");
+  auto source = loop->getAttrOfType<StringAttr>("pto.vmi.fusion.source");
+  return impl && impl.getValue() == "vmi" && source &&
+         source.getValue() == "tilelib" &&
+         loop->hasAttr("pto.vmi.fusion.principal_loop") &&
+         !loop->hasAttr("pto.vmi.fusion.boundary");
+}
 
 // Trace a value through the vmi UB alias chain to its canonical root: a
 // pto.castptr (memref->ptr) whose memref is a pto.pointer_cast of a constant
@@ -301,11 +311,14 @@ struct BaseIdentity {
   Value base;          // canonical base (pointer_cast result), or null if untrackable
   AffineAddr affine;   // affine decomposition (isAffine==false => untrackable)
   bool isConstantAddr; // resolved to a bare constant pointer_cast
+  std::optional<pto::VmiStorageRoot> storageRoot;
 };
 
 // Resolve a vload/vstore base to a BaseIdentity. Returns an untrackable identity
 // (base==null) for block args / untraceable / non-affine bases.
 static BaseIdentity resolveBaseIdentity(Value base) {
+  if (auto root = pto::resolveVmiStorageRoot(base))
+    return {base, {}, true, root};
   Value canon = getCanonicalTrackedValue(base);
   if (!canon)
     return {};
@@ -318,7 +331,7 @@ static BaseIdentity resolveBaseIdentity(Value base) {
     AffineAddr aff = parseAffineAddr(addr);
     if (!aff.isAffine)
       return {};
-    return {canon, aff, aff.iv == nullptr};
+    return {canon, aff, aff.iv == nullptr, std::nullopt};
   }
   return {};
 }
@@ -386,6 +399,8 @@ static bool areEquivalentMaskValues(Value lhs, Value rhs) {
 static bool basesMustAlias(const BaseIdentity &lhs, const BaseIdentity &rhs) {
   if (!isTrackableIdentity(lhs) || !isTrackableIdentity(rhs))
     return false;
+  if (lhs.storageRoot && rhs.storageRoot)
+    return *lhs.storageRoot == *rhs.storageRoot;
   if (areEquivalentValues(lhs.base, rhs.base))
     return true;
   if (lhs.affine.isAffine && rhs.affine.isAffine)
@@ -410,6 +425,8 @@ static bool basesMustAlias(const BaseIdentity &lhs, const BaseIdentity &rhs) {
 static bool basesMayAlias(const BaseIdentity &lhs, const BaseIdentity &rhs) {
   if (!isTrackableIdentity(lhs) || !isTrackableIdentity(rhs))
     return true; // unknown may alias anything
+  if (lhs.storageRoot && rhs.storageRoot)
+    return pto::mayAliasVmiStorageRoot(*lhs.storageRoot, *rhs.storageRoot);
   // Both bare constants: alias iff the same address. This must be checked
   // first, because a bare constant carries isAffine==true (iv==null) and would
   // otherwise fall through to the affine-sweep rule below.
@@ -759,6 +776,7 @@ static bool elideOpRange(OpRange ops) {
   auto sameLoc = [&](const ContentEntry &e, Value base, Value offset) {
     return basesMustAlias(resolveBaseIdentity(e.base),
                           resolveBaseIdentity(base)) &&
+           e.base.getType() == base.getType() &&
            areEquivalentValues(e.offset, offset);
   };
 
@@ -827,6 +845,8 @@ static bool elideOpRange(OpRange ops) {
           continue;
         if (!sameLoc(e, base, offset))
           continue;
+        if (e.sourceValue.getType() != load->getResult(0).getType())
+          continue;
         // Need e.lanes to fully cover readLanes.
         if (!e.lanes.contains(readLanes))
           continue;
@@ -885,7 +905,8 @@ static bool elideOpRange(OpRange ops) {
         continue;
       }
       Value mask = store.getMask().empty() ? Value() : store.getMask().front();
-      LaneRange writeLanes = resolveMaskLanes(mask);
+      LaneRange sourceLanes = resolveMaskLanes(mask);
+      LaneRange writeLanes = sourceLanes;
       // pmode: "merge" => only writeLanes written; "zero"(default)/absent =>
       // whole region defined (inactive lanes store 0 -> treat as full cover).
       bool pmodeMerge = false;
@@ -927,7 +948,7 @@ static bool elideOpRange(OpRange ops) {
         // erases it, but do NOT let it invalidate the earlier store: it wrote
         // the same content, so the earlier store stays the canonical forward
         // target / content source.
-        entries.push_back({store, base, offset, writeLanes, false, curValue,
+        entries.push_back({store, base, offset, sourceLanes, false, curValue,
                            mask, pmode, -1, /*eraseMark=*/true, false,
                            /*stale=*/true,
                            /*nonErasable=*/false});
@@ -961,6 +982,10 @@ static bool elideOpRange(OpRange ops) {
           e.stale = true;
           continue;
         }
+        if (e.sourceValue.getType() != curValue.getType()) {
+          e.stale = true;
+          continue;
+        }
         if (writeLanes.contains(e.lanes)) {
           if (!e.isLoad && !e.escapeMark && !e.nonErasable) {
             e.eraseMark = true;
@@ -971,7 +996,10 @@ static bool elideOpRange(OpRange ops) {
           e.stale = true;
         }
       }
-      entries.push_back({store, base, offset, writeLanes, false,
+      // `writeLanes` describes memory invalidation.  The source SSA value is
+      // forwardable only on active lanes: zero-pmode inactive lanes are
+      // materialized as zero in memory and need not be zero in the source vreg.
+      entries.push_back({store, base, offset, sourceLanes, false,
                          store.getValues().front(), mask, pmode, -1, false,
                          false, false, false});
       continue;
@@ -1051,7 +1079,8 @@ static bool elideInRegion(pto::FusionRegionOp region) {
   changed |= elideOpRange(body.without_terminator());
   // Each nested scf.for body.
   region.getBody().walk([&](scf::ForOp loop) {
-    if (loop->getParentOfType<pto::FusionRegionOp>() == region)
+    if (loop->getParentOfType<pto::FusionRegionOp>() == region &&
+        isTileLibVmiPrincipalLoop(loop))
       changed |= elideOpRange(loop.getBody()->without_terminator());
     return WalkResult::advance();
   });

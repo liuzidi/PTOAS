@@ -31,9 +31,10 @@
 
 // FINAL-LABEL: func.func @flash_attention_softmax_block
 // FINAL: pto.vecscope
-// FINAL: pto.vdup
+// FINAL: pto.vmuls
+// FINAL: pto.vmaxs
+// FINAL: pto.vmins
 // FINAL: pto.vmul
-// FINAL: pto.vmax
-// FINAL: pto.vmin
 // FINAL: pto.vadd
+// FINAL: pto.vadds
 // FINAL: pto.vdiv
