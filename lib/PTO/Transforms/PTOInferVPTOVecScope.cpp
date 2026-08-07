@@ -110,9 +110,31 @@ static bool isCloneableScalarBroadcastProducer(Operation *op) {
   return vdup && !isa<pto::VRegType>(vdup.getInput().getType());
 }
 
+static bool isGatherIndexConsumer(Operation *op) {
+  return isa<pto::Vgather2Op, pto::Vgather2BcOp>(op);
+}
+
+static bool hasOnlyGatherIndexUsers(Operation *op) {
+  for (Value result : op->getResults()) {
+    for (Operation *user : result.getUsers()) {
+      if (isGatherIndexConsumer(user))
+        continue;
+      auto vand = dyn_cast<pto::VandOp>(user);
+      if (!vand || !llvm::all_of(vand->getUsers(), isGatherIndexConsumer))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool isCloneableGatherIndexProducer(Operation *op) {
+  return isa<pto::VciOp, pto::VandOp>(op) && hasOnlyGatherIndexUsers(op);
+}
+
 static bool isCloneableSharedProducer(Operation *op) {
   return isCloneableMaskProducer(op) ||
-         isCloneableScalarBroadcastProducer(op);
+         isCloneableScalarBroadcastProducer(op) ||
+         isCloneableGatherIndexProducer(op);
 }
 
 static bool isVectorScopeBoundaryOperation(Operation *op) {

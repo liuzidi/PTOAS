@@ -33,6 +33,8 @@ from ._vmi_common import (  # noqa: E402
     name="vmi_trowexpandmul",
     dtypes=(("f32", "f32", "f32"),),
     constraints=(row_expand_binary_vmi_constraint,),
+    min_row_bytes=32,
+    tags=("supports_partial_valid_shape",),
 )
 def vmi_trowexpandmul(src: pto.Tile, row_values: pto.Tile, dst: pto.Tile):
     emit_row_expand_binary_vmi(src, row_values, dst, "mul")

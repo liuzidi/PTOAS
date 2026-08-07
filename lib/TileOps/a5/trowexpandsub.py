@@ -23,6 +23,7 @@ template_trowexpandsub = register_row_expand_binary(
 from ._vmi_common import (  # noqa: E402
     canonical_vmi_template,
     emit_row_expand_sub_vmi,
+    row_expand_binary_vmi_constraint,
 )
 
 
@@ -31,6 +32,9 @@ from ._vmi_common import (  # noqa: E402
     op="trowexpandsub",
     name="vmi_trowexpandsub",
     dtypes=(("f32", "f32", "f32"),),
+    constraints=(row_expand_binary_vmi_constraint,),
+    min_row_bytes=32,
+    tags=("supports_partial_valid_shape",),
 )
 def vmi_trowexpandsub(src: pto.Tile, row_values: pto.Tile, dst: pto.Tile):
     emit_row_expand_sub_vmi(src, row_values, dst)
