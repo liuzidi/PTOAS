@@ -1877,6 +1877,7 @@ from ._vmi_common import (  # noqa: E402
         "sat_mode": ("ON", "OFF"),
     },
     constraints=(convert_vmi_constraint,),
+    min_row_bytes=128,
 )
 def vmi_tcvt(src: pto.Tile, dst: pto.Tile):
     emit_convert_vmi(src, dst)

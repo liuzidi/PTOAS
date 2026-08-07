@@ -576,8 +576,11 @@ _DTYPE_BYTEWIDTH = {
 }
 
 
-def full_physical_row_vmi_constraint(**metadata) -> bool:
-    """Reject sub-VL rows until unified masks survive physicalization."""
+def _physical_row_vmi_constraint(min_row_bytes: int, **metadata) -> bool:
+    """Check the minimum byte width needed by a VMI logical row."""
+
+    if not isinstance(min_row_bytes, int) or min_row_bytes <= 0:
+        raise ValueError("VMI row byte constraint must be a positive integer")
 
     row_bytes = []
     for name, shape in metadata.items():
@@ -590,7 +593,19 @@ def full_physical_row_vmi_constraint(**metadata) -> bool:
         bytewidth = _DTYPE_BYTEWIDTH.get(dtype)
         if isinstance(cols, int) and cols > 0 and bytewidth is not None:
             row_bytes.append(cols * bytewidth)
-    return not row_bytes or max(row_bytes) >= 256
+    return not row_bytes or max(row_bytes) >= min_row_bytes
+
+
+def full_physical_row_vmi_constraint(**metadata) -> bool:
+    """Require at least one complete 256-byte physical row."""
+
+    return _physical_row_vmi_constraint(256, **metadata)
+
+
+def min_128b_row_vmi_constraint(**metadata) -> bool:
+    """Allow statically full rows with at least 128 bytes of data."""
+
+    return _physical_row_vmi_constraint(128, **metadata)
 
 
 def _is_safe_static_row_prefix(
@@ -741,8 +756,7 @@ def convert_vmi_constraint(
         and cols > 0
         and src_bytewidth is not None
         and dst_bytewidth is not None
-        and cols * src_bytewidth >= 256
-        and cols * dst_bytewidth >= 256
+        and max(cols * src_bytewidth, cols * dst_bytewidth) >= 128
         and allowed_round_modes is not None
         and round_mode in allowed_round_modes
         and sat_mode in ("ON", "OFF")
@@ -784,6 +798,7 @@ def canonical_vmi_template(
     constraints: tuple[object, ...] | list[object] = (),
     tags: tuple[str, ...] | list[str] = (),
     requires_full_physical_row: bool = True,
+    min_row_bytes: int = 256,
 ):
     """Register one canonical VMI implementation in this provider module."""
 
@@ -791,8 +806,16 @@ def canonical_vmi_template(
         qualified_op = _qualify_op_name(op)
         effective_constraints = tuple(constraints)
         if requires_full_physical_row:
+            if min_row_bytes == 256:
+                row_constraint = full_physical_row_vmi_constraint
+            elif min_row_bytes == 128:
+                row_constraint = min_128b_row_vmi_constraint
+            else:
+                raise ValueError(
+                    "canonical VMI templates support only 128B or 256B row constraints"
+                )
             effective_constraints = (
-                full_physical_row_vmi_constraint,
+                row_constraint,
                 *effective_constraints,
             )
         descriptor = _trace_tile_template(

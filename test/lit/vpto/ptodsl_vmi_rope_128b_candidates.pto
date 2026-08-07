@@ -1,0 +1,73 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software; you can redistribute it and/or modify it under the terms of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - 2>&1 | FileCheck %s --check-prefix=FINAL
+
+module {
+  func.func @rope_128b_full(%scalar: f32) {
+    %src = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32>
+    %state = pto.alloc_tile : !pto.tile_buf<vec, 1x32xf32>
+    %mul = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32>
+    %scale = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32>
+    %sub = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32>
+    %add = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32>
+    %out = pto.alloc_tile : !pto.tile_buf<vec, 64x32xbf16>
+
+    pto.tcolexpandmul ins(%src, %state : !pto.tile_buf<vec, 64x32xf32>, !pto.tile_buf<vec, 1x32xf32>)
+      outs(%mul : !pto.tile_buf<vec, 64x32xf32>)
+    pto.tmuls ins(%mul, %scalar : !pto.tile_buf<vec, 64x32xf32>, f32)
+      outs(%scale : !pto.tile_buf<vec, 64x32xf32>)
+    pto.tsub ins(%scale, %mul : !pto.tile_buf<vec, 64x32xf32>, !pto.tile_buf<vec, 64x32xf32>)
+      outs(%sub : !pto.tile_buf<vec, 64x32xf32>)
+    pto.tadds ins(%sub, %scalar : !pto.tile_buf<vec, 64x32xf32>, f32)
+      outs(%add : !pto.tile_buf<vec, 64x32xf32>)
+    pto.tmul ins(%add, %sub : !pto.tile_buf<vec, 64x32xf32>, !pto.tile_buf<vec, 64x32xf32>)
+      outs(%scale : !pto.tile_buf<vec, 64x32xf32>)
+    pto.tcvt ins(%scale {rmode = #pto<round_mode RINT>} : !pto.tile_buf<vec, 64x32xf32>)
+      outs(%out : !pto.tile_buf<vec, 64x32xbf16>)
+    return
+  }
+
+  func.func @rope_128b_reject_tail(%c64: index, %c32: index) {
+    %src = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32, valid=63x32>
+    %dst = pto.alloc_tile : !pto.tile_buf<vec, 64x32xf32, valid=63x32>
+    pto.tadd ins(%src, %src : !pto.tile_buf<vec, 64x32xf32, valid=63x32>, !pto.tile_buf<vec, 64x32xf32, valid=63x32>)
+      outs(%dst : !pto.tile_buf<vec, 64x32xf32, valid=63x32>)
+    return
+  }
+
+  func.func @rope_128b_reject_dynamic(%valid_row: index, %valid_col: index) {
+    %src = pto.alloc_tile valid_row = %valid_row valid_col = %valid_col : !pto.tile_buf<vec, 64x32xf32, valid=?x?>
+    %dst = pto.alloc_tile valid_row = %valid_row valid_col = %valid_col : !pto.tile_buf<vec, 64x32xf32, valid=?x?>
+    pto.tadd ins(%src, %src : !pto.tile_buf<vec, 64x32xf32, valid=?x?>, !pto.tile_buf<vec, 64x32xf32, valid=?x?>)
+      outs(%dst : !pto.tile_buf<vec, 64x32xf32, valid=?x?>)
+    return
+  }
+}
+
+// EXPAND-LABEL: func.func @rope_128b_full
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tcolexpandmul"
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tmuls"
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tsub"
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tadds"
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tmul"
+// EXPAND-DAG: pto.tilelib.candidate = "vmi_tcvt"
+// EXPAND-LABEL: func.func @rope_128b_reject_tail
+// EXPAND: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND-LABEL: func.func @rope_128b_reject_dynamic
+// EXPAND: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+
+// FINAL-LABEL: func.func @rope_128b_full
+// FINAL-NOT: pto.vmi.v
+// FINAL: pto.vcvt
+// FINAL-NOT: pto.vmi.v
+// FINAL: return
+// FINAL-NOT: pto.vmi.v

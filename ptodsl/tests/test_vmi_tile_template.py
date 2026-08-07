@@ -39,9 +39,11 @@ from ptodsl.tilelib.constraints import evaluate_candidate
 from ptodsl.vmi_tilelib import (
     VMI_TILELIB_REGISTRY,
     vmi_tadd_block64,
+    vmi_tadds,
     vmi_tcolmax,
     vmi_tcolsum,
     vmi_tcolexpand,
+    vmi_tcolexpandmul,
     vmi_tcolexpandsub,
     vmi_tcvt,
     vmi_tabs,
@@ -51,10 +53,13 @@ from ptodsl.vmi_tilelib import (
     vmi_texpands_f16,
     vmi_texpands_i32,
     vmi_tneg,
+    vmi_tmul,
+    vmi_tmuls,
     vmi_trowexpanddiv,
     vmi_trowexpandmul,
     vmi_trowmax,
     vmi_trowsum,
+    vmi_tsub,
     vmi_tsubs,
 )
 from ptodsl.vmi_tilelib_helper import instantiate_candidate
@@ -63,6 +68,7 @@ from ptodsl.vmi_tilelib_helper import instantiate_candidate
 TILE_SHAPE = (32, 64)
 WIDE_TILE_SHAPE = (32, 128)
 NARROW_TILE_SHAPE = (1, 32)
+ROPE_TILE_SHAPE = (64, 32)
 
 
 @tile_template(op="tadd", name="legacy_vpto_tadd")
@@ -243,6 +249,97 @@ def check_candidate_ir() -> tuple[str, str, str]:
         "one-row scalar fill should hoist its native broadcast",
     )
     return tadd_text, wide_tadd_text, texp_text
+
+
+def check_rope_128b_candidates() -> dict[str, tuple[str, str]]:
+    """DSv4 RoPE's 32xf32 rows remain one logical VMI row iteration."""
+
+    wide = TileSpec(ROPE_TILE_SHAPE, f32)
+    column = TileSpec((1, ROPE_TILE_SHAPE[1]), f32)
+    scalar_candidates = (
+        ("vmi_tmuls_rope128", vmi_tmuls.specialize(src=wide, scale=f32, dst=wide), "pto.vmuls"),
+        ("vmi_tadds_rope128", vmi_tadds.specialize(src=wide, scalar=f32, dst=wide), "pto.vadds"),
+    )
+    binary_candidates = (
+        ("vmi_tsub_rope128", vmi_tsub.specialize(src0=wide, src1=wide, dst=wide), "pto.vsub"),
+        ("vmi_tmul_rope128", vmi_tmul.specialize(src0=wide, src1=wide, dst=wide), "pto.vmul"),
+        ("vmi_tadd_rope128", vmi_tadd_block64.specialize(src0=wide, src1=wide, dst=wide), "pto.vadd"),
+    )
+    candidates = (*scalar_candidates, *binary_candidates)
+    lowering_cases = {}
+    for name, artifact, expected_op in candidates:
+        artifact.verify()
+        text = artifact.mlir_text()
+        expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+        expect(
+            "arith.constant 64 : index" in text,
+            f"{name} should iterate over the 64-row domain",
+        )
+        expect(
+            "!pto.vmi.vreg<32xf32>" in text,
+            f"{name} should preserve one 32-lane logical row",
+        )
+        lowering_cases[name] = (text, expected_op)
+
+    fill = vmi_texpands.specialize(scalar=f32, dst=wide)
+    fill.verify()
+    fill_text = fill.mlir_text()
+    expect(fill_text.count("scf.for") == 1, "RoPE texpands should contain one row loop")
+    expect("!pto.vmi.vreg<32xf32>" in fill_text, "RoPE texpands should use 32 lanes")
+    lowering_cases["vmi_texpands_rope128"] = (fill_text, "pto.vdup")
+
+    col_mul = vmi_tcolexpandmul.specialize(src=wide, col_values=column, dst=wide)
+    col_mul.verify()
+    col_mul_text = col_mul.mlir_text()
+    expect(col_mul_text.count("scf.for") == 1, "RoPE tcolexpandmul should contain one row loop")
+    expect(
+        col_mul_text[: col_mul_text.index("scf.for")].count("pto.vmi.vload") == 1,
+        "RoPE tcolexpandmul should hoist its column vector load",
+    )
+    expect("!pto.vmi.vreg<32xf32>" in col_mul_text, "RoPE column multiply should use 32 lanes")
+    lowering_cases["vmi_tcolexpandmul_rope128"] = (col_mul_text, "pto.vmul")
+
+    i32_tile = TileSpec(ROPE_TILE_SHAPE, i32)
+    bf16_tile = TileSpec(ROPE_TILE_SHAPE, bf16)
+    conversions = (
+        (
+            "vmi_tcvt_i32_f32_rope128",
+            vmi_tcvt.specialize(
+                src=i32_tile,
+                dst=wide,
+                context_attrs={"round_mode": "ROUND", "sat_mode": "OFF"},
+            ),
+        ),
+        (
+            "vmi_tcvt_f32_i32_rope128",
+            vmi_tcvt.specialize(
+                src=wide,
+                dst=i32_tile,
+                context_attrs={"round_mode": "TRUNC", "sat_mode": "OFF"},
+            ),
+        ),
+        (
+            "vmi_tcvt_f32_bf16_rope128",
+            vmi_tcvt.specialize(
+                src=wide,
+                dst=bf16_tile,
+                context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
+            ),
+        ),
+    )
+    for name, artifact in conversions:
+        artifact.verify()
+        text = artifact.mlir_text()
+        expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
+        expect("pto.vmi.vcvt" in text, f"{name} should emit a VMI conversion")
+        expect("vreg<32x" in text, f"{name} should preserve 32 logical lanes")
+        if name == "vmi_tcvt_f32_i32_rope128":
+            expect(
+                'saturate = "NOSAT"' in text,
+                "RoPE f32->i32 should preserve the TileOp default saturation mode",
+            )
+        lowering_cases[name] = (text, "pto.vcvt")
+    return lowering_cases
 
 
 def check_local_elementwise_candidates() -> dict[str, tuple[str, str]]:
@@ -552,16 +649,16 @@ def check_provider_helper() -> None:
     )
     expect("pto.vmi.vmul" in tmul_artifact.mlir_text(), "tmul should lower to VMI")
 
-    narrow_tile_spec = {
+    below_min_row_spec = {
         **raw_tile_spec,
-        "shape": list(NARROW_TILE_SHAPE),
-        "valid_shape": list(NARROW_TILE_SHAPE),
+        "shape": [1, 16],
+        "valid_shape": [1, 16],
     }
     expect_raises(
         lambda: instantiate_candidate(
             target="a5",
             op_name="pto.tadd",
-            operand_specs=[narrow_tile_spec, narrow_tile_spec, narrow_tile_spec],
+            operand_specs=[below_min_row_spec, below_min_row_spec, below_min_row_spec],
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={},
         ),
@@ -1076,17 +1173,35 @@ def check_tcvt_bf16_candidate() -> None:
     expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
     expect("vreg<128xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
 
-    subvl_src_spec = {
+    half_vl_src_spec = {
         **raw_tile_spec,
         "shape": [32, 64],
         "valid_shape": [32, 64],
     }
-    subvl_bf16_dst_spec = {**subvl_src_spec, "dtype": "bf16"}
+    half_vl_bf16_dst_spec = {**half_vl_src_spec, "dtype": "bf16"}
+    half_vl_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcvt",
+        operand_specs=[half_vl_src_spec, half_vl_bf16_dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
+    ).mlir_text()
+    expect(
+        "!pto.vmi.vreg<64xbf16>" in half_vl_text,
+        "a 256B f32 row may narrow to a 128B bf16 row",
+    )
+
+    below_min_src_spec = {
+        **raw_tile_spec,
+        "shape": [32, 16],
+        "valid_shape": [32, 16],
+    }
+    below_min_bf16_dst_spec = {**below_min_src_spec, "dtype": "bf16"}
     expect_raises(
         lambda: instantiate_candidate(
             target="a5",
             op_name="pto.tcvt",
-            operand_specs=[subvl_src_spec, subvl_bf16_dst_spec],
+            operand_specs=[below_min_src_spec, below_min_bf16_dst_spec],
             provider_module="ptodsl.vmi_tilelib",
             context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
         ),
@@ -1390,6 +1505,8 @@ def main() -> None:
     check_vmi_to_vpto_lowering("vmi_tadd_block128", wide_tadd_text, "pto.vadd")
     check_vmi_to_vpto_lowering("vmi_texp_block64", texp_text, "pto.vexp")
     for name, (text, expected_op) in check_local_elementwise_candidates().items():
+        check_vmi_to_vpto_lowering(name, text, expected_op)
+    for name, (text, expected_op) in check_rope_128b_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)
     for name, (text, expected_op) in check_local_broadcast_candidates().items():
         check_vmi_to_vpto_lowering(name, text, expected_op)

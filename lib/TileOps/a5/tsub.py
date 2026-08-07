@@ -49,6 +49,7 @@ from ._vmi_common import (  # noqa: E402
     op="tsub",
     name="vmi_tsub",
     dtypes=(("f32", "f32", "f32"),),
+    min_row_bytes=128,
 )
 def vmi_tsub(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
     emit_elementwise_vmi(dst, (src0, src1), _vmi_sub)

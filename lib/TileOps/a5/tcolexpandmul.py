@@ -31,6 +31,7 @@ from ._vmi_common import (  # noqa: E402
     op="tcolexpandmul",
     name="vmi_tcolexpandmul",
     dtypes=(("f32", "f32", "f32"),),
+    min_row_bytes=128,
 )
 def vmi_tcolexpandmul(src: pto.Tile, col_values: pto.Tile, dst: pto.Tile):
     emit_col_expand_binary_vmi(src, col_values, dst, binop="mul")

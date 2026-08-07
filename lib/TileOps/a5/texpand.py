@@ -51,6 +51,7 @@ from ._vmi_common import (  # noqa: E402
     op="texpands",
     name="vmi_texpands",
     dtypes=(("f32", "f32"),),
+    min_row_bytes=128,
 )
 def vmi_texpands(scalar: f32, dst: pto.Tile):
     emit_scalar_fill_vmi(scalar, dst)
