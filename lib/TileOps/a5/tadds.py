@@ -45,6 +45,7 @@ from ._vmi_common import (  # noqa: E402
     op="tadds",
     name="vmi_tadds",
     dtypes=(("f32", "f32", "f32"),),
+    min_row_bytes=128,
 )
 def vmi_tadds(src: pto.Tile, scalar: f32, dst: pto.Tile):
     emit_elementwise_vmi(

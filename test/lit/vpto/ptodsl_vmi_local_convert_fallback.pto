@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND --implicit-check-not=__pto_ptodsl_vmi
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-pkg-path=%S/../../../ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
 
 module {
   func.func @local_convert_fallback() {
@@ -28,5 +28,12 @@ module {
 }
 
 // EXPAND-LABEL: func.func @local_convert_fallback
-// EXPAND-COUNT-3: pto.vmi.fusion.boundary = "local"
-// EXPAND-COUNT-3: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND: call @__pto_tilelang_a5_tcvt_tile_f32
+// EXPAND-SAME: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND: call @__pto_tilelang_a5_tcvt_tile_f16
+// EXPAND-SAME: pto.vmi.fusion.boundary = "local"
+// EXPAND-SAME: pto.vmi.fusion.boundary_reason = "non_vmi_local_boundary_fallback"
+// EXPAND: call @__pto_ptodsl_vmi_a5_tcvt
+// EXPAND-SAME: pto.tilelib.candidate = "vmi_tcvt"
+// EXPAND-SAME: pto.tilelib.impl = "vmi"

@@ -45,6 +45,7 @@ from ._vmi_common import (  # noqa: E402
     op="tmuls",
     name="vmi_tmuls",
     dtypes=(("f32", "f32", "f32"),),
+    min_row_bytes=128,
 )
 def vmi_tmuls(src: pto.Tile, scale: f32, dst: pto.Tile):
     emit_elementwise_vmi(
