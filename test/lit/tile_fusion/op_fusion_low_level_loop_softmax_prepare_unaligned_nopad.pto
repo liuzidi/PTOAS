@@ -87,7 +87,7 @@ module attributes { pto.kernel_kind = #pto.kernel_kind<vector>,pto.target_arch =
 // CHECK: }
 // Epilogue stages stay visible for later fusion-ready analysis.
 // CHECK: scf.for {{.*}} iter_args({{.*}}) -> (index) {
-// CHECK: pto.vdup
+// CHECK: pto.vlds {{.*}} {dist = "BRC_B32"}
 // CHECK: pto.vsub
 // CHECK: }
 // CHECK: scf.for {{.*}} iter_args({{.*}}) -> (index) {

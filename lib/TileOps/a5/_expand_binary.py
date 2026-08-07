@@ -230,6 +230,14 @@ def _emit_row_expand_body(src0, src1, dst, vector_op):
     dtype = dst.dtype
     valid_rows, valid_cols = dst.valid_shape
     lanes = pto.elements_per_vreg(dtype)
+    broadcast_dist = {
+        "i8": "BRC_B8",
+        "i16": "BRC_B16",
+        "i32": "BRC_B32",
+        "f16": "BRC_B16",
+        "bf16": "BRC_B16",
+        "f32": "BRC_B32",
+    }[str(dtype)]
 
     with pto.for_(0, valid_rows, step=1) as row:
         col_loop = pto.for_(0, valid_cols, step=lanes).carry(remained=valid_cols)
@@ -237,8 +245,7 @@ def _emit_row_expand_body(src0, src1, dst, vector_op):
             col = col_loop.iv
             mask, remained = pto.make_mask(dtype, col_loop.remained)
             lhs = pto.vlds(src0[row, col:])
-            scalar_vec = pto.vlds(src1[row, :])
-            rhs = pto.vdup(scalar_vec, mask)
+            rhs = pto.vlds(src1[row, :], dist=broadcast_dist)
             result = vector_op(lhs, rhs, mask)
             pto.vsts(result, dst[row, col:], mask)
             col_loop.update(remained=remained)
