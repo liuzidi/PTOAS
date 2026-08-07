@@ -24,12 +24,24 @@
 //     strided load/store, multi-value store, post_update store) is left alone:
 //     loads become non-matchable entries that flush the table; stores flush the
 //     table and are not registered as forward targets.
-//   - A vload/vstore base must resolve to a COMPILE-TIME UB identity (a
-//     pto.castptr -> memref -> pto.pointer_cast of a constant address). A base
-//     that is a runtime pointer (block argument / untraceable value) CANNOT be
-//     soundly matched: two such values comparing equal under SSA is not a proof
-//     of identity, so a store->load on the same runtime base must NOT forward.
-//     Unresolved bases flush the table and never act as a forward source/target.
+//   - A vload/vstore base must resolve to a COMPILE-TIME or AFFINE UB identity: a
+//     pto.castptr -> memref -> pto.pointer_cast of a constant address, or of an
+//     affine address `addi(muli(%iv, c), b)` from a loop induction variable. Two
+//     bases with the same affine key (iv, baseOffset, coeff) are the same UB every
+//     iteration, so a store->load on the same affine base may forward. A base that
+//     is a runtime pointer (block argument / untraceable / non-affine value)
+//     CANNOT be soundly matched: two such values comparing equal under SSA is not
+//     a proof of identity, so a store->load on the same runtime base must NOT
+//     forward. Such a base never acts as a forward source/target.
+//   - A vload is a PURE READ: it never changes memory, so it must NOT invalidate
+//     the CONTENT of any tracked store (a later constant/affine load may still
+//     forward to a preceding store). But a vload MAY OBSERVE a preceding store's
+//     UB, so any store whose base MAY alias the load's base is marked non-erasable
+//     (a later overwrite-DSE must not delete it). A vstore is a WRITE: an
+//     untrackable store flushes tracked content, while a trackable store marks
+//     every may-alias entry stale (an affine store may alias any tracked UB).
+//     Only must-alias, same-location writes may additionally prove an earlier
+//     store dead.
 //   - Transparency is decided by a CLOSED policy, not dialect prefixes:
 //       * region-bearing op, func.call, vload/vstore, and the explicit sync/DMA
 //         name set (mte_*/set_flag/mem_bar/...) are NEVER transparent;
@@ -55,8 +67,9 @@
 //     read by the mask-free consumer).
 //
 // Canonical base resolution traces pto.castptr -> memref -> pto.pointer_cast
-// -> addr constant so that distinct castptr chains to the same compile-time UB
-// address compare equal. A vmi.vload has no mask operand, so its read lane set
+// -> addr, decomposing the addr into a constant or an affine (iv, baseOffset,
+// coeff) key so that distinct castptr chains to the same compile-time or same
+// affine UB compare equal. A vmi.vload has no mask operand, so its read lane set
 // is inferred from its consuming op: if all consumers share one mask, that mask
 // bounds the read set; if all are mask-free (e.g. vcvt) the read set is the full
 // vreg; otherwise (mixed, or an unresolvable mask) the vload is left alone. A
@@ -106,6 +119,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
 namespace pto {
@@ -144,25 +158,172 @@ static Value getCanonicalTrackedValue(Value value) {
   return value;
 }
 
-// A vload/vstore base is trackable ONLY if it resolves to a compile-time UB
-// identity: a pto.castptr -> memref -> pto.pointer_cast of a constant address.
-// A block argument (function param / runtime pointer), a pointer produced by a
-// non-constant computation, or any untraceable base CANNOT be reasoned about —
-// two such values comparing equal (e.g. the same %arg0 used as both store dst
-// and load src) would WRONGLY establish forwarding. Such accesses must flush
-// the table and never act as a forward source/target.
-static bool isCompileTimeUB(Value base) {
+// ----------------------------------------------------------------------------
+// Affine UB address model.
+//
+// A vload/vstore base may resolve to a COMPILE-TIME-DERIVABLE affine address
+// instead of a bare constant: `pointer_cast(addi(muli(%iv, cK), cB))` from a
+// loop-carried induction variable. Such an address is a deterministic function
+// of the iteration, so two accesses built from the SAME induction variable and
+// the SAME (coeff, base) compare equal — they must alias. This lets a
+// store->load round trip on the same affine UB be folded, and lets us reason
+// about whether a dynamic store can alias a tracked constant store.
+//
+// The affine key is (iv, baseOffset, coeff); two affine addresses alias iff
+// they share the same iv and (baseOffset, coeff) differ by a multiple of the
+// vector-interval width (so the intervals on this iteration overlap). Because
+// the model is conservative (an affine address may alias ANY constant UB on
+// some iteration), affine keys are used for MUST-ALIAS (same iv+offset) but
+// never for must-not-alias against a constant.
+// ----------------------------------------------------------------------------
+struct AffineAddr {
+  Value iv;                 // loop induction variable (null => pure constant)
+  int64_t baseOffset = 0;   // constant part
+  int64_t coeff = 0;        // iv multiplier
+  bool isAffine = false;    // valid affine form (not a bare runtime ptr)
+};
+
+// Peel type-preserving/unary casts that wrap an affine expression or its IV:
+// arith.index_cast is the common wrapper in the VMI path (loop IV is index,
+// the address is i64). The peeled value is the affine operand.
+static Value peelAffineWrappers(Value v) {
+  // Bound the peel to avoid pathological cycles in the def chain.
+  unsigned steps = 0;
+  while (v && steps++ < 16) {
+    Operation *def = v.getDefiningOp();
+    if (!def)
+      break;
+    if (auto ic = dyn_cast<arith::IndexCastOp>(def)) {
+      Value in = ic.getIn();
+      if (in == v)
+        break;
+      v = in;
+      continue;
+    }
+    break;
+  }
+  return v;
+}
+
+// Parse an address Value into an AffineAddr. Handles:
+//   constant              -> {iv=null, baseOffset=c}
+//   addi(muli(%iv, c), b) -> {iv, baseOffset=b, coeff=c}
+//   addi(%iv, b)          -> {iv, baseOffset=b, coeff=1}
+//   muli(%iv, c)          -> {iv, baseOffset=0, coeff=c}
+// The IV and the addr may be wrapped in index_cast (peeled). The IV is stored
+// as its peeled value; equality is decided by areEquivalentValues (two casts of
+// the same induction value are equivalent).
+// Anything else (block arg, untraceable) -> isAffine=false.
+static AffineAddr parseAffineAddr(Value addr) {
+  AffineAddr result;
+  if (!addr)
+    return result;
+  addr = peelAffineWrappers(addr);
+  if (auto c = addr.getDefiningOp<arith::ConstantOp>()) {
+    if (auto iv = dyn_cast<IntegerAttr>(c.getValue())) {
+      result.isAffine = true;
+      result.coeff = 0;
+      result.baseOffset = iv.getInt();
+      return result;
+    }
+    return result;
+  }
+  if (auto addi = dyn_cast<arith::AddIOp>(addr.getDefiningOp())) {
+    Value lhs = addi.getLhs();
+    Value rhs = addi.getRhs();
+    // addi(muli(%iv, c), b): affine in RHS.
+    if (auto muli = dyn_cast<arith::MulIOp>(rhs.getDefiningOp())) {
+      Value mulLhs = peelAffineWrappers(muli.getLhs());
+      Value mulRhs = peelAffineWrappers(muli.getRhs());
+      // The multiplier operand must be a constant; the other is the IV.
+      arith::ConstantOp cst = mulRhs.getDefiningOp<arith::ConstantOp>();
+      Value iv = mulLhs;
+      if (!cst) {
+        cst = mulLhs.getDefiningOp<arith::ConstantOp>();
+        iv = mulRhs;
+      }
+      arith::ConstantOp b = lhs.getDefiningOp<arith::ConstantOp>();
+      if (cst && b) {
+        if (auto cval = dyn_cast<IntegerAttr>(cst.getValue())) {
+          if (auto bval = dyn_cast<IntegerAttr>(b.getValue())) {
+            result.isAffine = true;
+            result.iv = iv;
+            result.coeff = cval.getInt();
+            result.baseOffset = bval.getInt();
+            return result;
+          }
+        }
+      }
+    }
+    // addi(%iv, b): affine coeff 1.
+    if (auto b = rhs.getDefiningOp<arith::ConstantOp>()) {
+      if (auto bval = dyn_cast<IntegerAttr>(b.getValue())) {
+        result.isAffine = true;
+        result.iv = peelAffineWrappers(lhs);
+        result.coeff = 1;
+        result.baseOffset = bval.getInt();
+        return result;
+      }
+    }
+    return result;
+  }
+  if (auto muli = dyn_cast<arith::MulIOp>(addr.getDefiningOp())) {
+    // muli(%iv, c): affine coeff c, base 0.
+    Value mulLhs = peelAffineWrappers(muli.getLhs());
+    Value mulRhs = peelAffineWrappers(muli.getRhs());
+    // The multiplier operand must be a constant; the other is the IV.
+    arith::ConstantOp cst = mulRhs.getDefiningOp<arith::ConstantOp>();
+    Value iv = mulLhs;
+    if (!cst) {
+      cst = mulLhs.getDefiningOp<arith::ConstantOp>();
+      iv = mulRhs;
+    }
+    if (cst) {
+      if (auto cval = dyn_cast<IntegerAttr>(cst.getValue())) {
+        result.isAffine = true;
+        result.iv = iv;
+        result.coeff = cval.getInt();
+        result.baseOffset = 0;
+        return result;
+      }
+    }
+    return result;
+  }
+  return result;
+}
+
+// A canonical, comparable identity for a vload/vstore base: either a constant
+// pointer_cast address, or an affine (iv, baseOffset, coeff) key. Two bases
+// compare equal (must-alias) iff their constants are equal, or their affine key
+// is equal (same iv, same baseOffset, same coeff). This is the compile-time
+// identity used for forwarding matches.
+struct BaseIdentity {
+  Value base;          // canonical base (pointer_cast result), or null if untrackable
+  AffineAddr affine;   // affine decomposition (isAffine==false => untrackable)
+  bool isConstantAddr; // resolved to a bare constant pointer_cast
+};
+
+// Resolve a vload/vstore base to a BaseIdentity. Returns an untrackable identity
+// (base==null) for block args / untraceable / non-affine bases.
+static BaseIdentity resolveBaseIdentity(Value base) {
   Value canon = getCanonicalTrackedValue(base);
   if (!canon)
-    return false;
-  // Block arguments are runtime pointers -> not a compile-time UB.
+    return {};
   if (isa<BlockArgument>(canon))
-    return false;
+    return {};
   if (auto pc = canon.getDefiningOp<pto::PointerCastOp>()) {
-    if (!pc.getOperands().empty())
-      return isa<arith::ConstantOp>(pc.getOperands()[0].getDefiningOp());
+    if (pc.getOperands().empty())
+      return {};
+    Value addr = pc.getOperands()[0];
+    AffineAddr aff = parseAffineAddr(addr);
+    if (!aff.isAffine)
+      return {};
+    return {canon, aff, aff.iv == nullptr};
   }
-  return false;
+  return {};
+}
+static bool isTrackableIdentity(const BaseIdentity &id) {
+  return id.base != nullptr;
 }
 
 static bool areEquivalentValues(Value lhs, Value rhs) {
@@ -211,23 +372,52 @@ static bool areEquivalentValues(Value lhs, Value rhs) {
   return cl == cr;
 }
 
-// Storage-root identity deliberately ignores the pointer_cast result type.
-// Different memref views of the same constant UB address may overlap even when
-// they cannot be used as exact forwarding matches.
-static bool haveSameStorageRoot(Value lhs, Value rhs) {
-  Value cl = getCanonicalTrackedValue(lhs);
-  Value cr = getCanonicalTrackedValue(rhs);
-  auto lp = cl ? cl.getDefiningOp<pto::PointerCastOp>() : nullptr;
-  auto rp = cr ? cr.getDefiningOp<pto::PointerCastOp>() : nullptr;
-  if (!lp || !rp || lp.getOperands().empty() || rp.getOperands().empty())
-    return false;
-  auto lc = lp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
-  auto rc = rp.getOperands()[0].getDefiningOp<arith::ConstantOp>();
-  return lc && rc && lc.getValue() == rc.getValue();
-}
-
 static bool areEquivalentMaskValues(Value lhs, Value rhs) {
   return areEquivalentValues(lhs, rhs);
+}
+
+// Whether two base identities reference the SAME UB on this iteration (must
+// alias). This is the identity used for content forwarding: two accesses with
+// must-alias bases read/write the same bytes, so a store->load forward is safe.
+//   - two constant pointer_casts: must-alias iff the same address;
+//   - two affine keys: must-alias iff the same iv and the same (baseOffset,
+//     coeff) — they compute the identical address on every iteration;
+//   - constant vs affine, or any untrackable: NOT must-alias (may differ).
+static bool basesMustAlias(const BaseIdentity &lhs, const BaseIdentity &rhs) {
+  if (!isTrackableIdentity(lhs) || !isTrackableIdentity(rhs))
+    return false;
+  if (areEquivalentValues(lhs.base, rhs.base))
+    return true;
+  if (lhs.affine.isAffine && rhs.affine.isAffine)
+    return areEquivalentValues(lhs.affine.iv, rhs.affine.iv) &&
+           lhs.affine.baseOffset == rhs.affine.baseOffset &&
+           lhs.affine.coeff == rhs.affine.coeff;
+  return false;
+}
+
+// Whether two base identities MAY alias on some iteration. Conservative:
+//   - two constant pointer_casts: alias iff the same address (a constant never
+//     sweeps a range). Note `isAffine` is also true for a bare constant (iv is
+//     null), so the constant/constant case must be decided by `isConstantAddr`
+//     BEFORE the affine sweep rule, or two distinct constants would be
+//     misclassified as may-alias.
+//   - an affine base may alias any constant UB on some iteration (its address
+//     sweeps a range as the loop runs), so it is treated as may-alias with a
+//     constant;
+//   - any untrackable base (block arg / non-affine) may alias anything.
+// This drives the nonErasable marking: a store whose UB a later load MAY read
+// must not be deleted by overwrite-DSE even after its value is forwarded.
+static bool basesMayAlias(const BaseIdentity &lhs, const BaseIdentity &rhs) {
+  if (!isTrackableIdentity(lhs) || !isTrackableIdentity(rhs))
+    return true; // unknown may alias anything
+  // Both bare constants: alias iff the same address. This must be checked
+  // first, because a bare constant carries isAffine==true (iv==null) and would
+  // otherwise fall through to the affine-sweep rule below.
+  if (lhs.isConstantAddr && rhs.isConstantAddr)
+    return areEquivalentValues(lhs.base, rhs.base);
+  if (lhs.affine.isAffine || rhs.affine.isAffine)
+    return true; // affine sweeps a range -> may hit a constant
+  return false;
 }
 
 // ----------------------------------------------------------------------------
@@ -538,12 +728,17 @@ struct ContentEntry {
   LaneRange lanes;     // read set (load) / write set (store)
   bool isLoad = false;
   Value sourceValue;    // store.value or load.result (forward target value)
+  Value storeMask;      // original store mask; null for loads
+  StringAttr storePmode; // original store pmode; null for loads
 
   // Pass 1 marks:
   int forwardToIdx = -1; // >=0: this load forwards to entries[forwardToIdx].sourceValue
   bool eraseMark = false;     // this op should be erased in Pass 2 (dead load/store)
   bool escapeMark = false;    // a store whose UB is read by a region-escaping op: keep
-  bool stale = false;         // no longer participates as a forward target (merge partial write)
+  bool stale = false;         // content no longer usable as a forward target
+  //    (only a WRITE invalidates content; a read never does)
+  bool nonErasable = false;   // store may be observed by an unknown/affine read or
+  //    escape: must NOT be erased by overwrite-DSE even after forwarding
 };
 
 // Two-pass elision over a straight-line range (a fused scf.for body, or the
@@ -559,8 +754,11 @@ static bool elideOpRange(OpRange ops) {
 
   // ---- Pass 1: build + mark (forward scan, no IR mutation) ----
   // Match helpers operating on the live entry set (stale entries skipped).
+  // Two accesses locate the same UB iff their bases must-alias (constant or
+  // affine identity) and their offsets are equivalent.
   auto sameLoc = [&](const ContentEntry &e, Value base, Value offset) {
-    return areEquivalentValues(e.base, base) &&
+    return basesMustAlias(resolveBaseIdentity(e.base),
+                          resolveBaseIdentity(base)) &&
            areEquivalentValues(e.offset, offset);
   };
 
@@ -569,13 +767,17 @@ static bool elideOpRange(OpRange ops) {
       if (!isContinuousSingleVLoad(load)) {
         // Non-continuous / multi-result / grouped / block-strided load: its
         // read set cannot be bounded as a prefix interval, and the load may
-        // touch UBs we don't track. Record it non-matchable and flush so
-        // neither it nor any earlier entry is forwarded across it.
-        entries.push_back({load, load.getSource(), load.getOffset(),
-                           LaneRange::unknown(), true, load->getResult(0),
-                           -1, false, false, /*stale=*/true});
+        // touch UBs we don't track. It is still a PURE READ, so it must not
+        // invalidate tracked content (a later constant-base load may still
+        // forward). But it may observe any tracked store -> mark those
+        // non-erasable. It never acts as a forward target.
         for (auto &e : entries)
-          e.stale = true;
+          if (!e.isLoad)
+            e.nonErasable = true;
+        entries.push_back({load, load.getSource(), load.getOffset(),
+                           LaneRange::unknown(), true, load->getResult(0), {}, {},
+                           -1, false, false, /*stale=*/true,
+                           /*nonErasable=*/false});
         continue;
       }
       // Resolve the vload read lane set from its consumer mask.
@@ -594,27 +796,25 @@ static bool elideOpRange(OpRange ops) {
       }
       Value base = load.getSource();
       Value offset = load.getOffset();
+      BaseIdentity id = resolveBaseIdentity(base);
 
-      if (!isCompileTimeUB(base)) {
-        // The load base is not a compile-time UB identity (a runtime pointer /
-        // block argument / untraceable base). We cannot soundly match it
-        // against any tracked store, and a preceding store to the SAME runtime
-        // base must NOT forward to it (the base comparing equal under SSA is
-        // not a proof of identity). Record a non-matchable entry and flush so
-        // nothing forwards across it.
-        entries.push_back({load, base, offset, LaneRange::unknown(), true,
-                           load->getResult(0), -1, false, false,
-                           /*stale=*/true});
+      if (!isTrackableIdentity(id) || readLanes.isUnknownSet()) {
+        // The load base is a runtime pointer / untrackable / non-affine base,
+        // OR its read lanes cannot be bounded. We cannot soundly match it for
+        // forwarding. But a vload is a PURE READ: it does not change memory, so
+        // it must NOT invalidate the content of any tracked store (a later
+        // constant-base load may still forward to a preceding store). What it
+        // MAY do is observe a preceding store's UB — so if this load may alias
+        // a tracked store, that store becomes non-erasable (a later overwrite
+        // must not delete it, since this load could still read it).
         for (auto &e : entries)
-          e.stale = true;
-        continue;
-      }
-
-      if (readLanes.isUnknownSet()) {
-        // Cannot reason; record a non-matchable entry so later vloads of the
-        // same loc see it (and, lacking a cover, do not forward to it).
-        entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), -1, false, false, false});
+          if (!e.isLoad && basesMayAlias(id, resolveBaseIdentity(e.base)))
+            e.nonErasable = true;
+        // Record a non-matchable entry (it never acts as a forward target).
+        entries.push_back({load, base, offset, LaneRange::unknown(), true,
+                           load->getResult(0), {}, {}, -1, false, false,
+                           /*stale=*/true,
+                           /*nonErasable=*/false});
         continue;
       }
 
@@ -640,11 +840,25 @@ static bool elideOpRange(OpRange ops) {
       }
       if (matchIdx >= 0) {
         entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), matchIdx, true, false, false});
+                           load->getResult(0), {}, {}, matchIdx, true, false, false,
+                           false});
         changed = true; // load will be forwarded + erased in Pass 2
       } else {
+        // Trackable load that did NOT forward (no covering preceding entry).
+        // It is retained and still observes the UB (and its preceding stores'
+        // content) at its base. Even though base/lanes are trackable, the same
+        // overwrite-DSE hazard as the untrackable branch applies: a preceding
+        // store this load MAY alias must not be deleted by a later full
+        // overwrite, or this retained load would read different content than
+        // the original program. This is the tracked analog of the untrackable
+        // branch above (where may-alias is trivially true because the base is
+        // unknown).
+        for (auto &e : entries)
+          if (!e.isLoad && basesMayAlias(id, resolveBaseIdentity(e.base)))
+            e.nonErasable = true;
         entries.push_back({load, base, offset, readLanes, true,
-                           load->getResult(0), -1, false, false, false});
+                           load->getResult(0), {}, {}, -1, false, false, false,
+                           false});
       }
       continue;
     }
@@ -660,9 +874,10 @@ static bool elideOpRange(OpRange ops) {
       }
       Value base = store.getDestination();
       Value offset = store.getOffset();
-      if (!isCompileTimeUB(base)) {
-        // The store base is not a compile-time UB identity (a runtime pointer /
-        // block argument). It may alias any tracked UB at runtime; we cannot
+      BaseIdentity id = resolveBaseIdentity(base);
+      if (!isTrackableIdentity(id)) {
+        // The store base is a runtime pointer / block argument / untraceable /
+        // non-affine base. It may alias any tracked UB at runtime; we cannot
         // prove it does not, so conservatively invalidate all tracked content
         // and do not register this store as a forward target.
         for (auto &e : entries)
@@ -674,13 +889,58 @@ static bool elideOpRange(OpRange ops) {
       // pmode: "merge" => only writeLanes written; "zero"(default)/absent =>
       // whole region defined (inactive lanes store 0 -> treat as full cover).
       bool pmodeMerge = false;
-      if (auto pma = store.getPmodeAttr())
-        pmodeMerge = pma.getValue().equals_insensitive("merge");
+      StringAttr pmode = store.getPmodeAttr();
+      if (pmode)
+        pmodeMerge = pmode.getValue().equals_insensitive("merge");
       if (!pmodeMerge)
         writeLanes = LaneRange::full(); // zero: entire UB defined
 
-      // Mark preceding same-loc entries by how this write touches their lanes:
-      //  - fully covered -> a store is dead (eraseMark, unless it escapes); the
+      // Redundant-store elision (strict). If a preceding, still-live store at
+      // the same location writes the SAME effective lane set and the SAME SSA
+      // value, this store writes nothing new to memory (the earlier store
+      // already established that content), so it is redundant and dead. We
+      // require the SAME SSA value (not a structural equivalence), equivalent
+      // original masks, and the same pmode. Comparing only normalized lanes is
+      // insufficient: zero-pmode stores with different masks both normalize to
+      // full, but write different active-source/inactive-zero lane content. The
+      // earlier store must be live (not stale/erased), guaranteeing no
+      // intervening write touched these lanes.
+      Value curValue = store.getValues().front();
+      bool redundant = false;
+      for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
+        ContentEntry &e = entries[i];
+        if (e.isLoad || e.stale || e.eraseMark)
+          continue;
+        if (!sameLoc(e, base, offset))
+          continue;
+        if (!areEquivalentMaskValues(e.storeMask, mask))
+          continue;
+        if (e.storePmode != pmode)
+          continue;
+        if (e.sourceValue != curValue)
+          continue;
+        redundant = true;
+        break;
+      }
+      if (redundant) {
+        // Record the redundant store as dead (eraseMark + stale) so Pass 2
+        // erases it, but do NOT let it invalidate the earlier store: it wrote
+        // the same content, so the earlier store stays the canonical forward
+        // target / content source.
+        entries.push_back({store, base, offset, writeLanes, false, curValue,
+                           mask, pmode, -1, /*eraseMark=*/true, false,
+                           /*stale=*/true,
+                           /*nonErasable=*/false});
+        changed = true;
+        continue;
+      }
+
+      // Mark preceding may-alias entries by how this write touches them:
+      //  - may-alias but not must-alias -> the entry is stale. The write may
+      //    redefine its content at runtime, but cannot prove the earlier store
+      //    dead, so overwrite-DSE is not allowed.
+      //  - fully covered -> a store is dead (eraseMark), unless it escapes or
+      //    is non-erasable (may be observed by an unknown/affine read); the
       //    entry stops matching (stale).
       //  - partial overlap (merge) -> the entry no longer fully represents the
       //    current UB content, so it must not be a forward target anymore
@@ -688,8 +948,13 @@ static bool elideOpRange(OpRange ops) {
       //    be read / escape).
       for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
         ContentEntry &e = entries[i];
-        if (!haveSameStorageRoot(e.base, base))
+        BaseIdentity entryId = resolveBaseIdentity(e.base);
+        if (!basesMayAlias(entryId, id))
           continue;
+        if (!basesMustAlias(entryId, id)) {
+          e.stale = true;
+          continue;
+        }
         // Without a byte-range alias model, a different offset or view on the
         // same storage root may partially overlap this write.
         if (!sameLoc(e, base, offset)) {
@@ -697,15 +962,18 @@ static bool elideOpRange(OpRange ops) {
           continue;
         }
         if (writeLanes.contains(e.lanes)) {
-          if (!e.isLoad && !e.escapeMark)
+          if (!e.isLoad && !e.escapeMark && !e.nonErasable) {
             e.eraseMark = true;
+            changed = true; // a dead store will be erased in Pass 2
+          }
           e.stale = true;
         } else if (writeLanes.intersects(e.lanes)) {
           e.stale = true;
         }
       }
       entries.push_back({store, base, offset, writeLanes, false,
-                         store.getValues().front(), -1, false, false, false});
+                         store.getValues().front(), mask, pmode, -1, false,
+                         false, false, false});
       continue;
     }
 
@@ -718,18 +986,20 @@ static bool elideOpRange(OpRange ops) {
       if (isEscapeReadOfUB(&op, esc)) {
         // mte_ub_gm reads a UB out of the region: its store is observable and
         // must survive even after forwarding. The read does not redefine the
-        // UB, so entries keep matching.
-        Value canon = getCanonicalTrackedValue(esc);
+        // UB, so entries keep matching (content stays available).
+        BaseIdentity escId = resolveBaseIdentity(esc);
         for (auto &e : entries)
-          if (!e.isLoad && areEquivalentValues(e.base, canon))
+          if (!e.isLoad && basesMayAlias(escId, resolveBaseIdentity(e.base)))
             e.escapeMark = true;
         continue;
       }
       if (isEscapeWriteToUB(&op, esc)) {
         // mte_gm_ub redefines the UB from GM: prior tracked content is invalid.
-        Value canon = getCanonicalTrackedValue(esc);
+        // If the rewritten UB may alias a tracked base (const or affine), that
+        // entry's content is stale.
+        BaseIdentity escId = resolveBaseIdentity(esc);
         for (auto &e : entries)
-          if (areEquivalentValues(e.base, canon))
+          if (basesMayAlias(escId, resolveBaseIdentity(e.base)))
             e.stale = true;
         continue;
       }

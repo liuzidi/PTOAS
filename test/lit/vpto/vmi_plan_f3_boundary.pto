@@ -11,13 +11,12 @@
 // Replaces the deleted vmi_plan_boundary.pto / vmi_plan_inter_region_sync.pto
 // which targeted the removed PTOPlanVmiFusionRegion pass.
 //
-// The engine's ONLY group-break rule is F3 adjacency: a non-plannable op
-// (anything outside getFusionOpSemantics' compute whitelist — sync/DMA/
-// treshape/...) sitting between two plannable compute nodes closes the
-// current group. This is the whitelist-based counterpart of the deleted pass's
-// sync-op blacklist: an op is a boundary here because it is Unknown to
-// getFusionComputeFamily, not because it is named in a boundary list. See the
-// CONTRACT comment in FusionOpSemantics.cpp.
+// The engine's group-break rule is F3 adjacency: a hard non-plannable op
+// (sync/DMA/treshape/unknown op) sitting between two plannable compute nodes
+// closes the current group. pto.alloc_tile and pto.subview are deliberate
+// exceptions: they are pure resource/view declarations which PTOOpScheduling
+// can move out of the compute span. See the CONTRACT comment in
+// FusionOpSemantics.cpp.
 //
 //   MERGE  - two adjacent pto.tadd, no op between them -> ONE fusion_region,
 //            empty yield (nothing escapes).
@@ -27,6 +26,12 @@
 //            plannable — to let ND2NZ stores fuse into the softmax host loop
 //            — means it no longer breaks a group. A real non-plannable op
 //            (sync/DMA) still breaks; that path is covered elsewhere.)
+//   MERGE through alloc_tile - an interleaved resource declaration does not
+//            split the group; it is enclosed in the single region (PTOOpScheduling
+//            may keep an output alloc directly before its use, so the two tadd
+//            are not necessarily adjacent).
+//   MERGE through subview - an interleaved tile view declaration also does not
+//            split the group and is enclosed in the contiguous region.
 
 // RUN: pto-test-opt %s --pass-pipeline='builtin.module(func.func(pto-pre-fusion-analysis,pto-fusion-plan{fusion-strategy=vmi-ub-disjoint},pto-op-scheduling,pto-fusion-region-gen))' | FileCheck %s --check-prefix=PLAN
 
@@ -68,6 +73,45 @@ module {
     pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
     pto.tmov ins(%c : !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>)
     pto.tadd ins(%d, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  // PLAN-LABEL: func.func @merge_through_alloc_tile
+  // PLAN: pto.fusion_region
+  // PLAN: pto.alloc_tile
+  // PLAN: pto.tadd
+  // PLAN: pto.alloc_tile
+  // PLAN: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_through_alloc_tile() {
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    pto.tadd ins(%c, %a : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%d : !pto.tile_buf<vec, 64x64xf32>)
+    return
+  }
+
+  // PLAN-LABEL: func.func @merge_through_subview
+  // PLAN: pto.fusion_region
+  // PLAN: pto.tadd
+  // PLAN-NEXT: %[[VIEW:.*]] = pto.subview
+  // PLAN-NEXT: pto.tadd
+  // PLAN: pto.yield() : () -> ()
+  // PLAN-NOT: pto.fusion_region
+  // PLAN: return
+  func.func @merge_through_subview() {
+    %c0 = arith.constant 0 : index
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 64x64xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 32x64xf32>
+    pto.tadd ins(%a, %b : !pto.tile_buf<vec, 64x64xf32>, !pto.tile_buf<vec, 64x64xf32>) outs(%c : !pto.tile_buf<vec, 64x64xf32>)
+    %view = pto.subview %a[%c0, %c0] sizes [32, 64] : !pto.tile_buf<vec, 64x64xf32> -> !pto.tile_buf<vec, 32x64xf32>
+    pto.tadd ins(%view, %view : !pto.tile_buf<vec, 32x64xf32>, !pto.tile_buf<vec, 32x64xf32>) outs(%d : !pto.tile_buf<vec, 32x64xf32>)
     return
   }
 

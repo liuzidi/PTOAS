@@ -191,22 +191,26 @@ static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
     for (const pto::FusionComputeNode *node : stableOrder)
       memberOps.insert(node->op);
 
-    // A local fallback is part of the same loose FusionRegion, but is not a
-    // VMI compute node. Give local-boundary ops between selected compute
-    // members the group's ordering metadata in block order so RegionGen
-    // contains them in the same contiguous span. PTOVmiLoopFusion will still
-    // stop at their non-VMI loop.
+    // A local fallback or a transparent tile resource/view declaration is part
+    // of the same loose FusionRegion, but is not a VMI compute node. Give these
+    // ops between selected compute members the group's ordering metadata in
+    // block order so RegionGen contains them in the same contiguous span.
+    // PTOVmiLoopFusion will still stop at a local fallback's non-VMI loop;
+    // alloc_tile/subview themselves do not create loop-fusion boundaries.
     Operation *first = stableOrder.front()->op;
     Operation *last = stableOrder.back()->op;
     int64_t order = 0;
     for (Operation *op = first; op; op = op->getNextNode()) {
       bool include = memberOps.contains(op);
       if (!include) {
-        FailureOr<pto::FusionOpSemantics> semanticsOr =
-            pto::getFusionOpSemantics(op);
-        include = succeeded(semanticsOr) &&
-                  semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
-                  op->hasAttr(kVmiFusionBoundaryAttr);
+        include = isa<pto::AllocTileOp, pto::SubViewOp>(op);
+        if (!include) {
+          FailureOr<pto::FusionOpSemantics> semanticsOr =
+              pto::getFusionOpSemantics(op);
+          include = succeeded(semanticsOr) &&
+                    semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
+                    op->hasAttr(kVmiFusionBoundaryAttr);
+        }
       }
       if (!include) {
         if (op == last)
@@ -583,8 +587,11 @@ public:
 
 // VMI F3-adjacency strategy: every plannable compute node (already filtered
 // into computeNodes by PreFusionAnalysis via getFusionOpSemantics' whitelist)
-// is wrapped into a loose fusion group. Hard non-plannable ops (tload/tstore
-// DMA, wait_flag/mem_bar sync, any unknown op) close the group. A local
+// is wrapped into a loose fusion group. Pure alloc_tile resource declarations
+// and tile subviews are transparent: PTOOpScheduling can move compute members
+// across them before RegionGen builds a contiguous span. Hard non-plannable ops
+// (tload/tstore DMA, wait_flag/mem_bar sync, any other unknown op) close the
+// group. A local
 // fallback remains in the same loose group, but is not a compute node and
 // therefore still stops downstream VMI loop fusion.
 //
@@ -633,6 +640,13 @@ public:
         hardBoundarySinceCompute = false;
         continue;
       }
+      // alloc_tile and subview only declare SSA tile resources/views. They do
+      // not access tile data, and PTOOpScheduling classifies both as movable,
+      // so neither may split an otherwise adjacent VMI compute run. Keep other
+      // unknown ops conservative until their scheduling and RegionGen SSA
+      // behavior is explicitly supported.
+      if (isa<pto::AllocTileOp, pto::SubViewOp>(op))
+        continue;
       FailureOr<pto::FusionOpSemantics> semanticsOr =
           pto::getFusionOpSemantics(&op);
       if (failed(semanticsOr) ||
