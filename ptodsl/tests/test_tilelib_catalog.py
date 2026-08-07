@@ -792,7 +792,10 @@ class TileLibCatalogTest(unittest.TestCase):
                     ),
                 }
                 selected = select(op, "a5", specs)
-                self.assertIn(expected_op, selected.specialize(**specs).mlir_text())
+                text = selected.specialize(**specs).mlir_text()
+                self.assertIn(expected_op, text)
+                self.assertIn('dist = "BRC_B32"', text)
+                self.assertNotIn("pto.vdup", text)
 
     def test_row_reductions_accept_col_major_single_column_output(self):
         for op, expected_op in (

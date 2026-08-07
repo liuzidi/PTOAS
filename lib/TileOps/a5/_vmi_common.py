@@ -1726,8 +1726,17 @@ def emit_row_expand_binary_vmi(
     _prepare_tile_access(row_tensor, compact_row_state, output)
     full_mask = _create_mask_lanes(cols, cols, f32, trace=row_tensor._trace)
     with for_(0, rows, step=1) as row:
-        row_scalar = _vload_linear(compact_row_state, row, lanes=1)
-        broadcast = _vbrc(row_scalar, lanes=cols)
+        state_ptr = compact_row_state._trace.ensure_tile_ptr(compact_row_state)
+        state_offset = compact_row_state._trace._coerce_index(row)
+        broadcast = _wrap_vreg(
+            _vmi_builder.vload(
+                state_ptr.value,
+                state_offset.value,
+                size=cols,
+                dist_mode="brc",
+            ),
+            f32,
+        )
         src_offset = index_mul(row, src_physical_cols)
         dst_offset = index_mul(row, dst_physical_cols)
         value = _vload_linear(row_tensor, src_offset, lanes=cols)
