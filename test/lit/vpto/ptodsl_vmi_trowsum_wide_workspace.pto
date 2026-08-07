@@ -38,4 +38,5 @@ module {
 // EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowsum
 // FINAL-LABEL: func.func @ptodsl_vmi_trowsum_wide_workspace
 // FINAL: pto.vcadd
+// FINAL: pto.vsts {{.*}} {dist = "1PT_B32"}
 // FINAL-NOT: pto.vmi.v

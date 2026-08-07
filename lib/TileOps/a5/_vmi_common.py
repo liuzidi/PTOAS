@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from ptodsl import pto
 from ptodsl._surface_values import unwrap_surface_value
 from ptodsl._surface_types import Tile
+from ptodsl._runtime_scalar_ops import emit_runtime_binary_op
 from ptodsl._tile_template_tracing import (
     CanonicalBlockMap,
     CanonicalBlockCoordinate,
@@ -79,16 +80,22 @@ def _wrap_mask(value, dtype: ScalarType) -> _MaskValue:
     return _MaskValue(unwrap_surface_value(value), dtype)
 
 
+def _has_null_pad(value) -> bool:
+    return str(value).lower() in {"null", "0", "0x0", "0x00"}
+
+
 def row_reduce_vmi_constraint(
     src_shape=(),
     src_valid_shape=(),
     workspace_shape=(),
+    workspace_valid_shape=(),
     dst_shape=(),
     dst_valid_shape=(),
     src_dtype=None,
     workspace_dtype=None,
     dst_dtype=None,
     src_config=None,
+    workspace_config=None,
     dst_config=None,
     **_,
 ):
@@ -99,6 +106,7 @@ def row_reduce_vmi_constraint(
         or len(src_shape) != 2
         or len(src_valid_shape) != 2
         or len(workspace_shape) != 2
+        or len(workspace_valid_shape) != 2
         or len(dst_shape) != 2
         or len(dst_valid_shape) != 2
     ):
@@ -107,21 +115,31 @@ def row_reduce_vmi_constraint(
     valid_rows, valid_cols = src_valid_shape
     workspace_rows, workspace_cols = workspace_shape
     return (
-        rows == valid_rows
+        isinstance(rows, int)
+        and isinstance(cols, int)
+        and isinstance(workspace_rows, int)
+        and isinstance(workspace_cols, int)
+        and rows > 0
+        and cols > 0
+        and valid_rows == rows
+        and isinstance(valid_cols, int)
+        and 0 < valid_cols <= cols
+        and src_valid_shape == src_shape
         and workspace_rows == rows
         and workspace_cols >= 1
+        and workspace_valid_shape == workspace_shape
         and dst_shape == (rows, 1)
         and dst_valid_shape == (rows, 1)
         and src_config is not None
         and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and _has_null_pad(src_config.pad_value)
+        and workspace_config is not None
+        and _has_null_pad(workspace_config.pad_value)
         and dst_config is not None
         and dst_config.b_layout == "col_major"
-        and isinstance(cols, int)
-        and isinstance(valid_cols, int)
-        and cols > 0
-        and valid_cols > 0
-        and valid_cols <= cols
-        and valid_cols % f32.lanes == 0
+        and dst_config.s_layout == "none_box"
+        and _has_null_pad(dst_config.pad_value)
     )
 
 
@@ -347,6 +365,11 @@ def _vadds(source: _VectorValue, scalar: _Value, mask: _MaskValue) -> _VectorVal
     return _vvec_scalar("vadds", source, scalar, mask)
 
 
+def _negate_scalar(scalar: _Value, dtype: ScalarType) -> _Value:
+    zero = _scalar_constant(0.0, dtype)
+    return _Value(emit_runtime_binary_op("sub", zero.value, scalar.value))
+
+
 def _vmuls(source: _VectorValue, scalar: _Value, mask: _MaskValue) -> _VectorValue:
     return _vvec_scalar("vmuls", source, scalar, mask)
 
@@ -479,11 +502,22 @@ def _vreduce_add(source: _VectorValue, mask: _MaskValue) -> _VectorValue:
     )
 
 
-def _vcvt(source: _VectorValue, dst_dtype: ScalarType) -> _VectorValue:
+def _vcvt(
+    source: _VectorValue,
+    dst_dtype: ScalarType,
+    *,
+    rounding: str | None = None,
+    saturate: str | None = None,
+) -> _VectorValue:
     if not isinstance(dst_dtype, ScalarType):
         raise TypeError("_vcvt expects a tile-template destination ScalarType")
     return _wrap_vreg(
-        _vmi_builder.vcvt(source.value, to_dtype=_pto_dtype(dst_dtype)),
+        _vmi_builder.vcvt(
+            source.value,
+            to_dtype=_pto_dtype(dst_dtype),
+            rounding=rounding,
+            saturate=saturate,
+        ),
         dst_dtype,
     )
 
@@ -529,6 +563,201 @@ class _VMITileTemplateRegistry(TileTemplateRegistry):
 VMI_TILELIB_REGISTRY = _VMITileTemplateRegistry()
 
 
+_DTYPE_BYTEWIDTH = {
+    "f32": 4,
+    "i32": 4,
+    "ui32": 4,
+    "f16": 2,
+    "bf16": 2,
+    "i16": 2,
+    "ui16": 2,
+    "i8": 1,
+    "ui8": 1,
+}
+
+
+def full_physical_row_vmi_constraint(**metadata) -> bool:
+    """Reject sub-VL rows until unified masks survive physicalization."""
+
+    row_bytes = []
+    for name, shape in metadata.items():
+        if not name.endswith("_shape") or name.endswith("_valid_shape"):
+            continue
+        if not isinstance(shape, (tuple, list)) or len(shape) != 2:
+            continue
+        cols = shape[1]
+        dtype = metadata.get(f"{name[:-6]}_dtype")
+        bytewidth = _DTYPE_BYTEWIDTH.get(dtype)
+        if isinstance(cols, int) and cols > 0 and bytewidth is not None:
+            row_bytes.append(cols * bytewidth)
+    return not row_bytes or max(row_bytes) >= 256
+
+
+def _is_safe_static_row_prefix(
+    shape: tuple[int, ...],
+    valid_shape: tuple[int, ...],
+    *,
+    native_lanes: int,
+) -> bool:
+    """Whether a static valid row prefix can be read as whole physical chunks."""
+
+    if len(shape) != 2 or len(valid_shape) != 2:
+        return False
+    rows, physical_cols = shape
+    valid_rows, logical_cols = valid_shape
+    if not all(
+        isinstance(dim, int)
+        for dim in (rows, physical_cols, valid_rows, logical_cols)
+    ):
+        return False
+    if rows <= 0 or physical_cols <= 0 or valid_rows != rows:
+        return False
+    if logical_cols <= 0 or logical_cols > physical_cols:
+        return False
+    physical_read_cols = (
+        (logical_cols + native_lanes - 1) // native_lanes
+    ) * native_lanes
+    return valid_shape == shape or physical_read_cols <= physical_cols
+
+
+def row_expand_binary_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    src_config=None,
+    row_values_shape=(),
+    row_values_valid_shape=(),
+    row_values_config=None,
+    dst_shape=(),
+    dst_valid_shape=(),
+    dst_config=None,
+    **_,
+):
+    """Accept the static DSv4 row-tensor/[rows, 1] broadcast form."""
+
+    if not all(
+        len(shape) == 2
+        for shape in (
+            src_shape,
+            src_valid_shape,
+            row_values_shape,
+            row_values_valid_shape,
+            dst_shape,
+            dst_valid_shape,
+        )
+    ):
+        return False
+    rows, logical_cols = src_valid_shape
+    return (
+        rows > 0
+        and logical_cols > 0
+        and _is_safe_static_row_prefix(
+            src_shape, src_valid_shape, native_lanes=f32.lanes
+        )
+        and _is_safe_static_row_prefix(
+            dst_shape, dst_valid_shape, native_lanes=f32.lanes
+        )
+        and dst_valid_shape == src_valid_shape
+        and row_values_shape == (rows, 1)
+        and row_values_valid_shape == row_values_shape
+        and src_config is not None
+        and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and row_values_config is not None
+        and row_values_config.b_layout == "col_major"
+        and row_values_config.s_layout == "none_box"
+        and dst_config is not None
+        and dst_config.b_layout == "row_major"
+        and dst_config.s_layout == "none_box"
+    )
+
+
+def col_expand_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    src_config=None,
+    dst_shape=(),
+    dst_valid_shape=(),
+    dst_config=None,
+    **_,
+):
+    """Accept a static full source row broadcast over destination rows."""
+
+    if not all(
+        len(shape) == 2
+        for shape in (src_shape, src_valid_shape, dst_shape, dst_valid_shape)
+    ):
+        return False
+    rows, cols = dst_shape
+    return (
+        rows > 0
+        and cols > 0
+        and src_shape == (1, cols)
+        and src_valid_shape == src_shape
+        and dst_valid_shape == dst_shape
+        and src_config is not None
+        and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and dst_config is not None
+        and dst_config.b_layout == "row_major"
+        and dst_config.s_layout == "none_box"
+    )
+
+
+def convert_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    src_dtype=None,
+    src_config=None,
+    dst_shape=(),
+    dst_valid_shape=(),
+    dst_dtype=None,
+    dst_config=None,
+    round_mode=None,
+    sat_mode=None,
+    **_,
+):
+    """Accept static full row-major conversions with matching logical shape."""
+
+    supported_round_modes = {
+        ("bf16", "f32"): {"ROUND"},
+        ("f16", "f32"): {"RINT", "ROUND"},
+        ("i32", "f32"): {"RINT", "ROUND"},
+        ("f32", "bf16"): {"RINT", "ROUND"},
+        ("f32", "f16"): {"RINT", "ROUND"},
+        ("f32", "i32"): {"RINT", "ROUND", "TRUNC"},
+        ("i32", "f16"): {"ROUND"},
+    }
+    allowed_round_modes = supported_round_modes.get((src_dtype, dst_dtype))
+    if not all(
+        len(shape) == 2
+        for shape in (src_shape, src_valid_shape, dst_shape, dst_valid_shape)
+    ):
+        return False
+    rows, cols = src_shape
+    src_bytewidth = _DTYPE_BYTEWIDTH.get(src_dtype)
+    dst_bytewidth = _DTYPE_BYTEWIDTH.get(dst_dtype)
+    return (
+        rows > 0
+        and cols > 0
+        and src_bytewidth is not None
+        and dst_bytewidth is not None
+        and cols * src_bytewidth >= 256
+        and cols * dst_bytewidth >= 256
+        and allowed_round_modes is not None
+        and round_mode in allowed_round_modes
+        and sat_mode in ("ON", "OFF")
+        and src_valid_shape == src_shape
+        and dst_shape == src_shape
+        and dst_valid_shape == dst_shape
+        and src_config is not None
+        and src_config.b_layout == "row_major"
+        and src_config.s_layout == "none_box"
+        and dst_config is not None
+        and dst_config.b_layout == "row_major"
+        and dst_config.s_layout == "none_box"
+    )
+
+
 # Reduce kind -> (merge op, identity element). The identity mirrors pto-isa
 # `TColReduceOps.hpp` `InstrOp::InitVal` / a5 `Padding<T>::Min/Max`:
 #   max -> vmax, init -inf (Padding<T>::Min)
@@ -554,11 +783,18 @@ def canonical_vmi_template(
     context_constraints: dict[str, tuple[object, ...]] | None = None,
     constraints: tuple[object, ...] | list[object] = (),
     tags: tuple[str, ...] | list[str] = (),
+    requires_full_physical_row: bool = True,
 ):
     """Register one canonical VMI implementation in this provider module."""
 
     def decorator(fn):
         qualified_op = _qualify_op_name(op)
+        effective_constraints = tuple(constraints)
+        if requires_full_physical_row:
+            effective_constraints = (
+                full_physical_row_vmi_constraint,
+                *effective_constraints,
+            )
         descriptor = _trace_tile_template(
             target=target,
             op=qualified_op,
@@ -566,7 +802,7 @@ def canonical_vmi_template(
             ir_level="vmi",
             dtypes=dtypes,
             context_constraints=context_constraints,
-            constraints=tuple(constraints),
+            constraints=effective_constraints,
             tags=tuple(tags),
         )(fn)
         _tilelib_registry.register(descriptor)
@@ -584,7 +820,12 @@ def emit_elementwise_vmi(
     logical_lanes: int | None = None,
     allowed_dtypes: Sequence[ScalarType] = (f32,),
 ) -> None:
-    """Emit one flat logical-row loop for a standalone elementwise candidate."""
+    """Emit one flat principal loop for a standalone elementwise candidate.
+
+    Multi-row tiles retain the logical-row domain used by VMI fusion. A static
+    one-row f32 tile can use the equivalent native-chunk domain so physical
+    lowering keeps a compact hardware loop instead of unrolling a wide vreg.
+    """
 
     if not sources:
         raise ValueError("emit_elementwise_vmi requires at least one source tile")
@@ -596,6 +837,21 @@ def emit_elementwise_vmi(
         logical_lanes=logical_lanes,
         allowed_dtypes=allowed_dtypes,
     )
+
+    rows, cols = dst._spec.shape
+    native_lanes = dst.element_type.lanes
+    if (
+        logical_lanes == cols
+        and rows == 1
+        and dst.element_type == f32
+        and cols > native_lanes
+        and cols % native_lanes == 0
+    ):
+        _emit_elementwise_contiguous_blocks_vmi(
+            dst, sources, compute, block_lanes=native_lanes
+        )
+        return
+
     block_map = CanonicalBlockMap.from_tile(dst, logical_lanes=logical_lanes)
 
     _prepare_tile_access(*sources, dst)
@@ -605,6 +861,81 @@ def emit_elementwise_vmi(
         values = tuple(_vload(source, coordinate) for source in sources)
         result = compute(values, mask)
         _vstore(result, dst, coordinate, mask)
+
+
+def _emit_elementwise_contiguous_blocks_vmi(
+    dst: _TileProxy,
+    sources: Sequence[_TileProxy],
+    compute: ElementwiseCompute,
+    *,
+    block_lanes: int,
+) -> None:
+    """Keep a full one-row, multi-VL elementwise tile as one chunk loop."""
+
+    rows, cols = dst._spec.shape
+    if rows != 1 or cols % block_lanes != 0:
+        raise ValueError("contiguous VMI blocks require one exactly tiled row")
+
+    _prepare_tile_access(*sources, dst)
+    mask = _create_mask_lanes(
+        block_lanes, block_lanes, dst.element_type, trace=dst._trace
+    )
+    with for_(0, cols, step=block_lanes) as offset:
+        values = tuple(
+            _vload_linear(source, offset, lanes=block_lanes)
+            for source in sources
+        )
+        result = compute(values, mask)
+        _vstore_linear(result, dst, offset, mask)
+
+
+def emit_scalar_fill_vmi(
+    scalar: _Value,
+    dst: _TileProxy,
+    *,
+    allowed_dtypes: Sequence[ScalarType] = (f32,),
+) -> None:
+    """Broadcast a runtime scalar into each wide logical row of ``dst``."""
+
+    if not isinstance(dst, _TileProxy):
+        raise TypeError("scalar-fill VMI candidate destination must be a traced Tile")
+    if dst.element_type not in allowed_dtypes:
+        raise ValueError(
+            "VMI scalar-fill candidate dtype is not supported; "
+            f"got {dst.element_type}, expected one of {tuple(allowed_dtypes)}"
+        )
+    if dst._spec.b_layout != "row_major":
+        raise ValueError("VMI scalar-fill candidates require row-major tiles")
+
+    rows, cols = dst._spec.shape
+    native_lanes = dst.element_type.lanes
+    if (
+        rows == 1
+        and dst.element_type == f32
+        and cols > native_lanes
+        and cols % native_lanes == 0
+    ):
+        _prepare_tile_access(dst)
+        mask = _create_mask_lanes(
+            native_lanes, native_lanes, dst.element_type, trace=dst._trace
+        )
+        fill = _wrap_vreg(
+            _vmi_builder.vbrc(scalar.value, size=native_lanes),
+            dst.element_type,
+        )
+        with for_(0, cols, step=native_lanes) as offset:
+            _vstore_linear(fill, dst, offset, mask)
+        return
+
+    block_map = CanonicalBlockMap.from_tile(dst)
+    _prepare_tile_access(dst)
+    mask = _create_mask(block_map, dst.element_type, trace=dst._trace)
+    fill = _wrap_vreg(
+        _vmi_builder.vbrc(scalar.value, size=block_map.logical_lanes),
+        dst.element_type,
+    )
+    with for_(0, block_map.logical_block_count, step=1) as logical_block:
+        _vstore(fill, dst, block_map.coordinate(logical_block), mask)
 
 
 def _validate_elementwise_tiles(
@@ -650,6 +981,18 @@ def _exp(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
     if len(values) != 1:
         raise ValueError("texp VMI candidate expects one source vector")
     return _vexp(values[0], mask)
+
+
+def _abs(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
+    if len(values) != 1:
+        raise ValueError("tabs VMI candidate expects one source vector")
+    return _vabs(values[0], mask)
+
+
+def _neg(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
+    if len(values) != 1:
+        raise ValueError("tneg VMI candidate expects one source vector")
+    return _vneg(values[0], mask)
 
 
 def _sub(values: Sequence[_VectorValue], mask: _MaskValue) -> _VectorValue:
@@ -1263,13 +1606,21 @@ def _validate_row_reduce_tiles(
         raise ValueError("row-reduce source must be row-major")
     rows, physical_cols = src._spec.shape
     valid_rows, valid_cols = src._spec.effective_valid_shape
-    if valid_rows != rows:
-        raise ValueError("row-reduce VMI candidates do not support tail rows")
-    if valid_cols <= 0 or valid_cols > physical_cols:
-        raise ValueError("row-reduce valid columns must be within the source tile")
+    if valid_rows != rows or valid_cols <= 0 or valid_cols > physical_cols:
+        raise ValueError("row-reduce valid shape must fit the physical source tile")
+    safe_read_cols = ((valid_cols + f32.lanes - 1) // f32.lanes) * f32.lanes
+    if (
+        src._spec.effective_valid_shape != src._spec.shape
+        and safe_read_cols > physical_cols
+    ):
+        raise ValueError(
+            "row-reduce source must contain every physical lane read by its mask"
+        )
     workspace_rows, workspace_cols = workspace._spec.shape
     if workspace_rows != rows or workspace_cols < 1:
         raise ValueError("row-reduce workspace must have matching rows")
+    if workspace._spec.effective_valid_shape != workspace._spec.shape:
+        raise ValueError("row-reduce VMI candidates require a full workspace tile")
     if dst._spec.shape != (rows, 1) or dst._spec.b_layout != "col_major":
         raise ValueError("row-reduce destination must be a col-major [rows, 1] tile")
     if dst._spec.effective_valid_shape != (rows, 1):
@@ -1285,53 +1636,128 @@ def emit_row_reduce_vmi(
     kind: str,
 ) -> None:
     rows, physical_cols, valid_cols = _validate_row_reduce_tiles(src, workspace, dst)
-    reduce_op = _vreduce_max if kind == "max" else _vreduce_add
+    if valid_cols != physical_cols:
+        raise ValueError("grouped row-reduce requires a full static source tile")
 
     _prepare_tile_access(src, dst)
-    full_mask = _create_mask_lanes(valid_cols, valid_cols, f32, trace=src._trace)
-    scalar_mask = _create_mask_lanes(1, 1, f32, trace=src._trace)
-    with for_(0, rows, step=1) as row:
-        row_offset = index_mul(row, physical_cols)
-        accumulator = reduce_op(
-            _vload_linear(src, row_offset, lanes=valid_cols), full_mask
+    total_lanes = rows * physical_cols
+    full_mask = _create_mask_lanes(
+        total_lanes, total_lanes, f32, trace=src._trace
+    )
+    source = _vload_linear(src, 0, lanes=total_lanes)
+    if kind == "max":
+        reduced_value = _vmi_builder.vcmax(
+            source.value, full_mask.value, group=rows
         )
-        _vstore_linear(accumulator, dst, row, scalar_mask)
+    else:
+        reduced_value = _vmi_builder.vcadd(
+            source.value, full_mask.value, group=rows, reassoc=True
+        )
+    reduced = _wrap_vreg(reduced_value, f32)
+
+    dst_ptr = dst._trace.ensure_tile_ptr(dst)
+    offset = dst._trace._coerce_index(0)
+    row_stride = dst._trace._coerce_index(1)
+    _vmi_builder.vstore(
+        reduced.value,
+        dst_ptr.value,
+        offset.value,
+        stride=row_stride.value,
+        group=rows,
+    )
+
+
+def emit_row_expand_binary_vmi(
+    row_tensor: _TileProxy,
+    compact_row_state: _TileProxy,
+    output: _TileProxy,
+    operation: str,
+) -> None:
+    """Apply one compact per-row value to each wide logical row."""
+
+    operations = {
+        "sub": _vsub,
+        "mul": _vmul,
+        "div": _vdiv,
+    }
+    if operation not in operations:
+        raise ValueError(
+            f"row-expand VMI candidate does not support {operation!r}; "
+            f"expected one of {sorted(operations)}"
+        )
+    if (
+        row_tensor.element_type != f32
+        or compact_row_state.element_type != f32
+        or output.element_type != f32
+    ):
+        raise ValueError("row-expand VMI candidates currently support only f32")
+    if (
+        row_tensor._spec.b_layout != "row_major"
+        or output._spec.b_layout != "row_major"
+    ):
+        raise ValueError("row-expand source and destination must be row-major")
+    logical_shape = row_tensor._spec.effective_valid_shape
+    if output._spec.effective_valid_shape != logical_shape:
+        raise ValueError(
+            "row-expand source and destination logical shapes must match"
+        )
+    if not _is_safe_static_row_prefix(
+        row_tensor._spec.shape,
+        logical_shape,
+        native_lanes=f32.lanes,
+    ) or not _is_safe_static_row_prefix(
+        output._spec.shape,
+        output._spec.effective_valid_shape,
+        native_lanes=f32.lanes,
+    ):
+        raise ValueError("row-expand logical row exceeds its physical storage")
+    rows, cols = logical_shape
+    if (
+        compact_row_state._spec.shape != (rows, 1)
+        or compact_row_state._spec.effective_valid_shape != (rows, 1)
+        or compact_row_state._spec.b_layout != "col_major"
+    ):
+        raise ValueError(
+            "row-expand compact state must be a col-major [rows, 1] tile"
+        )
+    src_physical_cols = row_tensor._spec.shape[1]
+    dst_physical_cols = output._spec.shape[1]
+
+    _prepare_tile_access(row_tensor, compact_row_state, output)
+    full_mask = _create_mask_lanes(cols, cols, f32, trace=row_tensor._trace)
+    with for_(0, rows, step=1) as row:
+        row_scalar = _vload_linear(compact_row_state, row, lanes=1)
+        broadcast = _vbrc(row_scalar, lanes=cols)
+        src_offset = index_mul(row, src_physical_cols)
+        dst_offset = index_mul(row, dst_physical_cols)
+        value = _vload_linear(row_tensor, src_offset, lanes=cols)
+        result = operations[operation](value, broadcast, full_mask)
+        _vstore_linear(result, output, dst_offset, full_mask)
 
 
 def emit_row_expand_sub_vmi(
     src: _TileProxy, row_values: _TileProxy, dst: _TileProxy
 ) -> None:
-    if (
-        src.element_type != f32
-        or row_values.element_type != f32
-        or dst.element_type != f32
-    ):
-        raise ValueError("trowexpandsub VMI candidate currently supports only f32")
-    if src._spec.shape != dst._spec.shape:
-        raise ValueError("trowexpandsub source and destination shapes must match")
-    if src._spec.b_layout != "row_major" or dst._spec.b_layout != "row_major":
-        raise ValueError("trowexpandsub source and destination must be row-major")
-    rows, cols = src._spec.shape
-    if (
-        row_values._spec.shape != (rows, 1)
-        or row_values._spec.b_layout != "col_major"
-    ):
-        raise ValueError("trowexpandsub row values must be a col-major [rows, 1] tile")
-    block_map = CanonicalBlockMap.from_tile(src, logical_lanes=cols)
+    emit_row_expand_binary_vmi(src, row_values, dst, "sub")
 
-    _prepare_tile_access(src, row_values, dst)
-    full_mask = _create_mask(block_map, f32, trace=src._trace)
+
+def emit_col_expand_vmi(src: _TileProxy, dst: _TileProxy) -> None:
+    """Broadcast the single logical source row to every destination row."""
+
+    if src.element_type != f32 or dst.element_type != f32:
+        raise ValueError("tcolexpand VMI candidate currently supports only f32")
+    if src._spec.b_layout != "row_major" or dst._spec.b_layout != "row_major":
+        raise ValueError("tcolexpand source and destination must be row-major")
+    rows, cols = dst._spec.shape
+    if src._spec.shape != (1, cols):
+        raise ValueError("tcolexpand source must be a row-major [1, cols] tile")
+    block_map = CanonicalBlockMap.from_tile(dst, logical_lanes=cols)
+
+    _prepare_tile_access(src, dst)
+    full_mask = _create_mask(block_map, f32, trace=dst._trace)
+    broadcast = _vload_linear(src, 0, lanes=cols)
     with for_(0, rows, step=1) as row:
-        row_scalar = _vload_linear(row_values, row, lanes=1)
-        broadcast = _vbrc(row_scalar, lanes=cols)
-        row_block_base = index_mul(row, block_map.blocks_per_row)
-        for block_in_row in range(block_map.blocks_per_row):
-            coordinate = block_map.coordinate(
-                index_add(row_block_base, block_in_row)
-            )
-            value = _vload(src, coordinate)
-            result = _vsub(value, broadcast, full_mask)
-            _vstore(result, dst, coordinate, full_mask)
+        _vstore(broadcast, dst, block_map.coordinate(row), full_mask)
 
 
 def _validate_col_reduce_tiles(
@@ -1562,10 +1988,20 @@ def emit_col_expand_binary_vmi(
 
 
 def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
-    if src.element_type != f32:
-        raise ValueError("tcvt VMI candidate currently supports f32 source")
-    if dst.element_type not in (f16, bf16):
-        raise ValueError("tcvt VMI candidate currently supports f32 -> f16/bf16")
+    supported_forms = {
+        (bf16, f32),
+        (f16, f32),
+        (i32, f32),
+        (f32, bf16),
+        (f32, f16),
+        (f32, i32),
+        (i32, f16),
+    }
+    if (src.element_type, dst.element_type) not in supported_forms:
+        raise ValueError(
+            "tcvt VMI candidate does not support "
+            f"{src.element_type} -> {dst.element_type}"
+        )
     if src._spec.shape != dst._spec.shape:
         raise ValueError("tcvt source and destination shapes must match")
     if src._spec.b_layout != "row_major" or dst._spec.b_layout != "row_major":
@@ -1574,12 +2010,40 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
     block_map = CanonicalBlockMap.from_tile(src, logical_lanes=cols)
 
     _prepare_tile_access(src, dst)
-    dst_mask = _create_mask_lanes(
-        cols, cols, dst.element_type, trace=src._trace
-    )
+    dst_mask = _create_mask_lanes(cols, cols, dst.element_type, trace=src._trace)
+    round_mode = _context_attr(src, "round_mode", "RINT")
+    rounding = {
+        "RINT": "R",
+        "NONE": "R",
+        "ROUND": "A",
+        "TRUNC": "Z",
+    }.get(round_mode)
+    if rounding is None:
+        raise ValueError(f"tcvt VMI candidate does not support {round_mode} rounding")
+    sat_mode = _context_attr(src, "sat_mode", "OFF")
+    saturate = "SAT" if sat_mode == "ON" else "NOSAT"
     with for_(0, block_map.logical_block_count, step=1) as logical_block:
         coordinate = block_map.coordinate(logical_block)
-        converted = _vcvt(_vload(src, coordinate), dst.element_type)
+        kwargs = {}
+        if src.element_type == f32 and dst.element_type in (f16, bf16):
+            kwargs["rounding"] = rounding
+            kwargs["saturate"] = saturate
+        elif src.element_type == f32 and dst.element_type == i32:
+            kwargs["rounding"] = rounding
+            kwargs["saturate"] = saturate
+        elif src.element_type == i32 and dst.element_type == f32:
+            kwargs["rounding"] = rounding
+        source = _vload(src, coordinate)
+        if src.element_type == i32 and dst.element_type == f16:
+            widened = _vcvt(source, f32, rounding=rounding)
+            converted = _vcvt(
+                widened,
+                f16,
+                rounding=rounding,
+                saturate=saturate,
+            )
+        else:
+            converted = _vcvt(source, dst.element_type, **kwargs)
         _vstore(converted, dst, coordinate, dst_mask)
 
 
@@ -1587,6 +2051,7 @@ __all__ = [
     "FLOAT_DTYPES",
     "Tile",
     "VMI_TILELIB_REGISTRY",
+    "_abs",
     "_add",
     "_context_attr",
     "_divide_by_scalar",
@@ -1598,6 +2063,8 @@ __all__ = [
     "_max",
     "_move",
     "_mul",
+    "_neg",
+    "_negate_scalar",
     "_operand_kinds_are",
     "_sub",
     "_vadds",
@@ -1606,12 +2073,18 @@ __all__ = [
     "_vmins",
     "_vmuls",
     "canonical_vmi_template",
+    "convert_vmi_constraint",
     "emit_elementwise_vmi",
+    "emit_scalar_fill_vmi",
+    "col_expand_vmi_constraint",
     "emit_col_expand_binary_vmi",
+    "emit_col_expand_vmi",
     "emit_col_reduce_vmi",
     "emit_convert_vmi",
     "emit_recip_vmi",
     "emit_row_expand_sub_vmi",
+    "emit_row_expand_binary_vmi",
+    "row_expand_binary_vmi_constraint",
     "emit_row_reduce_vmi",
     "emit_rsqrt_vmi",
     "emit_sqrt_high_precision_vmi",

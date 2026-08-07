@@ -82,7 +82,7 @@ static bool isCurrentlyPlannableOp(StringRef opName) {
   return llvm::StringSwitch<bool>(opName)
       .Cases("tmul", "tdiv", "tadd", "tsub", "tmax", "tmin", true)
       .Cases("tmuls", "tdivs", "tadds", "tsubs", "tmaxs", "tmins", true)
-      .Case("texp", true)
+      .Cases("texp", "tabs", "tneg", "trecip", "tsqrt", "trsqrt", true)
       .Case("tmov", true)
       .Case("texpands", true)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv", true)
@@ -191,26 +191,24 @@ static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
     for (const pto::FusionComputeNode *node : stableOrder)
       memberOps.insert(node->op);
 
-    // A local fallback or a transparent tile resource/view declaration is part
-    // of the same loose FusionRegion, but is not a VMI compute node. Give these
-    // ops between selected compute members the group's ordering metadata in
-    // block order so RegionGen contains them in the same contiguous span.
-    // PTOVmiLoopFusion will still stop at a local fallback's non-VMI loop;
-    // alloc_tile/subview themselves do not create loop-fusion boundaries.
+    // Local fallbacks and structural scaffold are part of the same loose
+    // FusionRegion, but are not VMI compute nodes. Give them ordering metadata
+    // when they sit between selected compute members so RegionGen preserves
+    // their SSA definitions in the contiguous span. PTOVmiLoopFusion still
+    // stops at a non-VMI fallback loop.
     Operation *first = stableOrder.front()->op;
     Operation *last = stableOrder.back()->op;
     int64_t order = 0;
     for (Operation *op = first; op; op = op->getNextNode()) {
       bool include = memberOps.contains(op);
+      if (!include)
+        include = pto::isFusionTransparentScaffold(op);
       if (!include) {
-        include = isa<pto::AllocTileOp, pto::SubViewOp>(op);
-        if (!include) {
-          FailureOr<pto::FusionOpSemantics> semanticsOr =
-              pto::getFusionOpSemantics(op);
-          include = succeeded(semanticsOr) &&
-                    semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
-                    op->hasAttr(kVmiFusionBoundaryAttr);
-        }
+        FailureOr<pto::FusionOpSemantics> semanticsOr =
+            pto::getFusionOpSemantics(op);
+        include = succeeded(semanticsOr) &&
+                  semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
+                  op->hasAttr(kVmiFusionBoundaryAttr);
       }
       if (!include) {
         if (op == last)
@@ -621,10 +619,10 @@ public:
     if (block.computeNodes.empty())
       return {};
 
-    // Map node id -> whether the op immediately preceding it in block order
-    // is a hard, non-plannable boundary. A local fallback stays in the loose
-    // group and is annotated by assignStableGroupMetadata; it will later stop
-    // VMI loop fusion without splitting the enclosing FusionRegion.
+    // Map node id -> whether a real hard boundary precedes it in block order.
+    // Structural allocation/view scaffold and pure scalar/index plumbing are
+    // transparent and are later annotated into the loose region. A local
+    // fallback also stays in the loose group, but stops downstream loop fusion.
     DenseMap<unsigned, bool> precededByNonPlannable;
     DenseMap<Operation *, unsigned> nodeIdByOp;
     for (const pto::FusionComputeNode &n : block.computeNodes)
@@ -640,12 +638,7 @@ public:
         hardBoundarySinceCompute = false;
         continue;
       }
-      // alloc_tile and subview only declare SSA tile resources/views. They do
-      // not access tile data, and PTOOpScheduling classifies both as movable,
-      // so neither may split an otherwise adjacent VMI compute run. Keep other
-      // unknown ops conservative until their scheduling and RegionGen SSA
-      // behavior is explicitly supported.
-      if (isa<pto::AllocTileOp, pto::SubViewOp>(op))
+      if (pto::isFusionTransparentScaffold(&op))
         continue;
       FailureOr<pto::FusionOpSemantics> semanticsOr =
           pto::getFusionOpSemantics(&op);
@@ -668,10 +661,9 @@ public:
     };
 
     for (const pto::FusionComputeNode &node : block.computeNodes) {
-      // F3 boundary: a non-plannable op sits between the previous plannable
-      // node and this one — close the open group so the merge does not cross
-      // a sync/DMA boundary. See the class doc comment for why no UB-overlap
-      // check applies at this layer (it is deferred to PTOVmiLoopFusion).
+      // F3 boundary: a real non-plannable op sits between the previous
+      // plannable node and this one. Transparent scaffold was filtered above,
+      // so this closes the group for sync/DMA/call/unknown PTO operations.
       auto precIt = precededByNonPlannable.find(node.id);
       if (precIt != precededByNonPlannable.end() && precIt->second)
         flushCurrent();

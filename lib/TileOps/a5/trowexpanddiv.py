@@ -18,3 +18,22 @@ template_trowexpanddiv = register_row_expand_binary(
     vector_op=pto.vdiv,
     dtypes=FLOAT_SIGNATURES,
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    emit_row_expand_binary_vmi,
+    row_expand_binary_vmi_constraint,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="trowexpanddiv",
+    name="vmi_trowexpanddiv",
+    dtypes=(("f32", "f32", "f32"),),
+    context_constraints={"precisionType": ("default",)},
+    constraints=(row_expand_binary_vmi_constraint,),
+)
+def vmi_trowexpanddiv(src: pto.Tile, row_values: pto.Tile, dst: pto.Tile):
+    emit_row_expand_binary_vmi(src, row_values, dst, "div")

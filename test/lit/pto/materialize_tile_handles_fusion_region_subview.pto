@@ -28,11 +28,14 @@ module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
           : !pto.tile_buf<vec, 8x512xf32, valid=?x?>,
             !pto.tile_buf<vec, 8x512xf32, valid=?x?>)
         outs(%dst : !pto.tile_buf<vec, 8x512xf32, valid=?x?>)
-      pto.yield(%dst) : (!pto.tile_buf<vec, 8x512xf32, valid=?x?>) -> ()
-    } : !pto.tile_buf<vec, 8x512xf32, valid=?x?>
+      %inner = pto.subview %dst[%c0, %c0] sizes [8, 512]
+        : !pto.tile_buf<vec, 8x512xf32, valid=?x?>
+          -> !pto.tile_buf<vec, 8x512xf32>
+      pto.yield(%inner) : (!pto.tile_buf<vec, 8x512xf32>) -> ()
+    } : !pto.tile_buf<vec, 8x512xf32>
 
     %slice = pto.subview %region[%c0, %c0] sizes [8, 448]
-      : !pto.tile_buf<vec, 8x512xf32, valid=?x?>
+      : !pto.tile_buf<vec, 8x512xf32>
         -> !pto.tile_buf<vec, 8x448xf32>
     pto.trowexpandmul ins(%slice, %workspace
         : !pto.tile_buf<vec, 8x448xf32>,
@@ -45,6 +48,8 @@ module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
 // CHECK-LABEL: func.func @materialize_fusion_region_subview
 // CHECK: pto.fusion_region
 // CHECK: pto.yield
+// CHECK-SAME: memref<8x512xf32
+// CHECK: memref.subview
 // CHECK-SAME: memref<8x512xf32
 // CHECK: memref.subview
 // CHECK-SAME: memref<8x512xf32

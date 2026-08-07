@@ -99,10 +99,13 @@ static bool isForbiddenInsideInferredVectorScope(Operation *op) {
 static bool isCloneableMaskProducer(Operation *op) {
   return isa<pto::PsetB8Op, pto::PsetB16Op, pto::PsetB32Op, pto::PgeB8Op,
              pto::PgeB16Op, pto::PgeB32Op, pto::PltB8Op, pto::PltB16Op,
-             pto::PltB32Op, pto::PandOp, pto::PorOp, pto::PnotOp>(op);
+             pto::PltB32Op, pto::PandOp, pto::PorOp, pto::PnotOp,
+             pto::PintlvB8Op, pto::PintlvB16Op, pto::PintlvB32Op>(op);
 }
 
 static bool isCloneableScalarBroadcastProducer(Operation *op) {
+  if (isa<pto::VbrOp>(op))
+    return true;
   auto vdup = dyn_cast<pto::VdupOp>(op);
   return vdup && !isa<pto::VRegType>(vdup.getInput().getType());
 }

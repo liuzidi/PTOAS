@@ -49,6 +49,8 @@ static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
     "pto.vmi.fusion.boundary";
 static constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
     "pto.vmi.fusion.boundary_reason";
+static constexpr llvm::StringLiteral kVmiFusionPrincipalLoopAttr =
+    "pto.vmi.fusion.principal_loop";
 static constexpr llvm::StringLiteral kErrInstanceBodyMissing =
     "E_OPLIB_INSTANCE_BODY_MISSING";
 
@@ -194,6 +196,13 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
 
   OpBuilder builder(call);
   IRMapping mapping;
+  auto impl = callee->getAttrOfType<StringAttr>(kTileLibImplAttr);
+  const bool isFusionEligibleVmi =
+      impl && impl.getValue() == "vmi" &&
+      !callee->hasAttr(kVmiFusionBoundaryAttr);
+  const bool hasSinglePrincipalLoop =
+      llvm::count_if(entry.without_terminator(),
+                     [](Operation &op) { return isa<scf::ForOp>(op); }) == 1;
   for (auto [arg, operand] :
        llvm::zip(entry.getArguments(), call.getOperands()))
     mapping.map(arg, operand);
@@ -210,6 +219,9 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
 
     Operation *newOp = cloneOpForInlineWithFix(builder, op, mapping);
     copyTileLibSelectionAttrs(newOp, callee);
+    if (isa<scf::ForOp>(newOp) && isFusionEligibleVmi &&
+        hasSinglePrincipalLoop)
+      newOp->setAttr(kVmiFusionPrincipalLoopAttr, builder.getUnitAttr());
     for (auto [oldRes, newRes] :
          llvm::zip(op.getResults(), newOp->getResults()))
       mapping.map(oldRes, newRes);

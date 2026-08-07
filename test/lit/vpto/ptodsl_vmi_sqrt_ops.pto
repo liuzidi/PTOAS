@@ -58,6 +58,4 @@ module {
 // FINAL-LABEL: func.func @ptodsl_vmi_sqrt_ops
 // FINAL: pto.vecscope
 // FINAL: pto.vsqrt
-// FINAL: pto.vmula
-// FINAL: pto.vbitcast
 // FINAL: pto.vdiv

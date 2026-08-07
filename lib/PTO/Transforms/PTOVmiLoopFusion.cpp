@@ -60,6 +60,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/VmiMemoryLocation.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -131,33 +132,41 @@ static bool sameHeader(scf::ForOp a, scf::ForOp b) {
   return true;
 }
 
+static bool isTileLibVmiPrincipalLoop(scf::ForOp loop) {
+  auto impl = loop->getAttrOfType<StringAttr>("pto.tilelib.impl");
+  auto source = loop->getAttrOfType<StringAttr>("pto.vmi.fusion.source");
+  if (!impl || impl.getValue() != "vmi" || !source ||
+      source.getValue() != "tilelib")
+    return false;
+  return loop->hasAttr("pto.vmi.fusion.principal_loop") &&
+         !loop->hasAttr("pto.vmi.fusion.boundary");
+}
+
 // --- UB (tile buffer) identity: which compile-time address+type a vmi
 // load/store accesses. Two ops touch the same UB iff they resolve to the same
 // (addr-constant, memref-type) pair. Traced through pto.castptr -> memref ->
 // pto.pointer_cast(addr-const). Returns std::nullopt if the base is not a
 // compile-time constant address (then we conservatively cannot reason).
 struct UBId {
-  Value addrConst;      // the arith.constant feeding pointer_cast
-  Type memrefType;      // the pointer_cast result type (shape+dtype)
+  int64_t address = 0;  // numeric address, independent of SSA identity
+  Type memrefType;      // the pointer_cast view type (shape+dtype)
+  std::optional<int64_t> storageBytes;
   bool operator==(const UBId &o) const {
-    return addrConst == o.addrConst && memrefType == o.memrefType;
+    return address == o.address && memrefType == o.memrefType;
   }
 };
 
 static std::optional<UBId> resolvePtrUB(Value base) {
-  while (base) {
-    if (auto cp = base.getDefiningOp<pto::CastPtrOp>()) {
-      base = cp->getOperand(0);
-      continue;
-    }
-    if (auto pc = base.getDefiningOp<pto::PointerCastOp>()) {
-      if (!pc.getOperands().empty() &&
-          isa<arith::ConstantOp>(pc.getOperands()[0].getDefiningOp()))
-        return UBId{pc.getOperands()[0], pc.getResult().getType()};
-    }
-    break;
-  }
-  return std::nullopt;
+  auto root = pto::resolveVmiStorageRoot(base);
+  if (!root)
+    return std::nullopt;
+  return UBId{root->address, root->viewType, root->storageBytes};
+}
+
+static bool mayAlias(const UBId &lhs, const UBId &rhs) {
+  return pto::mayAliasVmiStorageRoot(
+      pto::VmiStorageRoot{lhs.address, lhs.storageBytes, lhs.memrefType},
+      pto::VmiStorageRoot{rhs.address, rhs.storageBytes, rhs.memrefType});
 }
 
 static std::optional<UBId> getVLoadUB(pto::VMIvLoadOp op) {
@@ -183,13 +192,80 @@ static void collectLoopUBs(scf::ForOp loop, SmallVectorImpl<UBId> &reads,
 }
 
 static bool ubListContains(ArrayRef<UBId> list, const UBId &x) {
-  return llvm::any_of(list, [&](const UBId &u) { return u == x; });
+  return llvm::any_of(list, [&](const UBId &u) { return mayAlias(u, x); });
 }
 
 // A UB access with its offset value, so cross-iteration dependencies can be
 // detected by checking whether the offset depends on a loop IV. A5 vload/
 // vstore offsets are `index`-typed.
-struct UBAccess { UBId ub; Value offset; bool isLoad; };
+struct UBAccess {
+  UBId ub;
+  Value offset;
+  bool isLoad;
+  int64_t accessBytes = 0;
+};
+
+static std::optional<int64_t> getElementBytes(Type type) {
+  if (auto memref = dyn_cast<MemRefType>(type))
+    type = memref.getElementType();
+  if (type.isF32() || type.isInteger(32))
+    return 4;
+  if (type.isF16() || type.isBF16() || type.isInteger(16))
+    return 2;
+  if (type.isInteger(8) || type.isInteger(1))
+    return 1;
+  if (type.isInteger(64))
+    return 8;
+  return std::nullopt;
+}
+
+static int64_t getVRegAccessBytes(Type type) {
+  auto vreg = dyn_cast<pto::VMIVRegType>(type);
+  if (!vreg)
+    return 0;
+  auto elementBytes = getElementBytes(vreg.getElementType());
+  if (!elementBytes)
+    return 0;
+  return static_cast<int64_t>(vreg.getElementCount()) * *elementBytes;
+}
+
+static std::optional<int64_t> getStaticInteger(Value value) {
+  if (auto c = value.getDefiningOp<arith::ConstantIndexOp>())
+    return c.value();
+  if (auto c = value.getDefiningOp<arith::ConstantIntOp>())
+    return c.value();
+  return std::nullopt;
+}
+
+static bool accessRangesMayOverlap(const UBAccess &lhs,
+                                   const UBAccess &rhs) {
+  if (!mayAlias(lhs.ub, rhs.ub))
+    return false;
+  if (lhs.ub.memrefType != rhs.ub.memrefType || lhs.accessBytes <= 0 ||
+      rhs.accessBytes <= 0)
+    return true;
+  auto lhsOffset = getStaticInteger(lhs.offset);
+  auto rhsOffset = getStaticInteger(rhs.offset);
+  auto elementBytes = getElementBytes(lhs.ub.memrefType);
+  if (!lhsOffset || !rhsOffset || !elementBytes)
+    return true;
+  int64_t lhsDelta = 0;
+  int64_t rhsDelta = 0;
+  if (__builtin_mul_overflow(*lhsOffset, *elementBytes, &lhsDelta) ||
+      __builtin_mul_overflow(*rhsOffset, *elementBytes, &rhsDelta))
+    return true;
+  int64_t lhsBegin = 0;
+  int64_t rhsBegin = 0;
+  if (__builtin_add_overflow(lhs.ub.address, lhsDelta, &lhsBegin) ||
+      __builtin_add_overflow(rhs.ub.address, rhsDelta, &rhsBegin))
+    return true;
+  int64_t lhsEnd = 0;
+  int64_t rhsEnd = 0;
+  if (__builtin_add_overflow(lhsBegin, lhs.accessBytes, &lhsEnd) ||
+      __builtin_add_overflow(rhsBegin, rhs.accessBytes, &rhsEnd))
+    return true;
+  return lhsBegin < rhsEnd && rhsBegin < lhsEnd;
+}
 
 // Indirect/non-vload-vstore memory ops are not modeled by the UB dependency
 // analysis and therefore block fusion. Ordinary vload/vstore accesses must
@@ -213,6 +289,10 @@ static bool hasUnmodeledMemoryAccess(scf::ForOp loop) {
       }
       return WalkResult::advance();
     }
+    if (isa<func::CallOp>(op)) {
+      unmodeled = true;
+      return WalkResult::interrupt();
+    }
     if (auto iface = dyn_cast<MemoryEffectOpInterface>(op)) {
       if (iface.hasEffect<MemoryEffects::Read>() ||
           iface.hasEffect<MemoryEffects::Write>()) {
@@ -232,10 +312,15 @@ static void collectLoopUBAccesses(scf::ForOp loop,
   loop.getBody()->walk([&](Operation *op) {
     if (auto v = dyn_cast<pto::VMIvLoadOp>(op)) {
       if (auto id = getVLoadUB(v))
-        out.push_back({*id, v.getOffset(), /*isLoad=*/true});
+        out.push_back({*id, v.getOffset(), /*isLoad=*/true,
+                       getVRegAccessBytes(v.getResult(0).getType())});
     } else if (auto v = dyn_cast<pto::VMIvStoreOp>(op)) {
-      if (auto id = getVStoreUB(v))
-        out.push_back({*id, v.getOffset(), /*isLoad=*/false});
+      if (auto id = getVStoreUB(v)) {
+        int64_t bytes = v.getValues().empty()
+                            ? 0
+                            : getVRegAccessBytes(v.getValues().front().getType());
+        out.push_back({*id, v.getOffset(), /*isLoad=*/false, bytes});
+      }
     }
     return WalkResult::advance();
   });
@@ -370,6 +455,35 @@ static bool isInjectiveAffineOffset(Value offset, ArrayRef<Value> ivs) {
   return false;
 }
 
+static std::optional<int64_t>
+getInjectiveAffineCoefficient(Value offset, ArrayRef<Value> ivs) {
+  if (llvm::is_contained(ivs, offset))
+    return 1;
+  Operation *def = offset.getDefiningOp();
+  if (!def || def->getNumRegions() != 0)
+    return std::nullopt;
+  if (auto mul = dyn_cast<arith::MulIOp>(def)) {
+    Value lhs = mul.getLhs(), rhs = mul.getRhs();
+    bool lhsIV = llvm::is_contained(ivs, lhs);
+    bool rhsIV = llvm::is_contained(ivs, rhs);
+    if (lhsIV == rhsIV)
+      return std::nullopt;
+    auto multiplier = getStaticInteger(lhsIV ? rhs : lhs);
+    if (!multiplier || *multiplier <= 0)
+      return std::nullopt;
+    return *multiplier;
+  }
+  if (auto add = dyn_cast<arith::AddIOp>(def)) {
+    auto lhs = getInjectiveAffineCoefficient(add.getLhs(), ivs);
+    auto rhs = getInjectiveAffineCoefficient(add.getRhs(), ivs);
+    if (lhs && !offsetDependsOnIV(add.getRhs(), ivs))
+      return lhs;
+    if (rhs && !offsetDependsOnIV(add.getLhs(), ivs))
+      return rhs;
+  }
+  return std::nullopt;
+}
+
 // A member of a fusion run: the scf.for plus the ops sitting between the
 // previous member's for and this one, split by where they can legally land
 // after fusion:
@@ -422,8 +536,18 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
     collectLoopUBAccesses(loop, runAcc);
   }
   collectLoopUBAccesses(cand, candAcc);
+  scf::ForOp firstMemberLoop = members.front().loop;
+  auto iterationStep = getStaticInteger(firstMemberLoop.getStep());
 
   auto isCrossIter = [&](const UBAccess &w, const UBAccess &r) -> bool {
+    if (!accessRangesMayOverlap(w, r))
+      return false;
+    // A same numeric UB address exposed through different element types is a
+    // byte-range alias, but the first fusion legality proof cannot normalize
+    // the two element-index domains into one byte affine expression.  Keep
+    // the original loop ordering rather than guessing.
+    if (w.ub.address != r.ub.address || w.ub.memrefType != r.ub.memrefType)
+      return true;
     bool wIV = offsetDependsOnIV(w.offset, runIVs);
     bool rIV = offsetDependsOnIV(r.offset, runIVs);
     // Only a per-iteration transfer where BOTH offsets carry the IV is a
@@ -443,7 +567,25 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
       return true;
     // Both injective affine in the IV: same-iteration iff structurally
     // equivalent (all run IVs map to the single fused IV).
-    return !areEquivalentOffsetValues(w.offset, r.offset, runIVs);
+    if (!areEquivalentOffsetValues(w.offset, r.offset, runIVs))
+      return true;
+
+    // Injectivity of the scalar start address is not sufficient for a wide
+    // access: offset=i with a 64-lane f32 vreg overlaps the next 63 logical
+    // iterations.  Require the byte distance between adjacent iterations to
+    // cover both accesses before changing loop-by-loop execution into
+    // interleaved execution.
+    auto coefficient = getInjectiveAffineCoefficient(w.offset, runIVs);
+    auto elementBytes = getElementBytes(w.ub.memrefType);
+    if (!coefficient || !iterationStep || *iterationStep <= 0 ||
+        !elementBytes || w.accessBytes <= 0 || r.accessBytes <= 0)
+      return true;
+    if (*coefficient > INT64_MAX / *iterationStep ||
+        *coefficient * *iterationStep > INT64_MAX / *elementBytes)
+      return true;
+    int64_t iterationDistanceBytes =
+        *coefficient * *iterationStep * *elementBytes;
+    return iterationDistanceBytes < std::max(w.accessBytes, r.accessBytes);
   };
 
   // run writes that cand reads:
@@ -451,7 +593,7 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
     if (w.isLoad)
       continue;
     for (const auto &r : candAcc) {
-      if (!r.isLoad || !(w.ub == r.ub))
+      if (!r.isLoad || !mayAlias(w.ub, r.ub))
         continue;
       if (isCrossIter(w, r))
         return true;
@@ -462,7 +604,7 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
     if (w.isLoad)
       continue;
     for (const auto &r : runAcc) {
-      if (!r.isLoad || !(w.ub == r.ub))
+      if (!r.isLoad || !mayAlias(w.ub, r.ub))
         continue;
       if (isCrossIter(w, r))
         return true;
@@ -474,7 +616,7 @@ static bool hasCrossIterationUBDependency(ArrayRef<Member> members,
     if (runWrite.isLoad)
       continue;
     for (const auto &candWrite : candAcc) {
-      if (candWrite.isLoad || !(runWrite.ub == candWrite.ub))
+      if (candWrite.isLoad || !mayAlias(runWrite.ub, candWrite.ub))
         continue;
       if (isCrossIter(runWrite, candWrite))
         return true;
@@ -629,7 +771,7 @@ partitionBetween(ArrayRef<Operation *> between) {
     if (auto v = dyn_cast<pto::VMIvLoadOp>(opj)) {
       if (auto id = getVLoadUB(v)) {
         for (unsigned i = 0; i < j; ++i)
-          if (writes[i] && *writes[i] == *id)
+          if (writes[i] && mayAlias(*writes[i], *id))
             unite(i, j);
       }
     }
@@ -669,11 +811,15 @@ static SmallVector<Member, 8> collectRun(Block &body,
                                          unsigned firstLoopIdx) {
   SmallVector<Member, 8> members;
   scf::ForOp first = loops[firstLoopIdx];
+  if (!isTileLibVmiPrincipalLoop(first))
+    return members;
   members.push_back(Member{first, {}, {}});
 
   Operation *betweenStart = first->getNextNode();
   for (unsigned i = firstLoopIdx + 1; i < loops.size(); ++i) {
     scf::ForOp cand = loops[i];
+    if (!isTileLibVmiPrincipalLoop(cand))
+      break;
     if (!sameHeader(first, cand))
       break;
 
@@ -804,6 +950,9 @@ static scf::ForOp buildFusedLoop(OpBuilder &builder,
       firstLoop.getStep(), fusedInitArgs, bodyBuilder);
   fused->setAttrs(
       DictionaryAttr::get(fused.getContext(), getSemanticLoopAttrs(firstLoop)));
+  fused->setAttr("pto.tilelib.impl", builder.getStringAttr("vmi"));
+  fused->setAttr("pto.vmi.fusion.source", builder.getStringAttr("tilelib"));
+  fused->setAttr("pto.vmi.fusion.principal_loop", builder.getUnitAttr());
 
   // Map each member's results to the corresponding slice of the fused loop's
   // results so external (top-level) users can be rewired.

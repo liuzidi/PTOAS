@@ -40,8 +40,9 @@
 // final result: the tmuls(scale ColMax) chain between them can neither hoist
 // (reads the ColMax final UB) nor sink (its store is read by ColExpand-sub), so
 // fusion stops there. ColMax stays a separate reduce for; the rest
-// (ColExpand-sub, tmuls, texp, ColSum, tcvt) fuse into one for carrying the
-// ColSum accumulator plus the ND2NZ dst_ptr (advanced via vsstb post_update).
+// (ColExpand-sub, tmuls, texp, ColSum) fuse into one for carrying the ColSum
+// accumulator. The sub-VL tcvt is a local fallback, and the final ND2NZ tmov
+// remains a separate loop carrying its post-update destination pointer.
 //
 // ColMax uses the split-N VMI candidate (split=4): its reduce loop carries 4
 // independent VL-wide accumulators (step=4, 4 iter_args) instead of the single
@@ -51,15 +52,18 @@
 // LOOP: IR Dump After PTOVmiLoopFusion
 // LOOP-LABEL: func.func @fa_dn_softmax_128x64
 // LOOP: scf.for {{.*}} iter_args({{.*}}) -> (!pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>) {
-// LOOP: scf.for {{.*}} iter_args({{.*}}) -> (!pto.vmi.vreg<64xf32>, !pto.ptr<bf16, ub>) {
+// LOOP: scf.for {{.*}} iter_args({{.*}}) -> (!pto.vmi.vreg<64xf32>) {
+// LOOP: pto.vmi.fusion.boundary = "local"
+// LOOP: scf.for {{.*}} iter_args({{.*}}) -> (!pto.ptr<bf16, ub>) {
 
 // ---- ELIDE - elision erased redundant vloads/stores -----------------------
-// After PTOVmiLoadStoreElision the fused region holds EXACTLY 5 surviving
-// vmi.vload and EXACTLY 5 vmi.vstore. The ColMax split-N candidate (split=4)
+// After PTOVmiLoadStoreElision the function holds EXACTLY 6 surviving
+// vmi.vload and EXACTLY 4 vmi.vstore. The ColMax split-N candidate (split=4)
 // widens the reduce loop to 4 independent vloads per iteration (plus the
 // cross-accumulator merge loads); elision cannot fold these across distinct
 // accumulators, so the surviving vload count is higher than the split=1 form
-// (which held 2). vstore stays 5. The CHECK-COUNT finds that many and the
+// and the local tcvt fallback account for the remaining memory operations.
+// The CHECK-COUNT finds that many and the
 // following CHECK-NOT (bounded by the function's `return`) proves there are no
 // MORE — so a no-op pass or an over-aggressive pass both fail here.
 //
@@ -71,9 +75,9 @@
 // ends the CHECK-NOT scope so nothing past the function can cause a false hit.
 ELIDE: IR Dump After PTOVmiLoadStoreElision
 ELIDE-LABEL: func.func @fa_dn_softmax_128x64
-ELIDEVLD-COUNT-5: pto.vmi.vload
+ELIDEVLD-COUNT-6: pto.vmi.vload
 ELIDEVLD-NOT: pto.vmi.vload
 ELIDEVLD: return
-ELIDESTO-COUNT-5: pto.vmi.vstore
+ELIDESTO-COUNT-4: pto.vmi.vstore
 ELIDESTO-NOT: pto.vmi.vstore
 ELIDESTO: return
