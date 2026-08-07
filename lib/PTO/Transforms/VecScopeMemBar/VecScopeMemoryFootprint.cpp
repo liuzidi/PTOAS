@@ -1,12 +1,10 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
-// This program is free software, you can redistribute it and/or modify it under
-// the terms and conditions of CANN Open Software License Agreement Version 2.0
-// (the "License"). Please refer to the License for details. You may not use it
-// in compliance with the License. THIS FILE IS PROVIDED ON AN "AS IS" BASIS,
-// WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT
-// LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR
-// PURPOSE. See LICENSE in the root of the software repository for the full text
-// of the License.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
 
 #include "PTO/Transforms/VecScopeMemBar/VecScopeMemoryFootprint.h"
 
@@ -462,27 +460,13 @@ FailureOr<VecMemoryAccessDescriptor>
 vecscopemembar::buildAccessDescriptor(Operation *op, ArrayRef<Value> ivs) {
   VecMemoryAccessDescriptor desc;
 
-  if (auto vldas = dyn_cast<pto::VldasOp>(op)) {
+  if (auto uvld = dyn_cast<pto::UvldOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
-    desc.base = vldas.getSource();
-    desc.addressSpace = getTypeAddressSpace(desc.base.getType());
-    desc.conservativeByteSize = 32;
+    fillContiguous(desc, uvld.getSource(), uvld.getOffset(),
+                   elementByteSize(uvld.getSource().getType()),
+                   vregElementCount(uvld.getResult().getType()), ivs);
     return desc;
   }
-
-  if (auto vldus = dyn_cast<pto::VldusOp>(op)) {
-    desc.kind = VecScopeAccessKind::Load;
-    Value source = vldus.getSource();
-    desc.base = source;
-    desc.addressSpace = getTypeAddressSpace(source.getType());
-    auto bytes = elementByteSize(source.getType());
-    auto count = vregElementCount(vldus.getResult().getType());
-    if (bytes && count)
-      desc.conservativeByteSize = *bytes * *count;
-    desc.byteOffset = AffineByteExpr();
-    return desc;
-  }
-
   if (auto vlds = dyn_cast<pto::VldsOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
     fillContiguous(desc, vlds.getSource(), vlds.getOffset(),
