@@ -28,5 +28,5 @@ module attributes {pto.backend = "vpto", pto.kernel_kind = #pto.kernel_kind<vect
 }
 
 // CHECK-LABEL: llvm.func @entry_mix_aiv
-// CHECK-SAME: attributes {pto.entry}
+// CHECK-SAME: attributes {pto.entry, pto.kernel_kind = #pto.kernel_kind<vector>}
 // CHECK-LABEL: llvm.func @helper
