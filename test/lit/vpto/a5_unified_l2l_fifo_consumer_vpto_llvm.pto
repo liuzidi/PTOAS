@@ -50,7 +50,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// CHECK-LABEL: IR Dump After mlir::pto::{anonymous}::LowerVPTOOpsPass
+// CHECK-LABEL: IR Dump After{{.*}}LowerVPTOOpsPass
 // CHECK: func.func @fifo_vec_consumer_mix_aiv
 // CHECK: call @llvm.hivm.WAIT.INTRA.BLOCK.mode
 // CHECK: %[[INDEX:.*]] = llvm.load %{{.*}} : !llvm.ptr -> i64
