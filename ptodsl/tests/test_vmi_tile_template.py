@@ -527,20 +527,13 @@ def check_local_broadcast_candidates() -> dict[str, tuple[str, str]]:
         "dst": static_subregion_dst,
     }
     expect(
-        evaluate_candidate(
+        not evaluate_candidate(
             vmi_trowexpandmul,
             subregion_specs,
             "a5",
             "pto.trowexpandmul",
         ).legal,
-        "a static storage subregion should remain VMI eligible",
-    )
-    subregion_artifact = vmi_trowexpandmul.specialize(**subregion_specs)
-    subregion_artifact.verify()
-    subregion_text = subregion_artifact.mlir_text()
-    expect(
-        "arith.muli" in subregion_text,
-        "a storage subregion should preserve physical row strides",
+        "an unregistered storage subregion should remain a fallback",
     )
     unsafe_prefix = TileSpec((rows, 32), f32, valid_shape=(rows, 16))
     expect(
@@ -1064,6 +1057,27 @@ def check_row_reduce_candidates() -> dict[str, tuple[str, str, int]]:
         ValueError,
         "every physical lane",
     )
+
+    grouped_tail = TileSpec((8, 8), f32, valid_shape=(8, 4))
+    grouped_workspace = TileSpec((8, 1), f32, b_layout="col_major")
+    grouped_dst = TileSpec((8, 1), f32, b_layout="col_major")
+    for op_name, candidate, expected_op in (
+        ("trowmax", vmi_trowmax, "pto.vcgmax"),
+        ("trowsum", vmi_trowsum, "pto.vcgadd"),
+    ):
+        artifact = candidate.specialize(
+            src=grouped_tail,
+            workspace=grouped_workspace,
+            dst=grouped_dst,
+        )
+        artifact.verify()
+        text = artifact.mlir_text()
+        name = f"vmi_{op_name}_sinkhorn_grouped_tail"
+        expect(
+            "pto.vmi.create_group_mask" in text,
+            f"{name} should mask four active columns in every row",
+        )
+        lowering_cases[name] = (text, expected_op, 0)
     return lowering_cases
 
 
@@ -1134,6 +1148,26 @@ def check_col_expand_candidate() -> None:
             text[for_pos:].count("pto.vmi.vload") == 1,
             f"{op_name} should keep only the source-row vload inside the loop",
         )
+
+    grouped_src = TileSpec((1, 8), f32, valid_shape=(1, 4))
+    grouped_dst = TileSpec((8, 8), f32, valid_shape=(8, 4))
+    grouped = vmi_tcolexpand.specialize(src=grouped_src, dst=grouped_dst)
+    grouped.verify()
+    grouped_text = grouped.mlir_text()
+    expect(
+        "num_groups = 8" in grouped_text,
+        "Sinkhorn tcolexpand should repeat one source row across eight groups",
+    )
+    expect(
+        "pto.vmi.vgather" in grouped_text,
+        "Sinkhorn tcolexpand should gather the repeated source-row indices",
+    )
+    check_vmi_to_vpto_lowering(
+        "vmi_tcolexpand_sinkhorn_grouped_tail",
+        grouped_text,
+        "pto.vgather2_bc",
+        expected_loop_count=0,
+    )
 
 
 def check_tcvt_bf16_candidate() -> None:

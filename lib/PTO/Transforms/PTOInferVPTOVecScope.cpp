@@ -120,6 +120,27 @@ static bool isCloneableScalarBroadcastProducer(Operation *op) {
   return vdup && !isa<pto::VRegType>(vdup.getInput().getType());
 }
 
+static bool isGatherIndexConsumer(Operation *op) {
+  return isa<pto::Vgather2Op, pto::Vgather2BcOp>(op);
+}
+
+static bool hasOnlyGatherIndexUsers(Operation *op) {
+  for (Value result : op->getResults()) {
+    for (Operation *user : result.getUsers()) {
+      if (isGatherIndexConsumer(user))
+        continue;
+      auto vand = dyn_cast<pto::VandOp>(user);
+      if (!vand || !llvm::all_of(vand->getUsers(), isGatherIndexConsumer))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool isCloneableGatherIndexProducer(Operation *op) {
+  return isa<pto::VciOp, pto::VandOp>(op) && hasOnlyGatherIndexUsers(op);
+}
+
 static bool isCloneableScalarVRegProducer(Operation *op) {
   return isa<pto::VbrOp>(op);
 }
@@ -127,7 +148,8 @@ static bool isCloneableScalarVRegProducer(Operation *op) {
 static bool isCloneableSharedProducer(Operation *op) {
   return isCloneableMaskProducer(op) ||
          isCloneableScalarBroadcastProducer(op) ||
-         isCloneableScalarVRegProducer(op);
+         isCloneableScalarVRegProducer(op) ||
+         isCloneableGatherIndexProducer(op);
 }
 
 static bool isVectorScopeBoundaryOperation(Operation *op) {
@@ -381,6 +403,28 @@ static Operation *getAncestorInBlock(Operation *op, Block &block) {
   return nullptr;
 }
 
+static bool isUseBeforeInBlock(OpOperand *lhs, OpOperand *rhs, Block &block) {
+  Operation *lhsAncestor = getAncestorInBlock(lhs->getOwner(), block);
+  Operation *rhsAncestor = getAncestorInBlock(rhs->getOwner(), block);
+  if (!lhsAncestor || !rhsAncestor || lhsAncestor == rhsAncestor)
+    return false;
+  return lhsAncestor->isBeforeInBlock(rhsAncestor);
+}
+
+static void keepEarliestUseFirst(SmallVectorImpl<OpOperand *> &uses,
+                                 Block &block) {
+  if (uses.size() < 2)
+    return;
+
+  unsigned earliest = 0;
+  for (unsigned i = 1, e = uses.size(); i < e; ++i) {
+    if (isUseBeforeInBlock(uses[i], uses[earliest], block))
+      earliest = i;
+  }
+  if (earliest != 0)
+    std::swap(uses.front(), uses[earliest]);
+}
+
 static FailureOr<Operation *>
 cloneVecScopeProducerForUse(
     Value value, Operation *user, Operation *logicalScopeAnchor,
@@ -434,6 +478,22 @@ cloneVecScopeProducerForUse(
   return clone;
 }
 
+static bool isSeparatedByInferenceBoundary(Operation *producer,
+                                           Operation *user, Block &block) {
+  Operation *userAncestor = getAncestorInBlock(user, block);
+  if (!producer || producer->getBlock() != &block || !userAncestor ||
+      producer == userAncestor || !producer->isBeforeInBlock(userAncestor))
+    return false;
+
+  for (Operation *current = producer->getNextNode();
+       current && current != userAncestor; current = current->getNextNode()) {
+    if (classifyOperationForInference(current) ==
+        VPTOInferenceOpClass::Boundary)
+      return true;
+  }
+  return false;
+}
+
 static bool shouldCloneSharedResult(OpResult result) {
   Type type = result.getType();
   return isa<pto::MaskType, pto::VRegType>(type);
@@ -450,22 +510,38 @@ static void cloneSharedProducers(Block &block, MLIRContext *context) {
     for (Operation *op : ops) {
       if (!isCloneableSharedProducer(op))
         continue;
+
+      SmallVector<OpOperand *, 8> uses;
       for (OpResult result : op->getOpResults()) {
         if (!shouldCloneSharedResult(result) || result.use_empty())
           continue;
-        SmallVector<OpOperand *, 8> uses;
         for (OpOperand &use : result.getUses())
           uses.push_back(&use);
-        if (uses.size() < 2)
-          continue;
-        keepEarliestUseFirst(uses, block);
-        for (OpOperand *use : ArrayRef<OpOperand *>(uses).drop_front()) {
-          rewriter.setInsertionPoint(use->getOwner());
-          Operation *clone = rewriter.clone(*op);
-          use->set(clone->getResult(result.getResultNumber()));
-          changed = true;
-        }
       }
+
+      if (uses.size() < 2) {
+        if (uses.empty() ||
+            !isSeparatedByInferenceBoundary(op, uses.front()->getOwner(),
+                                            block))
+          continue;
+      }
+
+      keepEarliestUseFirst(uses, block);
+      bool cloneFirst = isSeparatedByInferenceBoundary(
+          op, uses.front()->getOwner(), block);
+      ArrayRef<OpOperand *> usesToClone = uses;
+      if (!cloneFirst)
+        usesToClone = usesToClone.drop_front();
+      for (OpOperand *use : usesToClone) {
+        auto result = cast<OpResult>(use->get());
+        Operation *user = use->getOwner();
+        rewriter.setInsertionPoint(user);
+        Operation *clone = rewriter.clone(*op);
+        use->set(clone->getResult(result.getResultNumber()));
+        changed = true;
+      }
+      if (cloneFirst && op->use_empty())
+        rewriter.eraseOp(op);
     }
   }
 }

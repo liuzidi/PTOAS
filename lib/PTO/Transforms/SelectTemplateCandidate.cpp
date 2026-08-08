@@ -147,7 +147,9 @@ struct SelectTemplateCandidatePass
               (pto::hasStaticFullTileValidShape(op) ||
                candidateHasTag(candidate, "supports_partial_valid_shape")) &&
               (!hasMaterializationSensitiveSubview(op) ||
-               candidateHasTag(candidate, "supports_partial_valid_shape"))) {
+               candidateHasTag(
+                   candidate,
+                   "supports_materialization_sensitive_subview"))) {
             recordSelection(op, candidate, true);
             return WalkResult::advance();
           }

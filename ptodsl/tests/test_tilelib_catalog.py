@@ -914,6 +914,142 @@ class TileLibCatalogTest(unittest.TestCase):
         self.assertIn("!pto.vmi.vreg<64xf32>", mlir)
         self.assertIn("group = 64", mlir)
 
+    def test_vmi_grouped_sinkhorn_forms_accept_static_four_column_tail(self):
+        data = TileSpec(
+            shape=(8, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 4),
+            pad_value="Min",
+        )
+        compact = TileSpec(
+            shape=(8, 1),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 1),
+            b_layout="col_major",
+        )
+        column = TileSpec(
+            shape=(1, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(1, 4),
+        )
+        narrow = TileSpec(
+            shape=(1, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(1, 8),
+        )
+
+        add = select(
+            "pto.tadd",
+            "a5",
+            {"src0": data, "src1": data, "dst": data},
+            candidate_id="vmi_tadd_block64",
+        )
+        self.assertIn("pto.vmi.create_group_mask", add.specialize(
+            src0=data, src1=data, dst=data
+        ).mlir_text())
+
+        col_expand = select(
+            "pto.tcolexpand",
+            "a5",
+            {"src": column, "dst": data},
+            candidate_id="vmi_tcolexpand",
+        )
+        col_expand_mlir = col_expand.specialize(src=column, dst=data).mlir_text()
+        self.assertIn("num_groups = 8", col_expand_mlir)
+        self.assertIn("pto.vmi.vgather", col_expand_mlir)
+
+        adds = select(
+            "pto.tadds",
+            "a5",
+            {
+                "src": narrow,
+                "scalar": ScalarSpec(ScalarType("f32"), value=1.0),
+                "dst": narrow,
+            },
+            candidate_id="vmi_tadds",
+        )
+        adds_mlir = adds.specialize(
+            src=narrow,
+            scalar=ScalarSpec(ScalarType("f32"), value=1.0),
+            dst=narrow,
+        ).mlir_text()
+        self.assertIn("pto.vmi.vgather", adds_mlir)
+        self.assertIn("pto.vmi.vadds", adds_mlir)
+
+        for op, candidate_id in (
+            ("pto.trowmax", "vmi_trowmax"),
+            ("pto.trowsum", "vmi_trowsum"),
+        ):
+            with self.subTest(op=op):
+                selected = select(
+                    op,
+                    "a5",
+                    {"src": data, "workspace": compact, "dst": compact},
+                    candidate_id=candidate_id,
+                )
+                mlir = selected.specialize(
+                    src=data, workspace=compact, dst=compact
+                ).mlir_text()
+                self.assertIn("pto.vmi.create_group_mask", mlir)
+
+    def test_vmi_grouped_sinkhorn_forms_reject_unregistered_tail_width(self):
+        data = TileSpec(
+            shape=(8, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 3),
+        )
+        with self.assertRaisesRegex(
+            NoMatchingTemplate, "custom constraints are not satisfied"
+        ):
+            select(
+                "pto.tadd",
+                "a5",
+                {"src0": data, "src1": data, "dst": data},
+                candidate_id="vmi_tadd_block64",
+            )
+
+    def test_vmi_grouped_sinkhorn_forms_reject_mismatched_storage(self):
+        tail = TileSpec(
+            shape=(8, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 4),
+        )
+        col_major_tail = TileSpec(
+            shape=(8, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 4),
+            b_layout="col_major",
+        )
+        with self.assertRaisesRegex(
+            NoMatchingTemplate, "custom constraints are not satisfied"
+        ):
+            select(
+                "pto.tadd",
+                "a5",
+                {"src0": col_major_tail, "src1": tail, "dst": tail},
+                candidate_id="vmi_tadd_block64",
+            )
+
+        column = TileSpec(
+            shape=(1, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(1, 4),
+        )
+        mismatched_dst = TileSpec(
+            shape=(16, 8),
+            dtype=ScalarType("f32"),
+            valid_shape=(8, 4),
+        )
+        with self.assertRaisesRegex(
+            NoMatchingTemplate, "custom constraints are not satisfied"
+        ):
+            select(
+                "pto.tcolexpand",
+                "a5",
+                {"src": column, "dst": mismatched_dst},
+                candidate_id="vmi_tcolexpand",
+            )
+
     def test_declared_dtype_signatures_are_selectable(self):
         for op, entry in CATALOG.items():
             _, _, parameter_names, representative_dtype, candidate_id = _entry_parts(entry)

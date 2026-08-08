@@ -30,7 +30,7 @@
 // META-SAME: id = 1000 : i64
 // META-SAME: loop_depth = 1 : i64
 // META-SAME: name = "vmi_tadd_block64"
-// META-SAME: tags = ["vmi", "fusion_eligible", "single_logical_row_loop"]
+// META-SAME: tags = ["vmi", "fusion_eligible", "single_logical_row_loop", "supports_partial_valid_shape"]
 // META-SAME: tail = 0 : i64}]
 
 // PREFUSION: IR Dump Before FusionPlan
@@ -53,9 +53,8 @@
 // EXPAND: pto.tilelib.candidate = "vmi_tadd_block64"
 // EXPAND: pto.tilelib.impl = "vmi"
 
-// A full-shape VMI candidate does not need an opt-in capability for partial
-// valid shapes; the capability is attached only by templates that support it.
-// META-NOT: supports_partial_valid_shape
+// The tadd VMI candidate explicitly advertises partial-valid-shape support so
+// the same template can be selected for statically proved narrow/tail rows.
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TADD() {
