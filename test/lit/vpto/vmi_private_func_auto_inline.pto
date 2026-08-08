@@ -65,8 +65,9 @@ module attributes {pto.kernel_kind = #pto.kernel_kind<vector>, pto.target_arch =
 // CHECK: call @kept_helper(
 // CHECK: call @simt_body()
 // CHECK-LABEL: func.func private @kept_helper(
-// CHECK-SAME: attributes {no_inline}
+// CHECK-SAME: attributes {no_inline, pto.kernel_kind = #pto.kernel_kind<vector>}
 // CHECK-LABEL: func.func private @simt_body()
 // CHECK-SAME: attributes {
 // CHECK-SAME: no_inline
+// CHECK-SAME: pto.kernel_kind = #pto.kernel_kind<vector>
 // CHECK-SAME: pto.simt_entry
