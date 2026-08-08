@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -88,6 +89,15 @@ static bool isExplicitVectorScopeCarrier(Operation *op) {
   return isa<pto::VecScopeOp, pto::StrictVecScopeOp>(op);
 }
 
+static Operation *getEnclosingExplicitVectorScope(Operation *op) {
+  for (Operation *parent = op ? op->getParentOp() : nullptr; parent;
+       parent = parent->getParentOp()) {
+    if (isExplicitVectorScopeCarrier(parent))
+      return parent;
+  }
+  return nullptr;
+}
+
 static bool isForbiddenInsideInferredVectorScope(Operation *op) {
   // Bisheng cannot expand block-query results produced inside an AIV vector
   // scope. Keep these scalar queries outside the inferred scope and capture
@@ -110,9 +120,14 @@ static bool isCloneableScalarBroadcastProducer(Operation *op) {
   return vdup && !isa<pto::VRegType>(vdup.getInput().getType());
 }
 
+static bool isCloneableScalarVRegProducer(Operation *op) {
+  return isa<pto::VbrOp>(op);
+}
+
 static bool isCloneableSharedProducer(Operation *op) {
   return isCloneableMaskProducer(op) ||
-         isCloneableScalarBroadcastProducer(op);
+         isCloneableScalarBroadcastProducer(op) ||
+         isCloneableScalarVRegProducer(op);
 }
 
 static bool isVectorScopeBoundaryOperation(Operation *op) {
@@ -324,6 +339,37 @@ computeMovedOpsForResultlessScope(ArrayRef<Operation *> ops) {
     }
   }
   return movedOps;
+}
+
+static void pruneExternallyConsumedCloneableProducers(
+    llvm::SmallPtrSetImpl<Operation *> &movedOps) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *, 8> producersToPrune;
+    for (Operation *op : movedOps) {
+      if (!isCloneableSharedProducer(op))
+        continue;
+
+      bool hasExternalUser = false;
+      for (Value result : op->getResults()) {
+        for (Operation *user : result.getUsers()) {
+          if (!isUserInsideCluster(user, movedOps))
+            hasExternalUser = true;
+        }
+      }
+
+      // Keep cloneable producers out of the resultless scope whenever one of
+      // their users is external. They can be rematerialized in the eventual
+      // consumer scope; retaining them in the moved set would make the mask
+      // escape check fail before that rematerialization can happen.
+      if (hasExternalUser)
+        producersToPrune.push_back(op);
+    }
+
+    for (Operation *op : producersToPrune)
+      changed |= movedOps.erase(op);
+  }
 }
 
 static Operation *getAncestorInBlock(Operation *op, Block &block) {
@@ -591,6 +637,55 @@ static LogicalResult rematerializeEscapingValueForUserSegments(
   return success();
 }
 
+// A boundary between a pure mask producer and an atomic vector loop can cause
+// the loop to be wrapped without its producer. If every use ended up in the
+// same dedicated vecscope, rematerialize the producer there instead of leaving
+// vector-scope-only data at the parent level.
+static void sinkCloneableProducersIntoDedicatedScopes(Block &block) {
+  SmallVector<Operation *, 16> producers;
+  for (Operation &op : block) {
+    if (isCloneableSharedProducer(&op))
+      producers.push_back(&op);
+  }
+
+  for (Operation *producer : llvm::reverse(producers)) {
+    Operation *commonScope = nullptr;
+    bool hasUse = false;
+    bool allUsersShareScope = true;
+    for (Value result : producer->getResults()) {
+      for (Operation *user : result.getUsers()) {
+        hasUse = true;
+        Operation *scope = getEnclosingExplicitVectorScope(user);
+        if (!scope || (commonScope && commonScope != scope)) {
+          allUsersShareScope = false;
+          break;
+        }
+        commonScope = scope;
+      }
+      if (!allUsersShareScope)
+        break;
+    }
+
+    if (!hasUse || !allUsersShareScope || !commonScope)
+      continue;
+
+    // Keep rematerialization local to the block currently being inferred.
+    // In particular, do not move an outer producer into a vecscope nested in
+    // an scf.for/scf.if region merely because all of its users happen to be
+    // there. Also require every operand to remain available at the scope
+    // entry before moving the producer to the start of the scope body.
+    if (commonScope->getBlock() != &block)
+      continue;
+    DominanceInfo dominance;
+    if (!llvm::all_of(producer->getOperands(), [&](Value operand) {
+          return dominance.dominates(operand, commonScope);
+        }))
+      continue;
+
+    Block &scopeBody = commonScope->getRegion(0).front();
+    producer->moveBefore(&scopeBody, scopeBody.begin());
+}
+
 static bool findEscapingMovedResult(
     const llvm::SmallPtrSetImpl<Operation *> &movedOps,
     EscapingMovedValue &escapingValue) {
@@ -648,9 +743,9 @@ buildResultlessScopePlan(ArrayRef<Operation *> ops, ResultlessScopePlan &plan,
 
   llvm::SmallPtrSet<Operation *, 16> movedOps =
       computeMovedOpsForResultlessScope(ops);
-  if (movedOps.empty()) {
+  pruneExternallyConsumedCloneableProducers(movedOps);
+  if (movedOps.empty())
     return failure();
-  }
 
   if (findEscapingMovedResult(movedOps, escapingValue)) {
     return failure();
@@ -938,6 +1033,8 @@ static LogicalResult inferVecScopesInBlock(Block &block, MLIRContext *context) {
   if (failed(flush())) {
     return failure();
   }
+
+  sinkCloneableProducersIntoDedicatedScopes(block);
 
   SmallVector<Operation *, 32> remainingOps;
   for (Operation &op : block) {

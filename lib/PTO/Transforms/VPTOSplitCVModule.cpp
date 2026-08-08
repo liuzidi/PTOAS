@@ -296,10 +296,12 @@ static void rewriteSectionsForKind(ModuleOp module, FunctionKernelKind kind) {
 static ModuleOp cloneModuleForKind(ModuleOp source, FunctionKernelKind kind,
                                    OpBuilder &builder) {
   auto cloned = cast<ModuleOp>(source->clone());
-  cloned->setAttr(FunctionKernelKindAttr::name,
-                  FunctionKernelKindAttr::get(cloned.getContext(), kind));
+  auto kindAttr = FunctionKernelKindAttr::get(cloned.getContext(), kind);
+  cloned->setAttr(FunctionKernelKindAttr::name, kindAttr);
   eraseSectionSplitCandidatesWithoutSectionKind(cloned, kind);
   rewriteSectionsForKind(cloned, kind);
+  for (func::FuncOp funcOp : cloned.getOps<func::FuncOp>())
+    funcOp->setAttr(FunctionKernelKindAttr::name, kindAttr);
   builder.insert(cloned);
   return cloned;
 }
@@ -321,9 +323,12 @@ getKernelChildAttrs(ModuleOp source, FunctionKernelKind kind) {
 }
 
 static void cloneFuncIntoModule(func::FuncOp funcOp, ModuleOp target,
-                                OpBuilder &builder) {
+                                FunctionKernelKind kind, OpBuilder &builder) {
   builder.setInsertionPointToEnd(&target.getBodyRegion().front());
-  builder.insert(funcOp->clone());
+  auto cloned = cast<func::FuncOp>(funcOp->clone());
+  cloned->setAttr(FunctionKernelKindAttr::name,
+                  FunctionKernelKindAttr::get(cloned.getContext(), kind));
+  builder.insert(cloned);
 }
 
 static void createChildModuleForFunctionKind(
@@ -336,11 +341,11 @@ static void createChildModuleForFunctionKind(
 
   OpBuilder childBuilder(source.getContext());
   for (func::FuncOp helper : helpers)
-    cloneFuncIntoModule(helper, child, childBuilder);
+    cloneFuncIntoModule(helper, child, kind, childBuilder);
   for (func::FuncOp kernel : kernels) {
     std::optional<FunctionKernelKind> kernelKind = getFunctionKernelKind(kernel);
     if (kernelKind && *kernelKind == kind)
-      cloneFuncIntoModule(kernel, child, childBuilder);
+      cloneFuncIntoModule(kernel, child, kind, childBuilder);
   }
 }
 
@@ -411,6 +416,8 @@ static LogicalResult materializeExplicitKernelKindSections(ModuleOp module) {
       failed(verifyExplicitKernelKindMatchesSections(module)))
     return failure();
   rewriteSectionsForKind(module, kindAttr.getKernelKind());
+  for (func::FuncOp funcOp : module.getOps<func::FuncOp>())
+    funcOp->setAttr(FunctionKernelKindAttr::name, kindAttr);
   return success();
 }
 
