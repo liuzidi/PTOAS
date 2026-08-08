@@ -15963,7 +15963,8 @@ getEnclosingFunctionKernelKind(Operation *op) {
 
 static bool isInsideSectionOrAttributedKernel(Operation *op) {
   return isInsideSectionCube(op) || isInsideSectionVector(op) ||
-         isInsideTileOpHelper(op) || getEnclosingFunctionKernelKind(op).has_value();
+         isInsideTileOpHelper(op) ||
+         getEnclosingFunctionKernelKind(op).has_value();
 }
 
 static LogicalResult verifySplitAttr(Operation *op, int64_t split) {

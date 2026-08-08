@@ -15,6 +15,7 @@
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/IR/PTOSyncUtils.h"
 #include "PTO/Transforms/Passes.h"
+#include "Utils.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
@@ -4334,6 +4335,13 @@ static FailureOr<StringRef> buildCopyMatrixCcToUbCallee(MLIRContext *context,
         .getValue();
   if (dstElem.isF32())
     return StringAttr::get(context, "llvm.hivm.FIX.L0C.TO.UB.f32.EXT")
+        .getValue();
+  if (dstElem.isBF16())
+    return StringAttr::get(context, "llvm.hivm.FIX.L0C.TO.UB.f322bf16.EXT")
+        .getValue();
+  if (auto intType = dyn_cast<IntegerType>(dstElem);
+      intType && intType.getWidth() == 32)
+    return StringAttr::get(context, "llvm.hivm.FIX.L0C.TO.UB.s32.EXT")
         .getValue();
   return failure();
 }
@@ -12350,6 +12358,91 @@ public:
   }
 };
 
+// TGetVal is normally consumed by the EmitC backend.  VPTO level-3 inputs can
+// still contain it after tile-buffer lowering, however, and leaving its index
+// operand in the IR prevents ConvertIndexToLLVM from eliminating the
+// materialized i64<->index casts.  For the explicit-address form used by
+// level-3, the tile allocation itself provides the complete base address.
+class ConvertPtoTGetValOp final
+    : public OpConversionPattern<pto::TGetValOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::TGetValOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto tileTy = dyn_cast<pto::TileBufType>(op.getSrc().getType());
+    auto alloc = op.getSrc().getDefiningOp<pto::AllocTileOp>();
+    if (!tileTy || !alloc || !alloc.getAddr())
+      return rewriter.notifyMatchFailure(
+          op, "tgetval requires an explicitly-addressed alloc_tile source");
+
+    Type valueType = getTypeConverter()->convertType(op.getDst().getType());
+    if (!valueType)
+      return rewriter.notifyMatchFailure(op, "failed to convert tgetval result");
+
+    unsigned addressSpace = 0;
+    if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(
+            tileTy.getMemorySpace()))
+      addressSpace = static_cast<unsigned>(as.getAddressSpace());
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), addressSpace);
+    Value base = rewriter.create<LLVM::IntToPtrOp>(
+        op.getLoc(), ptrType, alloc.getAddr());
+    Value offset = adaptor.getOffset();
+    if (offset.getType().isIndex())
+      offset = rewriter.create<arith::IndexCastUIOp>(
+          op.getLoc(), rewriter.getI64Type(), offset);
+    Value elemPtr = base;
+    if (!matchPattern(offset, m_Zero()))
+      elemPtr = rewriter.create<LLVM::GEPOp>(
+          op.getLoc(), ptrType,
+          normalizeGEPElementTypeForLLVMLowering(valueType, rewriter), base,
+          ValueRange{offset});
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
+        op, valueType, elemPtr, getNaturalByteAlignment(valueType));
+    return success();
+  }
+};
+
+class ConvertPtoTSetValOp final
+    : public OpConversionPattern<pto::TSetValOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(pto::TSetValOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto tileTy = dyn_cast<pto::TileBufType>(op.getDst().getType());
+    auto alloc = op.getDst().getDefiningOp<pto::AllocTileOp>();
+    if (!tileTy || !alloc || !alloc.getAddr())
+      return rewriter.notifyMatchFailure(
+          op, "tsetval requires an explicitly-addressed alloc_tile destination");
+    unsigned addressSpace = 0;
+    if (auto as = dyn_cast_or_null<pto::AddressSpaceAttr>(
+            tileTy.getMemorySpace()))
+      addressSpace = static_cast<unsigned>(as.getAddressSpace());
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), addressSpace);
+    Value base = rewriter.create<LLVM::IntToPtrOp>(
+        op.getLoc(), ptrType, alloc.getAddr());
+    Value offset = adaptor.getOffset();
+    if (offset.getType().isIndex())
+      offset = rewriter.create<arith::IndexCastUIOp>(
+          op.getLoc(), rewriter.getI64Type(), offset);
+    Value elemPtr = base;
+    if (!matchPattern(offset, m_Zero()))
+      elemPtr = rewriter.create<LLVM::GEPOp>(
+          op.getLoc(), ptrType,
+          normalizeGEPElementTypeForLLVMLowering(adaptor.getVal().getType(),
+                                                 rewriter),
+          base, ValueRange{offset});
+    rewriter.create<LLVM::StoreOp>(
+        op.getLoc(), adaptor.getVal(), elemPtr,
+        getNaturalByteAlignment(adaptor.getVal().getType()));
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 class ConvertPtoLoadOp final : public OpConversionPattern<pto::PTOLoadOp> {
 public:
   ConvertPtoLoadOp(TypeConverter &typeConverter, MLIRContext *context,
@@ -13338,6 +13431,10 @@ static Type normalizeTypeForOfficialLLVMLowering(Type type, Builder &builder) {
   return type;
 }
 
+// The upstream memref-to-LLVM conversion asks its LLVMTypeConverter to map
+// memref memory-space attributes.  PTO keeps richer AddressSpaceAttr values in
+// authoring IR, so normalize those attributes on every SSA type before the
+// upstream pass is invoked (not only on function signatures).
 static void normalizeFuncSignaturesForOfficialLLVMLowering(ModuleOp module) {
   Builder builder(module.getContext());
 
@@ -13575,6 +13672,10 @@ struct LowerVPTOOpsPass final
 
   void runOnOperation() override {
     materializeVecScopeCarrierLoops(getOperation());
+    if (failed(pto::lowerA5UnifiedL2LPipeOpsForLLVM(getOperation()))) {
+      signalPassFailure();
+      return;
+    }
     // Remove dead pto.alloc_tile ops before lowering. These can appear when
     // the original kernel's tile_buf intrinsics have already been folded away
     // by FoldTileBufIntrinsics, but a subsequent pass (e.g. AIC-scope cloning)
@@ -13624,6 +13725,7 @@ struct NormalizeFuncSignaturesForLLVMLoweringPass final
 
   void runOnOperation() override {
     normalizeFuncSignaturesForOfficialLLVMLowering(getOperation());
+    pto::legalizeIndexUnrealizedCasts(getOperation());
   }
 };
 
@@ -13791,6 +13893,8 @@ static LogicalResult runPipeline(ModuleOp module, const std::string &march,
   kernelModulePM.addPass(createSCFToControlFlowPass());
   kernelModulePM.addPass(createArithToLLVMConversionPass());
   kernelModulePM.addPass(createConvertIndexToLLVMPass());
+  kernelModulePM.addPass(
+      pto::createNormalizePTOAddressSpacesForLLVMPass());
   kernelModulePM.addPass(createFinalizeMemRefToLLVMConversionPass());
   kernelModulePM.addPass(createConvertFuncToLLVMPass());
   kernelModulePM.addPass(createConvertControlFlowToLLVMPass());
@@ -13804,6 +13908,7 @@ static LogicalResult runPipeline(ModuleOp module, const std::string &march,
     diagOS << "VPTO LLVM emission failed: official lowering pipeline failed\n";
     return failure();
   }
+  pto::cleanupPTOArtifactsAfterLLVMLowering(clonedModule);
   return emit(clonedModule);
 }
 
