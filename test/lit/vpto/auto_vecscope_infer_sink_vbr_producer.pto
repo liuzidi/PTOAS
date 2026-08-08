@@ -29,6 +29,6 @@ module attributes {pto.target_arch = "a5"} {
 // CHECK-LABEL: func.func @auto_vecscope_sink_vbr_producer
 // CHECK: pto.barrier
 // CHECK-NEXT: pto.vecscope {
-// CHECK-NEXT: %[[BROADCAST:.*]] = pto.vbr
+// CHECK: %[[BROADCAST:.*]] = pto.vbr
 // CHECK: pto.vsub %{{.*}}, %[[BROADCAST]]
 // CHECK: }

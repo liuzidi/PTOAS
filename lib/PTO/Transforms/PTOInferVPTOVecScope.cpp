@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -666,6 +667,19 @@ static void sinkCloneableProducersIntoDedicatedScopes(Block &block) {
     }
 
     if (!hasUse || !allUsersShareScope || !commonScope)
+      continue;
+
+    // Keep rematerialization local to the block currently being inferred.
+    // In particular, do not move an outer producer into a vecscope nested in
+    // an scf.for/scf.if region merely because all of its users happen to be
+    // there. Also require every operand to remain available at the scope
+    // entry before moving the producer to the start of the scope body.
+    if (commonScope->getBlock() != &block)
+      continue;
+    DominanceInfo dominance;
+    if (!llvm::all_of(producer->getOperands(), [&](Value operand) {
+          return dominance.dominates(operand, commonScope);
+        }))
       continue;
 
     Block &scopeBody = commonScope->getRegion(0).front();

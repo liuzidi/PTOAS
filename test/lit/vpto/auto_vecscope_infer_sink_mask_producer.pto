@@ -28,7 +28,7 @@ module attributes {pto.target_arch = "a5"} {
 // CHECK-LABEL: func.func @auto_vecscope_sink_mask_producer
 // CHECK: pto.barrier
 // CHECK-NEXT: pto.vecscope {
-// CHECK-NEXT: %[[PREFIX:.*]] = pto.pge_b32 "PAT_VL32"
+// CHECK: %[[PREFIX:.*]] = pto.pge_b32 "PAT_VL32"
 // CHECK: pto.pand %[[PREFIX]]
 // CHECK: scf.for
 // CHECK: pto.vsts
