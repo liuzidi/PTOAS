@@ -820,9 +820,9 @@ def convert_vmi_constraint(
         ("i32", "f32"): {"RINT", "ROUND"},
         ("f32", "bf16"): {"RINT", "ROUND"},
         ("f32", "f16"): {"RINT", "ROUND"},
-        # VMICvtOp's fp-to-int form has no rounding attribute and therefore
-        # only matches the TileOp truncation semantics.  RINT/ROUND require a
-        # separate algorithm and must remain on the ordinary fallback path.
+        # The current fp-to-int candidate is validated only for truncation.
+        # RINT/ROUND require separate semantic validation and remain on the
+        # ordinary fallback path.
         ("f32", "i32"): {"TRUNC"},
         ("i32", "f16"): {"ROUND"},
     }
@@ -843,7 +843,7 @@ def convert_vmi_constraint(
         and max(cols * src_bytewidth, cols * dst_bytewidth) >= 128
         and allowed_round_modes is not None
         and round_mode in allowed_round_modes
-        and sat_mode in ("ON", "OFF")
+        and sat_mode in ("DEFAULT", "ON", "OFF")
         and src_valid_shape == src_shape
         and dst_shape == src_shape
         and dst_valid_shape == dst_shape
@@ -2308,8 +2308,14 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
     }.get(round_mode)
     if rounding is None:
         raise ValueError(f"tcvt VMI candidate does not support {round_mode} rounding")
-    sat_mode = _context_attr(src, "sat_mode", "OFF")
-    saturate = "SAT" if sat_mode == "ON" else "NOSAT"
+    sat_mode = _context_attr(src, "sat_mode", "DEFAULT")
+    if sat_mode == "DEFAULT":
+        # All narrowing forms currently admitted by this candidate use the
+        # A5 TCVT overload default, which is saturation ON. Explicit OFF must
+        # remain distinguishable and lower to NOSAT.
+        saturate = "SAT"
+    else:
+        saturate = "SAT" if sat_mode == "ON" else "NOSAT"
     with for_(0, block_map.logical_block_count, step=1) as logical_block:
         coordinate = block_map.coordinate(logical_block)
         kwargs = {}
@@ -2317,9 +2323,9 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
             kwargs["rounding"] = rounding
             kwargs["saturate"] = saturate
         elif src.element_type == f32 and dst.element_type == i32:
-            # VMICvtOp models fp-to-int conversion with saturation only.  A
-            # TileOp rounding token cannot be forwarded as VMI rounding: the
-            # VMI verifier reserves that attribute for fp narrowing.
+            # VMIToVPTO defaults an omitted fp-to-int rounding mode to R.
+            # Preserve TileOp TRUNC explicitly as the physical Z mode.
+            kwargs["rounding"] = rounding
             kwargs["saturate"] = saturate
         source = _vload(src, coordinate)
         if src.element_type == i32 and dst.element_type == f16:

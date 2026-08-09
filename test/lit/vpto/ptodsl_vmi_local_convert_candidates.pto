@@ -21,6 +21,7 @@ module {
     %i32 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xi32>
     %i32_1 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xi32>
     %bf16_1 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xbf16>
+    %bf16_2 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xbf16>
     %f16_1 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf16>
     %f16_2 = pto.alloc_tile : !pto.tile_buf<vec, 8x128xf16>
 
@@ -34,6 +35,8 @@ module {
       outs(%i32_1 : !pto.tile_buf<vec, 8x128xi32>)
     pto.tcvt ins(%f32_2 {rmode = #pto<round_mode RINT>} : !pto.tile_buf<vec, 8x128xf32>)
       outs(%bf16_1 : !pto.tile_buf<vec, 8x128xbf16>)
+    pto.tcvt ins(%f32_2 {rmode = #pto<round_mode RINT>, satmode = #pto<saturation_mode OFF>} : !pto.tile_buf<vec, 8x128xf32>)
+      outs(%bf16_2 : !pto.tile_buf<vec, 8x128xbf16>)
     pto.tcvt ins(%f32_2 {rmode = #pto<round_mode ROUND>} : !pto.tile_buf<vec, 8x128xf32>)
       outs(%f16_2 : !pto.tile_buf<vec, 8x128xf16>)
     pto.tcvt ins(%i32 {rmode = #pto<round_mode ROUND>} : !pto.tile_buf<vec, 8x128xi32>)
@@ -42,18 +45,19 @@ module {
   }
 }
 
-// EXPAND-COUNT-7: call {{.*}}__vmi_tcvt
-// EXPAND-COUNT-7: pto.tilelib.impl = "vmi"
+// EXPAND-COUNT-8: call {{.*}}__vmi_tcvt
+// EXPAND-COUNT-8: pto.tilelib.impl = "vmi"
 
 // INLINE-LABEL: func.func @local_convert_candidates
 // INLINE-DAG: pto.vmi.vcvt {{.*}} : !pto.vmi.vreg<128xbf16> -> !pto.vmi.vreg<128xf32>
 // INLINE-DAG: pto.vmi.vcvt {{.*}} : !pto.vmi.vreg<128xf16> -> !pto.vmi.vreg<128xf32>
-// INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "A"{{.*}} : !pto.vmi.vreg<128xi32> -> !pto.vmi.vreg<128xf32>
+// INLINE-DAG: pto.vmi.vcvt {{.*}} : !pto.vmi.vreg<128xi32> -> !pto.vmi.vreg<128xf32>
 // INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "Z"{{.*}}saturate = "SAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xi32>
+// INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "R"{{.*}}saturate = "SAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xbf16>
 // INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "R"{{.*}}saturate = "NOSAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xbf16>
-// INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "A"{{.*}}saturate = "NOSAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf16>
-// INLINE-DAG: %[[I32_TO_F32:.*]] = pto.vmi.vcvt {{.*}}rounding = "A"{{.*}} : !pto.vmi.vreg<128xi32> -> !pto.vmi.vreg<128xf32>
-// INLINE-DAG: pto.vmi.vcvt %[[I32_TO_F32]] {{.*}}rounding = "A"{{.*}}saturate = "NOSAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf16>
+// INLINE-DAG: pto.vmi.vcvt {{.*}}rounding = "A"{{.*}}saturate = "SAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf16>
+// INLINE-DAG: %[[I32_TO_F32:.*]] = pto.vmi.vcvt {{.*}} : !pto.vmi.vreg<128xi32> -> !pto.vmi.vreg<128xf32>
+// INLINE-DAG: pto.vmi.vcvt %[[I32_TO_F32]] {{.*}}rounding = "A"{{.*}}saturate = "SAT"{{.*}} : !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf16>
 
 // FINAL-LABEL: func.func @local_convert_candidates
 // FINAL-NOT: pto.vmi.
@@ -61,9 +65,10 @@ module {
 // FINAL-DAG: pto.vcvt {{.*}} {part = "ODD"} : !pto.vreg<128xbf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
 // FINAL-DAG: pto.vcvt {{.*}} {part = "EVEN"} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
 // FINAL-DAG: pto.vcvt {{.*}} {part = "ODD"} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<64xf32>
-// FINAL-DAG: pto.vcvt {{.*}} {rnd = "A"} : !pto.vreg<64xi32>, !pto.mask<b32> -> !pto.vreg<64xf32>
+// FINAL-DAG: pto.vcvt {{.*}} {rnd = "R"} : !pto.vreg<64xi32>, !pto.mask<b32> -> !pto.vreg<64xf32>
 // FINAL-DAG: pto.vcvt {{.*}} {rnd = "Z", sat = "SAT"} : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<64xi32>
+// FINAL-DAG: pto.vcvt {{.*}} {part = "EVEN", rnd = "R", sat = "SAT"} : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<128xbf16>
 // FINAL-DAG: pto.vcvt {{.*}} {part = "EVEN", rnd = "R", sat = "NOSAT"} : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<128xbf16>
-// FINAL-DAG: pto.vcvt {{.*}} {part = "EVEN", rnd = "A", sat = "NOSAT"} : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<128xf16>
+// FINAL-DAG: pto.vcvt {{.*}} {part = "EVEN", rnd = "A", sat = "SAT"} : !pto.vreg<64xf32>, !pto.mask<b32> -> !pto.vreg<128xf16>
 // FINAL-DAG: pto.vsts {{.*}} {dist = "PK_B32"} : !pto.vreg<128xbf16>, !pto.ptr<bf16, ub>, !pto.mask<b32>
 // FINAL-DAG: pto.vsts {{.*}} {dist = "PK_B32"} : !pto.vreg<128xf16>, !pto.ptr<f16, ub>, !pto.mask<b32>

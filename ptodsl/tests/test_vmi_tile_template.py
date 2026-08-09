@@ -1212,6 +1212,22 @@ def check_tcvt_bf16_candidate() -> None:
     expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
     expect("vreg<128xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
 
+    default_bf16_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcvt",
+        operand_specs=[raw_tile_spec, bf16_dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"round_mode": "RINT", "sat_mode": "DEFAULT"},
+    ).mlir_text()
+    expect(
+        'saturate = "SAT"' in default_bf16_text,
+        "omitted f32->bf16 saturation should use the A5 TCVT default",
+    )
+    expect(
+        'saturate = "NOSAT"' in bf16_text,
+        "explicit f32->bf16 saturation OFF should remain non-saturating",
+    )
+
     half_vl_src_spec = {
         **raw_tile_spec,
         "shape": [32, 64],
@@ -1275,8 +1291,8 @@ def check_tcvt_bf16_candidate() -> None:
         )
         if (src_dtype, dst_dtype) == ("f32", "i32"):
             expect(
-                "rounding" not in text,
-                "fp-to-int VMI conversion must not carry the fp-narrowing rounding attribute",
+                'rounding = "Z"' in text,
+                "f32->i32 TRUNC must lower to the physical toward-zero mode",
             )
         elif dst_dtype == "f32":
             expect(
