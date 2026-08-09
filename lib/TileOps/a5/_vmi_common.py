@@ -820,7 +820,10 @@ def convert_vmi_constraint(
         ("i32", "f32"): {"RINT", "ROUND"},
         ("f32", "bf16"): {"RINT", "ROUND"},
         ("f32", "f16"): {"RINT", "ROUND"},
-        ("f32", "i32"): {"RINT", "ROUND", "TRUNC"},
+        # VMICvtOp's fp-to-int form has no rounding attribute and therefore
+        # only matches the TileOp truncation semantics.  RINT/ROUND require a
+        # separate algorithm and must remain on the ordinary fallback path.
+        ("f32", "i32"): {"TRUNC"},
         ("i32", "f16"): {"ROUND"},
     }
     allowed_round_modes = supported_round_modes.get((src_dtype, dst_dtype))
@@ -2314,13 +2317,15 @@ def emit_convert_vmi(src: _TileProxy, dst: _TileProxy) -> None:
             kwargs["rounding"] = rounding
             kwargs["saturate"] = saturate
         elif src.element_type == f32 and dst.element_type == i32:
-            kwargs["rounding"] = rounding
+            # VMICvtOp models fp-to-int conversion with saturation only.  A
+            # TileOp rounding token cannot be forwarded as VMI rounding: the
+            # VMI verifier reserves that attribute for fp narrowing.
             kwargs["saturate"] = saturate
-        elif src.element_type == i32 and dst.element_type == f32:
-            kwargs["rounding"] = rounding
         source = _vload(src, coordinate)
         if src.element_type == i32 and dst.element_type == f16:
-            widened = _vcvt(source, f32, rounding=rounding)
+            # Integer widening has no rounding semantics.  Apply the TileOp
+            # rounding mode only to the subsequent f32 -> f16 narrowing.
+            widened = _vcvt(source, f32)
             converted = _vcvt(
                 widened,
                 f16,
