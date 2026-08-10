@@ -333,6 +333,11 @@ def check_rope_128b_candidates() -> dict[str, tuple[str, str]]:
         expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
         expect("pto.vmi.vcvt" in text, f"{name} should emit a VMI conversion")
         expect("vreg<32x" in text, f"{name} should preserve 32 logical lanes")
+        if name == "vmi_tcvt_i32_f32_rope128":
+            expect(
+                "rounding" not in text,
+                "integer-to-float widening must not carry VMI rounding",
+            )
         if name == "vmi_tcvt_f32_i32_rope128":
             expect(
                 'saturate = "NOSAT"' in text,
@@ -1207,6 +1212,22 @@ def check_tcvt_bf16_candidate() -> None:
     expect("pto.vmi.vcvt" in bf16_text, "tcvt f32->bf16 should lower to VMI conversion")
     expect("vreg<128xbf16>" in bf16_text, "tcvt f32->bf16 should target the bf16 vreg type")
 
+    default_bf16_text = instantiate_candidate(
+        target="a5",
+        op_name="pto.tcvt",
+        operand_specs=[raw_tile_spec, bf16_dst_spec],
+        provider_module="ptodsl.vmi_tilelib",
+        context_attrs={"round_mode": "RINT", "sat_mode": "DEFAULT"},
+    ).mlir_text()
+    expect(
+        'saturate = "SAT"' in default_bf16_text,
+        "omitted f32->bf16 saturation should use the A5 TCVT default",
+    )
+    expect(
+        'saturate = "NOSAT"' in bf16_text,
+        "explicit f32->bf16 saturation OFF should remain non-saturating",
+    )
+
     half_vl_src_spec = {
         **raw_tile_spec,
         "shape": [32, 64],
@@ -1268,16 +1289,45 @@ def check_tcvt_bf16_candidate() -> None:
             text.count("pto.vmi.vcvt") == vcvt_count,
             f"tcvt {src_dtype}->{dst_dtype} should emit {vcvt_count} conversion op(s)",
         )
-        expect(
-            'rounding = "Z"' in text if round_mode == "TRUNC" else True,
-            f"tcvt {src_dtype}->{dst_dtype} should preserve truncation",
-        )
+        if (src_dtype, dst_dtype) == ("f32", "i32"):
+            expect(
+                'rounding = "Z"' in text,
+                "f32->i32 TRUNC must lower to the physical toward-zero mode",
+            )
+        elif dst_dtype == "f32":
+            expect(
+                "rounding" not in text,
+                f"{src_dtype}->f32 widening must not carry VMI rounding",
+            )
+        elif (src_dtype, dst_dtype) == ("i32", "f16"):
+            expect(
+                text.count('rounding = "A"') == 1,
+                "i32->f16 must apply rounding only to the f32->f16 narrowing step",
+            )
+        elif round_mode == "TRUNC":
+            expect(
+                'rounding = "Z"' in text,
+                f"tcvt {src_dtype}->{dst_dtype} should preserve truncation",
+            )
         expect(
             'saturate = "SAT"' in text
             if (src_dtype, dst_dtype) == ("f32", "i32")
             else True,
             "tcvt f32->i32 should preserve saturation mode",
         )
+
+    f32_to_i32 = {**raw_tile_spec, "dtype": "i32"}
+    expect_raises(
+        lambda: instantiate_candidate(
+            target="a5",
+            op_name="pto.tcvt",
+            operand_specs=[raw_tile_spec, f32_to_i32],
+            provider_module="ptodsl.vmi_tilelib",
+            context_attrs={"round_mode": "RINT", "sat_mode": "OFF"},
+        ),
+        LookupError,
+        "custom constraints are not satisfied",
+    )
 
 
 def check_col_reduce_vmi_to_vpto_lowering() -> None:
