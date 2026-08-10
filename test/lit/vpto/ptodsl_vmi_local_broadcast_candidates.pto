@@ -57,10 +57,12 @@ module {
 
 // INLINE-LABEL: func.func @local_broadcast_candidates
 // INLINE: scf.for
-// INLINE: pto.vmi.vload {{.*}} {dist_mode = "brc"}
+// INLINE: pto.vmi.vload {{.*}} -> !pto.vmi.vreg<1xf32>
+// INLINE: pto.vmi.vbrc
 // INLINE: pto.vmi.vmul
 // INLINE: scf.for
-// INLINE: pto.vmi.vload {{.*}} {dist_mode = "brc"}
+// INLINE: pto.vmi.vload {{.*}} -> !pto.vmi.vreg<1xf32>
+// INLINE: pto.vmi.vbrc
 // INLINE: pto.vmi.vdiv
 // INLINE: pto.vmi.vload
 // INLINE: scf.for
@@ -72,7 +74,7 @@ module {
 // FINAL-NOT: pto.vmi.vmul
 // FINAL-NOT: pto.vmi.vdiv
 // FINAL-NOT: pto.vmi.vstore
-// FINAL: pto.vlds {{.*}} {dist = "BRC_B32"}
+// FINAL: pto.vdup
 // FINAL: pto.vmul
 // FINAL: pto.vdiv
 // FINAL: pto.vsts

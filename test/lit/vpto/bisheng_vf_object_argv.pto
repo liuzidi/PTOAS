@@ -17,8 +17,10 @@
 // RUN: chmod +x %t.toolchain/bin/bisheng %t.toolchain/tools/bisheng_compiler/bin/bisheng %t.toolchain/bin/ld.lld %t.toolchain/bin/cce-ld
 // RUN: touch %t.toolchain/include/__clang_cce_runtime_wrapper.h
 // RUN: env ASCEND_HOME_PATH=%t.toolchain FAKE_BISHENG_LOG=%t.normal.log ptoas --pto-arch=a5 --pto-backend=vpto --cann-output-version=9.0.0 %s -o %t.normal.o
+// RUN: env ASCEND_HOME_PATH=%t.toolchain FAKE_BISHENG_LOG=%t.disabled.log ptoas --disable-bisheng-vf-fusion --pto-arch=a5 --pto-backend=vpto --cann-output-version=9.0.0 --bisheng-vf-auto-sync=global %s -o %t.disabled.o
 // RUN: env ASCEND_HOME_PATH=%t.toolchain FAKE_BISHENG_LOG=%t.vmi.log ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --cann-output-version=9.0.0 --bisheng-vf-auto-sync=global %s -o %t.vmi.o
 // RUN: FileCheck %s --check-prefix=NORMAL < %t.normal.log
+// RUN: FileCheck %s --check-prefix=DISABLED < %t.disabled.log
 // RUN: FileCheck %s --check-prefix=VMI < %t.vmi.log
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
@@ -29,6 +31,10 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // NORMAL-NOT: -cce-vf-enable-vf-fusion=false
 // NORMAL-NOT: -cce-vf-enable-loop-fusion=false
+// DISABLED: -cce-vf-auto-sync=off
+// DISABLED: -cce-vf-enable-vf-fusion=false
+// DISABLED: -cce-vf-enable-loop-fusion=false
+// DISABLED-NOT: -cce-vf-auto-sync=global
 // VMI: -cce-vf-auto-sync=off
 // VMI: -cce-vf-enable-vf-fusion=false
 // VMI: -cce-vf-enable-loop-fusion=false
