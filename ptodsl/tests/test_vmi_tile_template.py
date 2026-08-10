@@ -448,8 +448,9 @@ def check_local_broadcast_candidates() -> dict[str, tuple[str, str]]:
         text = artifact.mlir_text()
         expect(text.count("scf.for") == 1, f"{name} should contain one row loop")
         expect(text.count("pto.vmi.vload") == 2, f"{name} should load row and state")
-        expect(text.count('dist_mode = "brc"') == 1, f"{name} should broadcast-load row state")
-        expect(text.count("pto.vmi.vbrc") == 0, f"{name} should not materialize a scalar vreg")
+        expect("!pto.vmi.vreg<1xf32>" in text, f"{name} should load row state as one scalar lane")
+        expect(text.count("pto.vmi.vbrc") == 1, f"{name} should broadcast row state to full width")
+        expect(text.count('dist_mode = "brc"') == 0, f"{name} should not use the restricted group broadcast load")
         expect(text.count(vmi_op) == 1, f"{name} should emit {vmi_op}")
         expect(text.count("pto.vmi.vstore") == 1, f"{name} should store one row")
         lowering_cases[name] = (text, vpto_op)
@@ -741,8 +742,12 @@ def check_provider_helper() -> None:
         context_attrs={},
     ).mlir_text()
     expect(
-        'dist_mode = "brc"' in row_expand,
-        "row expand should broadcast-load one value per row",
+        "pto.vmi.vbrc" in row_expand,
+        "row expand should broadcast one scalar value per row to full width",
+    )
+    expect(
+        'dist_mode = "brc"' not in row_expand,
+        "row expand should not use the restricted group broadcast load form",
     )
 
     convert_src_spec = {

@@ -1966,17 +1966,17 @@ def emit_row_expand_binary_vmi(
 
     full_mask = _create_mask_lanes(cols, cols, f32, trace=row_tensor._trace)
     with for_(0, rows, step=1) as row:
-        state_ptr = compact_row_state._trace.ensure_tile_ptr(compact_row_state)
-        state_offset = compact_row_state._trace._coerce_index(row)
-        broadcast = _wrap_vreg(
-            _vmi_builder.vload(
-                state_ptr.value,
-                state_offset.value,
-                size=cols,
-                dist_mode="brc",
-            ),
-            f32,
-        )
+        # Load one compact-row scalar and broadcast it to the full row width.
+        # Use a 1-lane vload + pto.vmi.vbrc (which lowers to pto.vmi.broadcast,
+        # a layout-agnostic scalar broadcast) instead of vload{dist_mode="brc"}:
+        # the latter lowers to pto.vmi.group_broadcast_load with
+        # source_group_stride=0 / num_groups=1, which the VMI layout/lowering
+        # tables only support for full-part group sizes. Narrow columns (e.g.
+        # 32 lanes, the four-block class) cannot materialize any layout from
+        # that form, so the fused broadcast load is reserved for the grouped
+        # micro-tile path above and the explicit broadcast is used here.
+        row_scalar = _vload_linear(compact_row_state, row, lanes=1)
+        broadcast = _vbrc(row_scalar, lanes=cols)
         src_offset = index_mul(row, src_physical_cols)
         dst_offset = index_mul(row, dst_physical_cols)
         value = _vload_linear(row_tensor, src_offset, lanes=cols)
