@@ -38,25 +38,6 @@ using mlir::presburger::IntegerPolyhedron;
 
 namespace {
 
-// Discover vector UB memory operations from their declared effects rather
-// than from a fixed opcode whitelist. An operation with such effects must
-// either have a descriptor builder or fail analysis explicitly.
-static bool isVectorMemoryOp(Operation *op) {
-  if (!isa<pto::VectorMicroOpInterface>(op))
-    return false;
-  auto iface = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!iface)
-    return false;
-  SmallVector<SideEffects::EffectInstance<MemoryEffects::Effect>, 4> effects;
-  iface.getEffects(effects);
-  return llvm::any_of(effects, [](const auto &effect) {
-    Value value = effect.getValue();
-    return value && isUBBackedType(value.getType()) &&
-           (isa<MemoryEffects::Read>(effect.getEffect()) ||
-            isa<MemoryEffects::Write>(effect.getEffect()));
-  });
-}
-
 static std::optional<MemBarKind> hazardKind(VecScopeAccessKind producer,
                                             VecScopeAccessKind consumer) {
   if (producer == VecScopeAccessKind::Store &&
@@ -528,7 +509,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
   bool anyFailed = false;
   unsigned order = 0;
   scope->walk([&](Operation *op) {
-    if (!isVectorMemoryOp(op))
+    if (!isUBVectorMemoryOp(op))
       return;
     AccessOccurrence occ;
     occ.op = op;

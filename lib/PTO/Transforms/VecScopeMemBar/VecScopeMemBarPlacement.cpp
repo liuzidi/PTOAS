@@ -65,45 +65,6 @@ struct AnchorKeyInfo {
   static bool isEqual(const AnchorKey &a, const AnchorKey &b) { return a == b; }
 };
 
-// True if `op` is a vector op that writes to UB (a vector store). Used by
-// the barrier-coverage scan to stop walking: a store between two barriers
-// introduces fresh hazards the earlier barrier cannot cover, so coverage
-// must not cross it. Uses the effect interface rather than `getStoredValues`
-// so non-contiguous stores (vsstb/vscatter) are recognized too.
-static bool isUBVectorStore(Operation *op) {
-  auto iface = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!iface)
-    return false;
-  SmallVector<SideEffects::EffectInstance<MemoryEffects::Effect>, 4> eff;
-  iface.getEffects(eff);
-  return llvm::any_of(eff, [](const auto &e) {
-    return isa<MemoryEffects::Write>(e.getEffect()) && e.getValue() &&
-           isUBBackedType(e.getValue().getType());
-  });
-}
-
-// True if `op` is a vector op that reads from UB (a vector load). For VLD_VST
-// redundancy elimination: a barrier B1 covers a later B2 only if no VLD
-// executes between them, because B1 only orders VLDs that precede it; a VLD
-// after B1 needs B2 to order it before subsequent VSTs. Uses the effect
-// interface so gather loads and stateful stores (which also read UB, e.g.
-// vsstb's pointer-state read) are recognized conservatively.
-static bool isUBVectorLoad(Operation *op) {
-  auto iface = dyn_cast<MemoryEffectOpInterface>(op);
-  if (!iface)
-    return false;
-  SmallVector<SideEffects::EffectInstance<MemoryEffects::Effect>, 4> eff;
-  iface.getEffects(eff);
-  return llvm::any_of(eff, [](const auto &e) {
-    return isa<MemoryEffects::Read>(e.getEffect()) && e.getValue() &&
-           isUBBackedType(e.getValue().getType());
-  });
-}
-
-static bool isUBVectorMemoryOp(Operation *op) {
-  return isUBVectorStore(op) || isUBVectorLoad(op);
-}
-
 static void appendUniqueHazard(SmallVectorImpl<unsigned> &hazards,
                                unsigned hazardId) {
   if (!llvm::is_contained(hazards, hazardId))
@@ -124,19 +85,6 @@ static bool coversHazardSet(ArrayRef<unsigned> covering,
                        covered.end());
 }
 
-// Does an existing barrier cover a hazard's mandatory cut at `anchor`?
-// First-version coverage: a barrier immediately before
-// `anchor` whose kind equals the hazard kind, or is VV_ALL, covers it. Loop
-// backedge coverage also requires the barrier to sit on the same carrying
-// loop's terminator.
-//
-// Broader same-block coverage (an earlier same-kind barrier with only
-// loads/pure compute between it and the anchor) is handled after placement
-// by the redundant-barrier elimination pass at the end of
-// `solveVecScopeMemBarPlacement`, which walks intervening regions; this
-// predicate stays conservative and only recognizes the immediately-adjacent
-// form, so it never suppresses a cut that an intervening loop's stores
-// would leave uncovered.
 static bool coveredByExisting(Operation *anchor, MemBarKind kind,
                               bool isLoopLatch, scf::ForOp carryingLoop,
                               ArrayRef<ExistingBarrier> existing) {
@@ -196,43 +144,6 @@ static Value getUBMemoryObject(Operation *op) {
   return nullptr;
 }
 } // namespace
-
-bool vecscopemembar::isUBBackedType(Type type) {
-  if (auto ptr = dyn_cast<pto::PtrType>(type))
-    return ptr.getMemorySpace().getAddressSpace() == AddressSpace::VEC;
-  auto memref = dyn_cast<BaseMemRefType>(type);
-  if (!memref)
-    return false;
-  Attribute space = memref.getMemorySpace();
-  if (auto attr = dyn_cast_or_null<pto::AddressSpaceAttr>(space))
-    return attr.getAddressSpace() == AddressSpace::VEC;
-  if (auto integer = dyn_cast_or_null<IntegerAttr>(space))
-    return integer.getInt() == static_cast<int64_t>(AddressSpace::VEC);
-  return false;
-}
-
-SmallVector<Value, 2> vecscopemembar::getStoredValues(Operation *storeOp) {
-  SmallVector<Value, 2> out;
-  if (auto s = dyn_cast<pto::VstsOp>(storeOp)) {
-    out.push_back(s.getValue());
-  } else if (auto s = dyn_cast<pto::Vstsx2Op>(storeOp)) {
-    out.push_back(s.getLow());
-    out.push_back(s.getHigh());
-  }
-  return out;
-}
-
-SmallVector<Value, 2> vecscopemembar::getLoadedValues(Operation *loadOp) {
-  SmallVector<Value, 2> out;
-  if (auto l = dyn_cast<pto::VldsOp>(loadOp)) {
-    if (Value r = l.getResult())
-      out.push_back(r);
-  } else if (auto l = dyn_cast<pto::Vldsx2Op>(loadOp)) {
-    out.push_back(l.getLow());
-    out.push_back(l.getHigh());
-  }
-  return out;
-}
 
 static bool reverseReaches(Value sink, Value target,
                            DenseSet<Operation *> &visited, unsigned depth,

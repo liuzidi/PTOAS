@@ -506,6 +506,12 @@ static llvm::cl::opt<bool> enableVecScopeMemBar(
                    "(default: on)"),
     llvm::cl::init(true));
 
+static llvm::cl::opt<bool> enableVecScopeMemBarAll(
+    "enable-vecscope-mem-bar-all",
+    llvm::cl::desc("Insert VV_ALL before every UB-backed vector memory "
+                   "operation in vecscope debug mode (default: off)"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> emitAddPtrTrace(
     "emit-addptr-trace",
     llvm::cl::desc("Emit addptr trace comments in generated C++ output"),
@@ -2982,6 +2988,9 @@ static void prepareVPTOForEmission(PassManager &pm) {
   if (enableVecScopeMemBar)
     kernelModulePM.addNestedPass<func::FuncOp>(
         pto::createPTOInsertVecScopeMemBarPass());
+  if (enableVecScopeMemBarAll)
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarAllPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOAnalyzeSIMTPersistentFragmentPass());
