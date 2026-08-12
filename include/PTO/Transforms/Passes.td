@@ -1038,6 +1038,22 @@ def PTOInsertVecScopeMemBar
                            "mlir::scf::SCFDialect"];
 }
 
+def PTOInsertVecScopeMemBarAll
+    : Pass<"pto-insert-vecscope-mem-bar-all", "func::FuncOp"> {
+  let summary = "Insert VV_ALL before every VPTO vecscope memory operation";
+  let description = [{
+    Debug-only mode that bypasses dependence analysis and inserts an independent
+    `pto.mem_bar "VV_ALL"` before every UB-backed vector memory operation in
+    `pto.vecscope` and `pto.strict_vecscope`. Existing barriers are retained;
+    this pass does not perform coverage or redundancy elimination.
+    Runs after vecscope inference, before `VPTOPtrNormalize`.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarAllPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect"];
+}
+
 def PTOValidateVPTOIR : Pass<"pto-validate-vpto-ir", "ModuleOp"> {
   let summary =
       "Validate authoring-stage VPTO legality before ptr-boundary canonicalization";

@@ -100,6 +100,7 @@ std::unique_ptr<Pass> createPTOMaterializeSIMTPersistentFragmentPass();
 std::unique_ptr<Pass> createPTOOutlineSIMTSectionsPass();
 std::unique_ptr<Pass> createPTOInferVPTOVecScopePass();
 std::unique_ptr<Pass> createPTOInsertVecScopeMemBarPass();
+std::unique_ptr<Pass> createPTOInsertVecScopeMemBarAllPass();
 std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
 std::unique_ptr<Pass> createVPTOSoftPostUpdatePass();
 std::unique_ptr<Pass> createPTOVPTOPtrBoundaryPass();

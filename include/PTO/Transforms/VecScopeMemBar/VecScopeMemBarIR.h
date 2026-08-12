@@ -46,6 +46,12 @@ struct VecScopeScheduleNode {
 
 bool isUBBackedType(Type type);
 
+bool isUBVectorStore(Operation *op);
+
+bool isUBVectorLoad(Operation *op);
+
+bool isUBVectorMemoryOp(Operation *op);
+
 SmallVector<Value, 2> getStoredValues(Operation *storeOp);
 
 SmallVector<Value, 2> getLoadedValues(Operation *loadOp);
