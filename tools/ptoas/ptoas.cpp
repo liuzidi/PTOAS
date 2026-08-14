@@ -3016,13 +3016,15 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOValidateVPTOEmissionIRPass());
 }
 
-static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module) {
+static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
+                                  bool useVMIFusionPipeline) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   auto moduleArchAttr =
       module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
   const bool isA2A3 = moduleArchAttr && isA2A3Arch(moduleArchAttr.getValue());
   const bool enableA5VPTOPostLoweringFusionLifecycle =
-      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
+      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5" &&
+      !useVMIFusionPipeline;
 
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createLowerPTOToUBufOpsPass());
@@ -3132,13 +3134,14 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 }
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
-                                            bool hasTileOpsToExpand) {
+                                            bool hasTileOpsToExpand,
+                                            bool useVMIFusionPipeline) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
   if (hasTileOpsToExpand) {
-    lowerPTOToVPTOBackend(pm, module.get());
+    lowerPTOToVPTOBackend(pm, module.get(), useVMIFusionPipeline);
   }
   auto &kernelModulePM = pm.nest<ModuleOp>();
   // Inline legal direct calls before VMI layout assignment so private helper
@@ -3481,7 +3484,8 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand))) {
+    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand,
+                                      useVMIFusionPipeline))) {
       return 1;
     }
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
@@ -3686,7 +3690,8 @@ int mlir::pto::compilePTOASModule(
       return 1;
     }
 
-    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand))) {
+    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand,
+                                      useVMIFusionPipeline))) {
       return 1;
     }
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,

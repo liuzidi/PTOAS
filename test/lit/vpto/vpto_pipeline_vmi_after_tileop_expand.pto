@@ -6,9 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=vmi-to-vpto --mlir-print-ir-after=vpto-ptr-normalize --mlir-print-ir-after=pto-infer-vpto-vecscope --mlir-print-ir-after=loop-invariant-code-motion 2>&1 | FileCheck %s
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op --mlir-print-ir-after=pto-low-level-loop-fusion --mlir-print-ir-after=pto-vmi-loop-fusion --mlir-print-ir-after=vmi-to-vpto --mlir-print-ir-after=vpto-ptr-normalize --mlir-print-ir-after=pto-infer-vpto-vecscope --mlir-print-ir-after=loop-invariant-code-motion 2>&1 | FileCheck %s
 
 // CHECK: IR Dump After ExpandTileOp
+// CHECK-NOT: IR Dump After PTOLowLevelLoopFusion
+// CHECK: IR Dump After PTOVmiLoopFusion
 // CHECK: IR Dump After VMIToVPTO
 // CHECK: IR Dump After PTOInferVPTOVecScope
 // CHECK: IR Dump After VPTOPtrNormalize
