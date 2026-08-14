@@ -874,8 +874,15 @@ struct FoldTileBufIntrinsicsPass
           if (auto resultPtrType =
                   dyn_cast<pto::PtrType>(addrOp.getDst().getType())) {
             builder.setInsertionPoint(addrOp);
-            Value replacement = builder.create<pto::CastPtrOp>(
+            auto replacement = builder.create<pto::CastPtrOp>(
                 addrOp.getLoc(), resultPtrType, addrOp.getSrc());
+            // Attach the source tile shape so downstream passes can recover
+            // the static storage size (pointer_cast used to carry this via
+            // MemRefType; castptr -> PtrType lost it).
+            if (auto tileTy = dyn_cast<pto::TileBufType>(addrOp.getSrc().getType()))
+              replacement->setAttr("pto.tile_shape",
+                  mlir::DenseI64ArrayAttr::get(builder.getContext(),
+                      SmallVector<int64_t>(tileTy.getShape())));
             addrOp.getDst().replaceAllUsesWith(replacement);
             addrOp.erase();
             continue;
@@ -921,8 +928,15 @@ struct FoldTileBufIntrinsicsPass
         }
 
         builder.setInsertionPoint(addrOp);
-        Value replacement = builder.create<pto::CastPtrOp>(
+        auto replacement = builder.create<pto::CastPtrOp>(
             addrOp.getLoc(), resultPtrType, handleInfo->addr);
+        // Attach the source tile shape so downstream passes (VmiMemoryLocation,
+        // PTOVmiLoopFusion, VmiLoadStoreElision) can recover the static storage
+        // size.  pointer_cast used to carry this via MemRefType; castptr ->
+        // PtrType lost it.
+        replacement->setAttr("pto.tile_shape",
+            mlir::DenseI64ArrayAttr::get(builder.getContext(),
+                SmallVector<int64_t>(tileTy.getShape())));
         addrOp.getDst().replaceAllUsesWith(replacement);
         addrOp.erase();
       }

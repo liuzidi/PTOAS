@@ -208,6 +208,8 @@ struct UBAccess {
 static std::optional<int64_t> getElementBytes(Type type) {
   if (auto memref = dyn_cast<MemRefType>(type))
     type = memref.getElementType();
+  if (auto ptr = dyn_cast<pto::PtrType>(type))
+    type = ptr.getElementType();
   if (type.isF32() || type.isInteger(32))
     return 4;
   if (type.isF16() || type.isBF16() || type.isInteger(16))
@@ -819,13 +821,16 @@ static SmallVector<Member, 8> collectRun(Block &body,
   Operation *betweenStart = first->getNextNode();
   for (unsigned i = firstLoopIdx + 1; i < loops.size(); ++i) {
     scf::ForOp cand = loops[i];
-    if (!isTileLibVmiPrincipalLoop(cand))
+    if (!isTileLibVmiPrincipalLoop(cand)) {
       break;
-    if (!sameHeader(first, cand))
+    }
+    if (!sameHeader(first, cand)) {
       break;
+    }
 
-    if (hasMemberResultDependency(members, cand))
+    if (hasMemberResultDependency(members, cand)) {
       break;
+    }
 
     // Between-ops: [betweenStart, cand).
     SmallVector<Operation *, 8> between;
@@ -847,8 +852,9 @@ static SmallVector<Member, 8> collectRun(Block &body,
 
     // Reject unmodeled memory accesses and every UB exchange that is not a
     // proven injective same-iteration transfer before relocating between-ops.
-    if (hasCrossIterationUBDependency(members, cand))
+    if (hasCrossIterationUBDependency(members, cand)) {
       break;
+    }
 
     // Partition between-ops into dependency components (SSA def-use or same-UB
     // store->load). Each component must be placed AS A WHOLE: all hoisted above
@@ -862,10 +868,12 @@ static SmallVector<Member, 8> collectRun(Block &body,
     for (const SmallVector<Operation *, 4> &comp : comps) {
       bool compHoist = true, compSink = true;
       for (Operation *op : comp) {
-        if (!canHoistAboveRun(op, fullLoops, runReads, runWrites))
+        if (!canHoistAboveRun(op, fullLoops, runReads, runWrites)) {
           compHoist = false;
-        if (!canSinkBelowRun(op, fullLoops, runReads, runWrites))
+        }
+        if (!canSinkBelowRun(op, fullLoops, runReads, runWrites)) {
           compSink = false;
+        }
       }
       if (!compHoist && !compSink) {
         stuck = true;

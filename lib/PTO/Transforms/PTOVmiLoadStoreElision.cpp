@@ -612,10 +612,15 @@ inferVMILoadUserMask(pto::VMIvLoadOp load) {
   if (!seenConsumer)
     return std::nullopt;
   // A masked consumer bounds the read to [0,N); a mask-free consumer reads the
-  // full vreg. Both at once means no single bound describes every read, so a
-  // partial (merge) store cannot be safely forwarded — bail.
+  // full vreg. Both at once means the load reads the FULL vreg (the union of
+  // all lanes the masked consumer reads and the full-vreg read of the
+  // mask-free consumer). Return an empty Value to signal "full read" so the
+  // caller treats readLanes as the full prefix — this still allows forwarding
+  // from a store that writes ALL lanes (zero-pmode stores, which normalize to
+  // writeLanes=full), which is the common case. A partial (merge) store whose
+  // writeLanes do not cover full will simply not match, so correctness holds.
   if (hasMaskConstraint && hasMaskFreeConsumer)
-    return std::nullopt;
+    return Value(); // full-vreg read: forwardable only from full-lane stores
   return inferred; // empty if all consumers mask-free, else the shared mask
 }
 

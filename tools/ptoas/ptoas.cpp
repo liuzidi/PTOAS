@@ -3228,6 +3228,8 @@ static void appendVMISemanticPipeline(OpPassManager &pm,
   pm.addPass(createCSEPass());
   pm.addPass(pto::createVMILegalizeArithSelectPass());
   pm.addPass(pto::createPTOValidateVMILayoutIRPass());
+  pm.addNestedPass<func::FuncOp>(
+      pto::createPTOFlattenFusionRegionPass());
   pm.addPass(pto::createVMIToVPTOPass());
 }
 

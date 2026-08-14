@@ -12326,6 +12326,9 @@ struct OneToNVMIFPToSIOpPattern : OpConversionPattern<VMIFPToSIOp> {
         return rewriter.notifyMatchFailure(
             op, "failed to build narrow fptosi result mask");
 
+      if (sourceFactor <= 0)
+        return rewriter.notifyMatchFailure(
+            op, "VMIFPToSI expects a positive source factor");
       SmallVector<Value> partials;
       partials.reserve(sourceFactor);
       for (int64_t partIndex = 0; partIndex < sourceFactor; ++partIndex) {

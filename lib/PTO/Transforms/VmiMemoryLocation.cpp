@@ -10,6 +10,7 @@
 
 #include "PTO/IR/PTO.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
@@ -58,6 +59,8 @@ static std::optional<int64_t> getElementBytes(Type type) {
     element = memref.getElementType();
   else if (auto unranked = dyn_cast<UnrankedMemRefType>(type))
     element = unranked.getElementType();
+  else if (auto ptr = dyn_cast<pto::PtrType>(type))
+    element = ptr.getElementType();
   if (!element)
     return std::nullopt;
   if (element.isF32() || element.isInteger(32))
@@ -74,6 +77,36 @@ static std::optional<int64_t> getElementBytes(Type type) {
 static std::optional<int64_t> getStaticOffset(Value value) {
   return getConstantInteger(value);
 }
+
+static std::optional<int64_t>
+getTileStorageBytesFromAddr(Operation *context, int64_t address) {
+  std::optional<int64_t> result;
+  context->getParentOfType<func::FuncOp>().walk([&](pto::AllocTileOp alloc) {
+    auto allocAddr = alloc.getAddr();
+    if (!allocAddr)
+      return WalkResult::advance();
+    auto addrConst = getConstantInteger(allocAddr);
+    if (!addrConst || *addrConst != address)
+      return WalkResult::advance();
+    auto tileType = dyn_cast<pto::TileBufType>(alloc.getResult().getType());
+    if (!tileType)
+      return WalkResult::advance();
+    auto elemBytes = getElementBytes(tileType.getElementType());
+    if (!elemBytes)
+      return WalkResult::advance();
+    int64_t elements = 1;
+    for (int64_t dim : tileType.getShape()) {
+      if (dim <= 0)
+        return WalkResult::interrupt();
+      if (__builtin_mul_overflow(elements, dim, &elements))
+        return WalkResult::interrupt();
+    }
+    result = elements * *elemBytes;
+    return WalkResult::interrupt();
+  });
+  return result;
+}
+
 
 static std::optional<int64_t>
 getStaticSubviewByteOffset(memref::SubViewOp subview, MemRefType sourceType) {
@@ -154,9 +187,27 @@ mlir::pto::resolveVmiStorageRoot(Value base) {
     if (auto cast = base.getDefiningOp<pto::CastPtrOp>()) {
       Value input = cast.getInput();
       if (isa<IntegerType>(input.getType()) || input.getType().isIndex()) {
-        if (auto address = getConstantInteger(input))
-          return VmiStorageRoot{*address, std::nullopt,
+        if (auto address = getConstantInteger(input)) {
+          auto storage = getTileStorageBytesFromAddr(cast, *address);
+          if (!storage) {
+            if (auto shapeAttr =
+                    cast->getAttrOfType<DenseI64ArrayAttr>("pto.tile_shape")) {
+              auto elemBytes = getElementBytes(cast.getResult().getType());
+              if (elemBytes) {
+                int64_t elements = 1;
+                bool ok = true;
+                for (int64_t dim : shapeAttr.asArrayRef()) {
+                  if (dim <= 0) { ok = false; break; }
+                  if (__builtin_mul_overflow(elements, dim, &elements)) { ok = false; break; }
+                }
+                if (ok)
+                  storage = elements * *elemBytes;
+              }
+            }
+          }
+          return VmiStorageRoot{*address, storage,
                                 cast.getResult().getType()};
+        }
       }
       base = input;
       continue;
@@ -188,8 +239,14 @@ bool mlir::pto::mayAliasVmiStorageRoot(const VmiStorageRoot &lhs,
                                        const VmiStorageRoot &rhs) {
   if (lhs.address == rhs.address)
     return true;
-  if (!lhs.storageBytes || !rhs.storageBytes)
-    return true;
+  if (!lhs.storageBytes || !rhs.storageBytes) {
+    const auto &known = lhs.storageBytes ? lhs : rhs;
+    int64_t knownEnd = known.address;
+    if (__builtin_add_overflow(known.address, *known.storageBytes, &knownEnd))
+      return true;
+    const auto &unknown = lhs.storageBytes ? rhs : lhs;
+    return unknown.address >= known.address && unknown.address < knownEnd;
+  }
   if (*lhs.storageBytes < 0 || *rhs.storageBytes < 0)
     return true;
   const int64_t lhsEnd = lhs.address > INT64_MAX - *lhs.storageBytes
