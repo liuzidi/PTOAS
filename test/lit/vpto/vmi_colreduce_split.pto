@@ -18,22 +18,18 @@
 //               one iter_arg, one v{max,min} per row (10 of each).
 //
 // RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto \
-// RUN:   --tile-lib-backend=ptodsl --ptodsl-pkg-path %S/../../../ptodsl \
 // RUN:   --pto-level=level2 --emit-vpto %s -o /dev/null \
 // RUN:   --mlir-print-ir-after=pto-expand-tile-op 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=MAX4
 // RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto \
-// RUN:   --tile-lib-backend=ptodsl --ptodsl-pkg-path %S/../../../ptodsl \
 // RUN:   --pto-level=level2 --emit-vpto %s -o /dev/null \
 // RUN:   --mlir-print-ir-after=pto-expand-tile-op 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=MIN4
 // RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto \
-// RUN:   --tile-lib-backend=ptodsl --ptodsl-pkg-path %S/../../../ptodsl \
 // RUN:   --pto-level=level2 --emit-vpto %s -o /dev/null \
 // RUN:   --mlir-print-ir-after=pto-expand-tile-op 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=MAX1
 // RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto \
-// RUN:   --tile-lib-backend=ptodsl --ptodsl-pkg-path %S/../../../ptodsl \
 // RUN:   --pto-level=level2 --emit-vpto %s -o /dev/null \
 // RUN:   --mlir-print-ir-after=pto-expand-tile-op 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=MIN1

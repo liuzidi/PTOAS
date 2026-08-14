@@ -67,11 +67,31 @@ def materialize(
         context_attrs,
         candidate_id or None,
     )
-    module = _TemplateTrace(
-        descriptor,
-        tile_specs,
-        context_attrs=context_attrs,
-    ).build_module_in_context(context)
+    # Canonical VMI candidates are authored against the lower-level
+    # ``_TraceBuilder`` contract (``_TileProxy`` / backend-partitioned
+    # modules), while ordinary TileLib candidates use the public
+    # ``_TemplateTrace`` contract (``_TemplateTile`` / nested modules).
+    # ExpandTileOp materializes both kinds through this one in-process seam;
+    # keep the tracer paired with the descriptor that authored the template.
+    if getattr(descriptor, "ir_level", None) == "vmi":
+        from .._tile_template_tracing import _TraceBuilder, _coerce_parameter_spec
+
+        vmi_tile_specs = {
+            name: _coerce_parameter_spec(spec)
+            for name, spec in tile_specs.items()
+        }
+
+        module = _TraceBuilder(
+            descriptor,
+            vmi_tile_specs,
+            context_attrs=context_attrs,
+        ).build_module_in_context(context)
+    else:
+        module = _TemplateTrace(
+            descriptor,
+            tile_specs,
+            context_attrs=context_attrs,
+        ).build_module_in_context(context)
     module.operation.verify()
     return module, descriptor.name
 

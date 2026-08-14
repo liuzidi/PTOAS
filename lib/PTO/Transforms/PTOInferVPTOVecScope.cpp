@@ -157,8 +157,7 @@ static bool isVectorScopeBoundaryOperation(Operation *op) {
 }
 
 static bool isPureAddressOperation(Operation *op) {
-  return isa<pto::PointerCastOp, pto::CastPtrOp, pto::AddPtrOp,
-             pto::TileBufAddrOp, pto::BindTileOp>(op);
+  return isa<pto::CastPtrOp, pto::AddPtrOp, pto::TileBufAddrOp>(op);
 }
 
 static bool hasVecScopeTypedOperandOrResult(Operation *op) {
@@ -760,6 +759,7 @@ static void sinkCloneableProducersIntoDedicatedScopes(Block &block) {
 
     Block &scopeBody = commonScope->getRegion(0).front();
     producer->moveBefore(&scopeBody, scopeBody.begin());
+  }
 }
 
 static bool findEscapingMovedResult(

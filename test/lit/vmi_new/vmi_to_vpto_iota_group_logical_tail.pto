@@ -57,7 +57,7 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i32
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // Tail mask on store: only 32 of 64 physical lanes active.
 // CHECK: %[[C32:.*]] = arith.constant 32 : i32
 // CHECK: pto.plt_b32 %[[C32]]
@@ -75,8 +75,8 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i32
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // First chunk full VL store; second chunk partial (32 active).
 // CHECK: pto.vsts
 // CHECK: %[[C32:.*]] = arith.constant 32 : i32

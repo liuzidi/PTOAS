@@ -97,7 +97,7 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i32
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // CHECK: pto.vsts
 // CHECK-NOT: pto.vmi.
 
@@ -111,7 +111,7 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i32
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // CHECK: pto.vsts
 // CHECK-NOT: pto.vmi.
 
@@ -125,7 +125,7 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i32
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // CHECK: pto.vsts
 // CHECK-NOT: pto.vmi.
 
@@ -139,7 +139,7 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i16
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // CHECK: pto.vsts
 // CHECK-NOT: pto.vmi.
 
@@ -153,6 +153,6 @@ module {
 // CHECK: %[[PACKED:.*]] = pto.vadds %[[REM]], %[[BASE]]
 // CHECK-NOT: pto.vsel
 // CHECK: %[[C1000:.*]] = arith.constant 1000 : i16
-// CHECK: pto.vadds %[[PACKED]], %[[C1000]]
+// CHECK: pto.vadd %[[PACKED]], {{.*}}, {{.*}}
 // CHECK: pto.vsts
 // CHECK-NOT: pto.vmi.

@@ -221,7 +221,9 @@ module attributes {pto.target_arch = "a5"} {
             %75 = pto.vmi.vsel %74, %49, %68 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %76 = pto.vmi.vsub %75, %49, %45 : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
             %c7_i16 = arith.constant 7 : i16
-            %77 = pto.vmi.vshrs %76, %c7_i16, %45 : !pto.vmi.vreg<8xui16>, i16, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
+            %c7_ui16 = builtin.unrealized_conversion_cast %c7_i16 : i16 to ui16
+            %shift_vec = pto.vmi.broadcast %c7_ui16 : ui16 -> !pto.vmi.vreg<8xui16>
+            %77 = pto.vmi.vshr %76, %shift_vec : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %78 = pto.vmi.vsel %70, %77, %51 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %79 = pto.vmi.vsel %72, %78, %53 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %80 = pto.vmi.vcvt %79 {saturate = "SAT"} : !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui8>
@@ -238,7 +240,7 @@ module attributes {pto.target_arch = "a5"} {
             %c1_17 = arith.constant 1 : index
             pto.vmi.vstore %80, %14[%88], %c1_17 {group = 8 : i64} : !pto.vmi.vreg<8xui8>, !pto.ptr<ui8, ub>
             %c7_i16_18 = arith.constant 7 : i16
-            %89 = pto.vmi.vshls %79, %c7_i16_18, %45 : !pto.vmi.vreg<8xui16>, i16, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
+            %89 = pto.vmi.vshl %79, %shift_vec, %45 : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
             %c32640_i16_19 = arith.constant 32640 : i16
             %90 = builtin.unrealized_conversion_cast %c32640_i16_19 : i16 to ui16
             %91 = pto.vmi.vcmps %89, %90, %45 {cmp = "eq"} : !pto.vmi.vreg<8xui16>, ui16, !pto.vmi.mask<8xpred> -> !pto.vmi.mask<8xpred>
@@ -332,7 +334,9 @@ module attributes {pto.target_arch = "a5"} {
             %75 = pto.vmi.vsel %74, %49, %68 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %76 = pto.vmi.vsub %75, %49, %45 : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
             %c7_i16 = arith.constant 7 : i16
-            %77 = pto.vmi.vshrs %76, %c7_i16, %45 : !pto.vmi.vreg<8xui16>, i16, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
+            %c7_ui16 = builtin.unrealized_conversion_cast %c7_i16 : i16 to ui16
+            %shift_vec = pto.vmi.broadcast %c7_ui16 : ui16 -> !pto.vmi.vreg<8xui16>
+            %77 = pto.vmi.vshr %76, %shift_vec : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %78 = pto.vmi.vsel %70, %77, %51 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %79 = pto.vmi.vsel %72, %78, %53 : !pto.vmi.mask<8xpred>, !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui16>
             %80 = pto.vmi.vcvt %79 {saturate = "SAT"} : !pto.vmi.vreg<8xui16> -> !pto.vmi.vreg<8xui8>
@@ -349,7 +353,7 @@ module attributes {pto.target_arch = "a5"} {
             %c1_17 = arith.constant 1 : index
             pto.vmi.vstore %80, %24[%88], %c1_17 {group = 8 : i64} : !pto.vmi.vreg<8xui8>, !pto.ptr<ui8, ub>
             %c7_i16_18 = arith.constant 7 : i16
-            %89 = pto.vmi.vshls %79, %c7_i16_18, %45 : !pto.vmi.vreg<8xui16>, i16, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
+            %89 = pto.vmi.vshl %79, %shift_vec, %45 : !pto.vmi.vreg<8xui16>, !pto.vmi.vreg<8xui16>, !pto.vmi.mask<8xpred> -> !pto.vmi.vreg<8xui16>
             %c32640_i16_19 = arith.constant 32640 : i16
             %90 = builtin.unrealized_conversion_cast %c32640_i16_19 : i16 to ui16
             %91 = pto.vmi.vcmps %89, %90, %45 {cmp = "eq"} : !pto.vmi.vreg<8xui16>, ui16, !pto.vmi.mask<8xpred> -> !pto.vmi.mask<8xpred>

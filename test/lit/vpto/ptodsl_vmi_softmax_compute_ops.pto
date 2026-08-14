@@ -8,9 +8,9 @@
 
 // This is a static Softmax compute-op coverage harness, not a complete
 // normalized or dynamic Online Softmax kernel.
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi --implicit-check-not=pto.vecscope
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=__pto_ptodsl_vmi
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-expand-tile-op 2>&1 | FileCheck %s --check-prefix=EXPAND
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o /dev/null --mlir-print-ir-after=pto-inline-libcall 2>&1 | FileCheck %s --check-prefix=INLINE --implicit-check-not=__pto_ptodsl_vmi --implicit-check-not=pto.vecscope
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - | FileCheck %s --check-prefix=FINAL --implicit-check-not=__pto_ptodsl_vmi
 
 module {
   func.func @ptodsl_vmi_softmax_compute_ops() {
@@ -88,20 +88,20 @@ module {
   }
 }
 
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowmax
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowexpandsub
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmuls
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_texp
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_trowsum
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_trowmax
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_trowexpandsub
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tmuls
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_texp_block64
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_trowsum
 // The 256B f32 source row and 128B f16 destination row use the verified
 // half-row mask path and remain available to VMI fusion.
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tcvt
-// EXPAND-SAME: pto.tilelib.impl = "vmi"
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tsub
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmax
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmul
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tadd
-// EXPAND: call {{.*}}__pto_ptodsl_vmi_a5_tmov
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tcvt
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tsub
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tmax
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tmul
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tadd_block64
+// EXPAND: {{(call|func.call)}} {{.*}}__vmi_tmov
+// EXPAND: pto.tilelib.impl = "vmi"
 
 // INLINE: IR Dump After PTOInlineLibCall
 // INLINE-LABEL: func.func @ptodsl_vmi_softmax_compute_ops

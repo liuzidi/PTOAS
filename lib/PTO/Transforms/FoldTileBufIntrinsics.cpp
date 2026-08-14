@@ -33,6 +33,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "PTO/IR/PTO.h"
+#include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/Transforms/Passes.h"
 
 #include <optional>
@@ -167,6 +168,26 @@ struct TileHandleInfo {
   pto::TileBufConfigAttr config;
 };
 
+static bool getTilePointerStrides(pto::TileBufType type, int64_t &rowStride,
+                                  int64_t &colStride) {
+  auto shape = type.getShape();
+  if (shape.size() != 2 || llvm::is_contained(shape, ShapedType::kDynamic))
+    return false;
+
+  auto config = type.getConfigAttr();
+  int32_t bl = static_cast<int32_t>(config.getBLayout().getValue());
+  int32_t sl = static_cast<int32_t>(config.getSLayout().getValue());
+  if (sl == 0) {
+    bool rowPlusOne =
+        type.getCompactModeI32() ==
+        static_cast<int32_t>(pto::CompactMode::RowPlusOne);
+    rowStride = bl == 1 ? 1 : shape[1] + (rowPlusOne ? 1 : 0);
+    colStride = bl == 1 ? shape[0] + (rowPlusOne ? 1 : 0) : 1;
+    return true;
+  }
+  return false;
+}
+
 static std::pair<Value, Value> findSetValidShapeOverride(Value tileBuf) {
   for (Operation *user : tileBuf.getUsers()) {
     auto setValid = dyn_cast<pto::SetValidShapeOp>(user);
@@ -245,6 +266,75 @@ static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
       }
       return resolveTileHandle(yieldOp.getOperand(resultIndex), user);
     }
+  }
+
+  if (auto subview = tileBuf.getDefiningOp<pto::SubViewOp>()) {
+    auto sourceInfo = resolveTileHandle(subview.getSource(), user);
+    if (!sourceInfo)
+      return std::nullopt;
+    if (!sourceInfo->addr || subview.getOffsets().size() != 2) {
+      user->emitError("FoldTileBufIntrinsics: pto.subview requires an "
+                      "addressed rank-2 source for tile_buf_addr folding");
+      return std::nullopt;
+    }
+    auto sourceType = dyn_cast<pto::TileBufType>(subview.getSource().getType());
+    if (!sourceType) {
+      user->emitError("FoldTileBufIntrinsics: pto.subview source must be "
+                      "!pto.tile_buf");
+      return std::nullopt;
+    }
+    int64_t rowStride = 0;
+    int64_t colStride = 0;
+    if (!getTilePointerStrides(sourceType, rowStride, colStride)) {
+      user->emitError("FoldTileBufIntrinsics: cannot derive pto.subview "
+                      "pointer strides");
+      return std::nullopt;
+    }
+    OpBuilder builder(user);
+    auto toI64 = [&](Value value) -> Value {
+      if (value.getType().isIndex())
+        return builder.create<arith::IndexCastOp>(user->getLoc(),
+                                                  builder.getI64Type(), value);
+      if (value.getType().isInteger(64))
+        return value;
+      if (auto intType = dyn_cast<IntegerType>(value.getType())) {
+        if (intType.getWidth() < 64)
+          return builder.create<arith::ExtUIOp>(user->getLoc(),
+                                                builder.getI64Type(), value);
+      }
+      return {};
+    };
+    Value row = toI64(subview.getOffsets()[0]);
+    Value col = toI64(subview.getOffsets()[1]);
+    if (!row || !col) {
+      user->emitError("FoldTileBufIntrinsics: pto.subview offsets must be "
+                      "integer or index values");
+      return std::nullopt;
+    }
+    Value rowScale = builder.create<arith::ConstantIntOp>(user->getLoc(),
+                                                           rowStride, 64);
+    Value colScale = builder.create<arith::ConstantIntOp>(user->getLoc(),
+                                                           colStride, 64);
+    row = builder.create<arith::MulIOp>(user->getLoc(), row, rowScale);
+    col = builder.create<arith::MulIOp>(user->getLoc(), col, colScale);
+    Value elements = builder.create<arith::AddIOp>(user->getLoc(), row, col);
+    int64_t elemBytes = static_cast<int64_t>(
+        pto::getPTOStorageElemByteSize(sourceType.getElementType()));
+    if (elemBytes <= 0) {
+      user->emitError("FoldTileBufIntrinsics: unsupported pto.subview "
+                      "element type");
+      return std::nullopt;
+    }
+    Value byteScale = builder.create<arith::ConstantIntOp>(user->getLoc(),
+                                                            elemBytes, 64);
+    Value bytes = builder.create<arith::MulIOp>(user->getLoc(), elements,
+                                                byteScale);
+    Value addr = builder.create<arith::AddIOp>(user->getLoc(),
+                                               sourceInfo->addr, bytes);
+    auto resultType = dyn_cast<pto::TileBufType>(subview.getResult().getType());
+    return TileHandleInfo{addr, subview.getValidRow(), subview.getValidCol(),
+                          resultType ? resultType.getConfigAttr()
+                                     : sourceInfo->config};
   }
 
   if (auto alloc = tileBuf.getDefiningOp<pto::AllocTileOp>()) {
@@ -761,6 +851,14 @@ struct FoldTileBufIntrinsicsPass
       // base memref to the requested pointer type without re-entering the
       // tile_buf handle path.
       for (auto addrOp : addrOps) {
+        if (auto declaration =
+                unwrapBridgingCasts(addrOp.getSrc())
+                    .getDefiningOp<pto::DeclareTileOp>()) {
+          if (llvm::any_of(declaration.getTile().getUsers(), [](Operation *op) {
+                return isa<pto::TPopOp>(op);
+              }))
+            continue;
+        }
         if (auto srcMemrefType =
                 dyn_cast<MemRefType>(addrOp.getSrc().getType())) {
           if (auto resultMemrefType =

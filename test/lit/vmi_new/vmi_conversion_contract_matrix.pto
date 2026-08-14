@@ -31,7 +31,7 @@ module {
 
 module {
   func.func @rounding_wrong_direction(%x: !pto.vmi.vreg<64xf16>) {
-    // expected-error@+1 {{'rounding' attribute is only valid for floating-point narrowing or floating-point-to-integer conversions}}
+    // expected-error@+1 {{'rounding' attribute is only valid for floating-point narrowing, floating-point-to-integer, or signed-integer-to-floating-point conversions}}
     %r = pto.vmi.vcvt %x {rounding = "R"} : !pto.vmi.vreg<64xf16> -> !pto.vmi.vreg<64xf32>
     return
   }

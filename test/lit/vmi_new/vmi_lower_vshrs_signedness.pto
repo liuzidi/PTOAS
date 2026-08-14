@@ -10,18 +10,6 @@
 // RUN: pto-test-opt %s -vmi-mask-granularity-assignment -vmi-layout-assignment -vmi-lower-unified-to-legacy -vmi-to-vpto | FileCheck %s --check-prefix=LOWER
 
 module {
-  func.func @vshrs_signed(
-      %src: !pto.vmi.vreg<64xsi16, #pto.vmi.layout<contiguous>>,
-      %scalar: i16,
-      %mask: !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>)
-      -> !pto.vmi.vreg<64xsi16, #pto.vmi.layout<contiguous>> {
-    %result = pto.vmi.vshrs %src, %scalar, %mask
-        : !pto.vmi.vreg<64xsi16, #pto.vmi.layout<contiguous>>, i16,
-          !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>
-        -> !pto.vmi.vreg<64xsi16, #pto.vmi.layout<contiguous>>
-    return %result : !pto.vmi.vreg<64xsi16, #pto.vmi.layout<contiguous>>
-  }
-
   func.func @vshrs_signless(
       %src: !pto.vmi.vreg<64xi16, #pto.vmi.layout<contiguous>>,
       %scalar: i16,
@@ -32,18 +20,6 @@ module {
           !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>
         -> !pto.vmi.vreg<64xi16, #pto.vmi.layout<contiguous>>
     return %result : !pto.vmi.vreg<64xi16, #pto.vmi.layout<contiguous>>
-  }
-
-  func.func @vshrs_unsigned(
-      %src: !pto.vmi.vreg<64xui16, #pto.vmi.layout<contiguous>>,
-      %scalar: i16,
-      %mask: !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>)
-      -> !pto.vmi.vreg<64xui16, #pto.vmi.layout<contiguous>> {
-    %result = pto.vmi.vshrs %src, %scalar, %mask
-        : !pto.vmi.vreg<64xui16, #pto.vmi.layout<contiguous>>, i16,
-          !pto.vmi.mask<64xb16, #pto.vmi.layout<contiguous>>
-        -> !pto.vmi.vreg<64xui16, #pto.vmi.layout<contiguous>>
-    return %result : !pto.vmi.vreg<64xui16, #pto.vmi.layout<contiguous>>
   }
 
   func.func @vshr_signless(
@@ -58,42 +34,18 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @vshrs_signed(
-// CHECK: pto.vmi.vshrs
-// CHECK-NOT: pto.vmi.broadcast
-// CHECK-NOT: pto.vmi.shrsi
-
 // CHECK-LABEL: func.func @vshrs_signless(
-// CHECK: pto.vmi.vshrs
-// CHECK-NOT: pto.vmi.broadcast
-// CHECK-NOT: pto.vmi.shrui
-
-// CHECK-LABEL: func.func @vshrs_unsigned(
-// CHECK: pto.vmi.vshrs
-// CHECK-NOT: pto.vmi.broadcast
-// CHECK-NOT: pto.vmi.shrui
+// CHECK: pto.vmi.broadcast
+// CHECK: pto.vmi.shrui
 
 // CHECK-LABEL: func.func @vshr_signless(
 // CHECK: pto.vmi.shrui
 // CHECK-NOT: pto.vmi.shrsi
 
-// LOWER-LABEL: func.func @vshrs_signed(
-// LOWER-NOT: unrealized_conversion_cast
-// LOWER: pto.vshrs {{.*}} : !pto.vreg<128xsi16>, i16, !pto.mask<b16> -> !pto.vreg<128xsi16>
-// LOWER-NOT: pto.vdup
-// LOWER-NOT: pto.vshr {{.*}} : !pto.vreg
-
 // LOWER-LABEL: func.func @vshrs_signless(
 // LOWER-NOT: unrealized_conversion_cast
-// LOWER: pto.vshrs {{.*}} : !pto.vreg<128xi16>, i16, !pto.mask<b16> -> !pto.vreg<128xi16>
-// LOWER-NOT: pto.vdup
-// LOWER-NOT: pto.vshr {{.*}} : !pto.vreg
-
-// LOWER-LABEL: func.func @vshrs_unsigned(
-// LOWER-NOT: unrealized_conversion_cast
-// LOWER: pto.vshrs {{.*}} : !pto.vreg<128xui16>, i16, !pto.mask<b16> -> !pto.vreg<128xui16>
-// LOWER-NOT: pto.vdup
-// LOWER-NOT: pto.vshr {{.*}} : !pto.vreg
+// LOWER: pto.vdup
+// LOWER: pto.vshr {{.*}} : !pto.vreg<128xi16>, !pto.vreg<128xi16>, !pto.mask<b16> -> !pto.vreg<128xi16>
 
 // LOWER-LABEL: func.func @vshr_signless(
 // LOWER: pto.vshr

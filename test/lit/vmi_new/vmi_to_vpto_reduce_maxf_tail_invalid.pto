@@ -77,27 +77,27 @@ module {
 }
 
 // CHECK-LABEL: func.func @reduce_addf_partial_chunk(
-// CHECK: %[[VALID8:.*]] = pto.pge_b32 "PAT_VL8" : !pto.mask<b32>
+// CHECK: %[[VALID8:.*]] = pto.pset_b32 "PAT_VL8" : !pto.mask<b32>
 // CHECK: %[[ALL0:.*]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
 // CHECK: %[[MASK8:.*]] = pto.pand %arg1, %[[VALID8]], %[[ALL0]]
 // CHECK: pto.vcadd %arg0, %[[MASK8]]
 // CHECK-LABEL: func.func @reduce_addi_partial_chunk(
-// CHECK: %[[VALID32I:.*]] = pto.pge_b32 "PAT_VL32" : !pto.mask<b32>
+// CHECK: %[[VALID32I:.*]] = pto.pset_b32 "PAT_VL32" : !pto.mask<b32>
 // CHECK: %[[ALLI:.*]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
 // CHECK: %[[MASK32I:.*]] = pto.pand %arg1, %[[VALID32I]], %[[ALLI]]
 // CHECK: pto.vcadd %arg0, %[[MASK32I]]
 // CHECK-LABEL: func.func @reduce_maxf_partial_chunk(
-// CHECK: %[[VALID32:.*]] = pto.pge_b32 "PAT_VL32" : !pto.mask<b32>
+// CHECK: %[[VALID32:.*]] = pto.pset_b32 "PAT_VL32" : !pto.mask<b32>
 // CHECK: %[[ALL1:.*]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
 // CHECK: %[[MASK32:.*]] = pto.pand %arg1, %[[VALID32]], %[[ALL1]]
 // CHECK: pto.vcmax %arg0, %[[MASK32]]
 // CHECK-LABEL: func.func @reduce_minf_partial_chunk(
-// CHECK: %[[VALID64:.*]] = pto.pge_b16 "PAT_VL64" : !pto.mask<b16>
+// CHECK: %[[VALID64:.*]] = pto.pset_b16 "PAT_VL64" : !pto.mask<b16>
 // CHECK: %[[ALL16:.*]] = pto.pset_b16 "PAT_ALL" : !pto.mask<b16>
 // CHECK: %[[MASK64:.*]] = pto.pand %arg1, %[[VALID64]], %[[ALL16]]
 // CHECK: pto.vcmin %arg0, %[[MASK64]]
 // CHECK-LABEL: func.func @reduce_maxf_multichunk_tail(
-// CHECK: %[[VALID1:.*]] = pto.pge_b32 "PAT_VL1" : !pto.mask<b32>
+// CHECK: %[[VALID1:.*]] = pto.pset_b32 "PAT_VL1" : !pto.mask<b32>
 // CHECK: %[[ALL2:.*]] = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
 // CHECK: %[[TAIL_MASK:.*]] = pto.pand %arg3, %[[VALID1]], %[[ALL2]]
 // CHECK: pto.vcmax %arg0, %arg2

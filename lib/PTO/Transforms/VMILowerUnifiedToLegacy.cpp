@@ -261,6 +261,28 @@ lowerMaskedUnary(UnifiedOp op, OpBuilder &builder,
   return success();
 }
 
+/// Lower a vector-scalar unified op by materializing the scalar broadcast and
+/// applying the selected legacy binary operation. The mask and pmode are
+/// intentionally discarded during this legacy-only compatibility lowering.
+template <typename UnifiedOp>
+static LogicalResult lowerVecScalar(
+    UnifiedOp op, OpBuilder &builder,
+    function_ref<Value(Location, Type, Value, Value)> createLegacy) {
+  if (hasMergePmode(op))
+    return failure();
+
+  Location loc = op.getLoc();
+  Type resultType = op.getResult().getType();
+  Value source = op.getSrc();
+  Value scalar = op.getScalar();
+  Type sourceType = source.getType();
+  Value broadcast = builder.create<VMIBroadcastOp>(loc, sourceType, scalar);
+  Value raw = createLegacy(loc, resultType, source, broadcast);
+  op.getResult().replaceAllUsesWith(raw);
+  op->erase();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Category C1 helpers: vcmp / vcmps
 //===----------------------------------------------------------------------===//
@@ -396,13 +418,12 @@ static LogicalResult lowerVCvt(VMICvtOp op, OpBuilder &builder) {
   if (direction == "widen_fp") {
     result = builder.create<VMIExtFOp>(loc, resultType, source).getResult();
   } else if (direction == "narrow_fp") {
-    StringAttr roundingAttr = op.getRoundingAttr();
     result =
-        builder.create<VMITruncFOp>(loc, resultType, source, roundingAttr,
+        builder.create<VMITruncFOp>(loc, resultType, source,
+                                     op.getRoundingAttr(),
                                      saturateAttr)
             .getResult();
   } else if (direction == "fptosi") {
-    StringAttr roundingAttr = op.getRoundingAttr();
     result =
         builder
             .create<VMIFPToSIOp>(loc, resultType, source,
@@ -1351,8 +1372,8 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
       Value repeatStride = builder.create<arith::ConstantOp>(
           vop.getLoc(), builder.getI16IntegerAttr(0));
       builder.create<VMIStrideStoreOp>(
-          vop.getLoc(), vop.getValue(), vop.getDestination(), vop.getOffset(),
-          vop.getBlockStride(), repeatStride, vop.getMask());
+          vop.getLoc(), Type{}, vop.getValue(), vop.getDestination(),
+          vop.getOffset(), vop.getBlockStride(), repeatStride, vop.getMask());
       vop->erase();
       continue;
     }

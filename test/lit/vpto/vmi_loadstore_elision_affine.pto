@@ -33,8 +33,7 @@ module {
     %c0 = arith.constant 0 : index
     %c64 = arith.constant 64 : index
     %c1 = arith.constant 1.0 : f32
-    %pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %seed = pto.vmi.broadcast %c1 : f32 -> !pto.vmi.vreg<64xf32>
     // ELIDE-LABEL: func.func @fwd_after_unknown_load
@@ -63,8 +62,7 @@ module {
     %c1 = arith.constant 1.0 : f32
     %off = arith.muli %iv, %c1024 : index
     %addr = arith.index_cast %off : index to i64
-    %pc = pto.pointer_cast(%addr) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %addr : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     // ELIDE-LABEL: func.func @affine_dedup
     // ELIDE: %[[L1:.*]] = pto.vmi.vload {{.*}}
@@ -91,8 +89,7 @@ module {
     %c64 = arith.constant 64 : index
     %c1 = arith.constant 1.0 : f32
     %c2 = arith.constant 2.0 : f32
-    %pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %seed = pto.vmi.broadcast %c1 : f32 -> !pto.vmi.vreg<64xf32>
     %seed2 = pto.vmi.broadcast %c2 : f32 -> !pto.vmi.vreg<64xf32>
@@ -128,10 +125,8 @@ module {
     %c2 = arith.constant 2.0 : f32
     %affine_off = arith.muli %iv, %c1024 : index
     %affine_addr = arith.index_cast %affine_off : index to i64
-    %const_pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %affine_pc = pto.pointer_cast(%affine_addr) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %const_ub = pto.castptr %const_pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
-    %affine_ub = pto.castptr %affine_pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %const_ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+    %affine_ub = pto.castptr %affine_addr : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %one = pto.vmi.broadcast %c1 : f32 -> !pto.vmi.vreg<64xf32>
     %two = pto.vmi.broadcast %c2 : f32 -> !pto.vmi.vreg<64xf32>
@@ -157,8 +152,7 @@ module {
     %c0 = arith.constant 0 : index
     %c64 = arith.constant 64 : index
     %c1 = arith.constant 1.0 : f32
-    %pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %seed = pto.vmi.broadcast %c1 : f32 -> !pto.vmi.vreg<64xf32>
     // ELIDE-LABEL: func.func @unknown_store_flushes

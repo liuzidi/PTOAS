@@ -271,23 +271,6 @@ static MemoryRootKind resolveRoot(Value ptr, AffineByteExpr &byteOffset,
                                   std::optional<uint64_t> &absoluteBase,
                                   ArrayRef<Value> ivs,
                                   bool allowIterArgInit = false) {
-  if (auto pointerCast = ptr.getDefiningOp<pto::PointerCastOp>()) {
-    auto addresses = pointerCast.getAddrs();
-    if (addresses.size() == 1) {
-      Value address = addresses.front();
-      APInt value;
-      if (matchPattern(address, m_ConstantInt(&value))) {
-        absoluteBase = uint64_t(value.getZExtValue());
-        rootOut = ptr;
-        return MemoryRootKind::Absolute;
-      }
-      rootOut = address;
-      return MemoryRootKind::Symbolic;
-    }
-    rootOut = ptr;
-    return MemoryRootKind::Unknown;
-  }
-
   if (auto castOp = ptr.getDefiningOp<pto::CastPtrOp>()) {
     Value input = castOp.getInput();
     if (isa<IntegerType>(input.getType()) || input.getType().isIndex()) {
@@ -331,9 +314,6 @@ static MemoryRootKind resolveRoot(Value ptr, AffineByteExpr &byteOffset,
   }
   if (auto cast = ptr.getDefiningOp<memref::CastOp>())
     return resolveRoot(cast.getSource(), byteOffset, rootOut, absoluteBase,
-                       ivs, allowIterArgInit);
-  if (auto bind = ptr.getDefiningOp<pto::BindTileOp>())
-    return resolveRoot(bind.getSource(), byteOffset, rootOut, absoluteBase,
                        ivs, allowIterArgInit);
   if (auto tileAddr = ptr.getDefiningOp<pto::TileBufAddrOp>())
     return resolveRoot(tileAddr.getSrc(), byteOffset, rootOut, absoluteBase,

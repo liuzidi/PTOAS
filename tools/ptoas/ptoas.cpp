@@ -3313,6 +3313,7 @@ int mlir::pto::compilePTOASModule(
       enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
   const bool enableA5VPTOFusionPath =
       enableA5FusionPath && effectiveBackend == PTOBackend::VPTO;
+  const bool useVMIFusionPipeline = enableVMI && enableA5VPTOFusionPath;
 
   if (enableVfSimCostmodelOptimization &&
       !(enableA5EmitCFusionPath || enableA5VPTOFusionPath)) {

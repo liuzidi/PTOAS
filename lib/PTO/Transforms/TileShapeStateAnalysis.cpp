@@ -181,9 +181,6 @@ bool mlir::pto::resolveStaticTileValidShape(
   if (auto alloc = dyn_cast<pto::AllocTileOp>(def)) {
     row = alloc.getValidRow();
     col = alloc.getValidCol();
-  } else if (auto materialize = dyn_cast<pto::MaterializeTileOp>(def)) {
-    row = materialize.getValidRow();
-    col = materialize.getValidCol();
   } else if (auto subview = dyn_cast<pto::SubViewOp>(def)) {
     row = subview.getValidRow();
     col = subview.getValidCol();

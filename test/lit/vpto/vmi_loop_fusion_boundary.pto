@@ -11,7 +11,7 @@
 //   LOOP_STUCK - the between vstore takes for1's result (cannot hoist) and
 //               writes a UB read by for2 (cannot sink) -> stuck -> two for's
 //               stay separate (NOT fused).
-//   LOOP_FUSE  - the between op is a loop-invariant pointer_cast (no UB
+//   LOOP_FUSE  - the between op is a loop-invariant castptr (no UB
 //               dependency, no member-result operand) -> hoists above the
 //               fused for -> two for's fuse into one scf.for.
 // The fa softmax sample exercises the happy path only; these cover the
@@ -34,8 +34,7 @@ module {
     %c1 = arith.constant 1 : index
     %c128 = arith.constant 128 : index
     %c64 = arith.constant 64 : index
-    %pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %init = pto.vmi.vload %ub[%c0] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
     pto.fusion_region {
@@ -57,12 +56,12 @@ module {
     return
   }
 
-  // LOOP_FUSE: between op is a loop-invariant pointer_cast (no member-result
+  // LOOP_FUSE: between op is a loop-invariant castptr (no member-result
   // operand, no UB write) -> hoists above the fused for -> two for's fuse into
   // one.
   // LOOP-LABEL: func.func @loop_fuse_hoistable
   // LOOP: pto.fusion_region {
-  // LOOP: %[[HOIST:.*]] = pto.pointer_cast
+  // LOOP: %[[HOIST:.*]] = pto.castptr
   // LOOP: scf.for
   // LOOP-NOT: scf.for
   func.func @loop_fuse_hoistable() -> () {
@@ -71,8 +70,7 @@ module {
     %c1 = arith.constant 1 : index
     %c128 = arith.constant 128 : index
     %c64 = arith.constant 64 : index
-    %pc = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
-    %ub = pto.castptr %pc : memref<128x64xf32, #pto.address_space<vec>> -> !pto.ptr<f32, ub>
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
     %mask = pto.vmi.create_mask %c64 : index -> !pto.vmi.mask<64xpred>
     %init = pto.vmi.vload %ub[%c0] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>
     pto.fusion_region {
@@ -82,7 +80,7 @@ module {
         %acc = pto.vmi.vmax %arg5, %row, %mask : !pto.vmi.vreg<64xf32>, !pto.vmi.vreg<64xf32>, !pto.vmi.mask<64xpred> -> !pto.vmi.vreg<64xf32>
         scf.yield %acc : !pto.vmi.vreg<64xf32>
       } {pto.tilelib.impl = "vmi", pto.vmi.fusion.source = "tilelib", pto.vmi.fusion.principal_loop}
-      %hoist = pto.pointer_cast(%c0_i64) {config = #pto.tile_buf_config<blayout=#pto.blayout<row_major>, slayout=#pto.slayout<none_box>, s_fractal_size=512, pad=#pto.pad_value<null>, compact=#pto.compact_mode<null>>} : memref<128x64xf32, #pto.address_space<vec>>
+      %hoist = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
       %f2 = scf.for %arg4 = %c0 to %c128 step %c1 iter_args(%arg5 = %init) -> (!pto.vmi.vreg<64xf32>) {
         %off = arith.muli %arg4, %c64 : index
         %row = pto.vmi.vload %ub[%off] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<64xf32>

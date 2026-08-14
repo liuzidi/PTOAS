@@ -6,7 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto --mlir-print-ir-after=pto-materialize-tile-handles %s -o /dev/null 2>&1 | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-fold-tile-buf-intrinsics %s -o /dev/null 2>&1 | FileCheck %s
 
 module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
   func.func @materialize_fusion_region_subview() {
@@ -48,9 +48,9 @@ module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
 // CHECK-LABEL: func.func @materialize_fusion_region_subview
 // CHECK: pto.fusion_region
 // CHECK: pto.yield
-// CHECK-SAME: memref<8x512xf32
-// CHECK: memref.subview
-// CHECK-SAME: memref<8x512xf32
-// CHECK: memref.subview
-// CHECK-SAME: memref<8x512xf32
+// CHECK-SAME: !pto.tile_buf<vec, 8x512xf32
+// CHECK: pto.subview
+// CHECK-SAME: !pto.tile_buf<vec, 8x512xf32
+// CHECK: pto.subview
+// CHECK-SAME: !pto.tile_buf<vec, 8x512xf32
 // CHECK-NOT: error:

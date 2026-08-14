@@ -1,4 +1,4 @@
-// RUN: ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --tile-lib-backend=ptodsl --enable-op-fusion=false --emit-vpto %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --enable-op-fusion=false --emit-vpto %s -o - 2>/dev/null | FileCheck %s
 
 module {
   func.func @cube_kernel() attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
@@ -6,7 +6,7 @@ module {
       name = "v2c_fifo",
       size = 4096,
       location = #pto.address_space<mat>,
-      auto = true,
+      auto = false,
       base = 0
     } -> i32
     %c2v_import = pto.import_reserved_buffer {
@@ -33,7 +33,7 @@ module {
       name = "c2v_fifo",
       size = 4096,
       location = #pto.address_space<vec>,
-      auto = true,
+      auto = false,
       base = 0
     } -> i32
     %v2c_import = pto.import_reserved_buffer {
@@ -64,5 +64,6 @@ module {
 
 // CHECK-LABEL: func.func @vector_kernel
 // CHECK-NOT: pto.tneg ins
-// CHECK-NOT: pto.tile_buf_addr
+// The tpop result is a runtime-owned tile handle, so address folding keeps
+// its tile_buf_addr projection until VPTO pointer normalization.
 // CHECK: pto.vneg

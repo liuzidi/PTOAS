@@ -12,15 +12,15 @@
 // load/store helpers; otherwise the generated DMA row stride can silently
 // fall back to the valid column count.
 //
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s
 
-// CHECK: call @{{.*}}tload_view_f32_ms_gm_shape_64_1_32_strides_4096_64_1
-// CHECK: call @{{.*}}tstore_tile_f32_64_32{{.*}}view_f32_ms_gm_shape_64_1_32_strides_4096_64_1
-// CHECK: func.func private @{{.*}}tload_view_f32_ms_gm_shape_64_1_32_strides_4096_64_1
+// CHECK: call @{{.*}}tload_view_f32_ms_gm_shape_1_1_64_1_32_strides_262144_262144_4096_64_1
+// CHECK: call @{{.*}}tstore_tile_f32_64_32{{.*}}view_f32_ms_gm_shape_1_1_64_1_32_strides_262144_262144_4096_64_1
+// CHECK: func.func private @{{.*}}tload_view_f32_ms_gm_shape_1_1_64_1_32_strides_262144_262144_4096_64_1
 // CHECK: %[[ROW_STRIDE:.*]] = arith.constant 16384 : i64
 // CHECK: pto.mte_gm_ub
 // CHECK-SAME: %[[ROW_STRIDE]]
-// CHECK: func.func private @{{.*}}tstore_tile_f32_64_32{{.*}}view_f32_ms_gm_shape_64_1_32_strides_4096_64_1
+// CHECK: func.func private @{{.*}}tstore_tile_f32_64_32{{.*}}view_f32_ms_gm_shape_1_1_64_1_32_strides_262144_262144_4096_64_1
 // CHECK: %[[STORE_ROW_STRIDE:.*]] = arith.constant 16384 : i64
 // CHECK: pto.mte_ub_gm
 // CHECK-SAME: %[[STORE_ROW_STRIDE]]

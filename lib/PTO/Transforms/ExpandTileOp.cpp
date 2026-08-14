@@ -83,6 +83,16 @@ constexpr llvm::StringLiteral kVmiFusionBoundaryAttr = "pto.vmi.fusion.boundary"
 constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
     "pto.vmi.fusion.boundary_reason";
 
+static bool candidateHasTag(DictionaryAttr candidate, StringRef tag) {
+  auto tags = candidate.getAs<ArrayAttr>("tags");
+  if (!tags)
+    return false;
+  return llvm::any_of(tags, [tag](Attribute attr) {
+    auto value = dyn_cast<StringAttr>(attr);
+    return value && value.getValue() == tag;
+  });
+}
+
 static void copyTileLibSelectionAttrs(Operation *dst, Operation *src) {
   for (StringRef attrName :
        {StringRef(kTileLibCandidateAttr), StringRef(kTileLibImplAttr),
@@ -976,7 +986,8 @@ struct ExpandState {
   func::FuncOp invokeInProcessTileLib(const SpecKey &key,
                                       StringRef candidateId,
                                       const std::string &uniqueName,
-                                      ModuleOp mod, MLIRContext *ctx);
+                                      Operation *tileOp, ModuleOp mod,
+                                      MLIRContext *ctx);
 
   LogicalResult expandTileOpsInFunction(func::FuncOp func, ModuleOp mod,
                                         MLIRContext *ctx);
@@ -1186,7 +1197,7 @@ static std::string buildContextAttrsJson(const SpecKey &key) {
 func::FuncOp ExpandState::invokeInProcessTileLib(const SpecKey &key,
                                                  StringRef candidateId,
                                                  const std::string &uniqueName,
-                                                 ModuleOp mod,
+                                                 Operation *tileOp, ModuleOp mod,
                                                  MLIRContext *ctx) {
   if (!tileLibService) {
     return nullptr;
@@ -1208,7 +1219,15 @@ func::FuncOp ExpandState::invokeInProcessTileLib(const SpecKey &key,
       return failure();
     }
 
-    auto sourceEntry = sourceModule.lookupSymbol<func::FuncOp>(entrySymbol);
+    // Ordinary TileLib templates return a flat source module, whereas VMI
+    // templates are materialized in the backend-partitioned container used by
+    // the VMI lowering pipeline.  Search recursively so the in-process seam
+    // accepts both layouts.
+    func::FuncOp sourceEntry;
+    sourceModule.walk([&](func::FuncOp fn) {
+      if (!sourceEntry && fn.getSymName() == entrySymbol)
+        sourceEntry = fn;
+    });
     if (!sourceEntry) {
       llvm::errs() << "ExpandTileOp: in-process PTODSL entry symbol @"
                    << entrySymbol << " was not found\n";
@@ -1216,9 +1235,7 @@ func::FuncOp ExpandState::invokeInProcessTileLib(const SpecKey &key,
     }
 
     SmallVector<func::FuncOp, 4> sourceFuncs;
-    for (func::FuncOp fn : sourceModule.getOps<func::FuncOp>()) {
-      sourceFuncs.push_back(fn);
-    }
+    sourceModule.walk([&](func::FuncOp fn) { sourceFuncs.push_back(fn); });
     if (sourceFuncs.empty()) {
       llvm::errs() << "ExpandTileOp: in-process PTODSL returned no func.func\n";
       return failure();
@@ -1302,8 +1319,18 @@ func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
   if (auto selectedAttr =
           tileOp->getAttrOfType<DictionaryAttr>(kSelectedCandidateAttr)) {
     selected = selectedAttr;
-  } else if (candidates && !candidates.empty()) {
-    selected = dyn_cast<DictionaryAttr>(candidates[0]);
+  } else if (candidates) {
+    // VMI metadata is present for selection by the VMI fusion path, but a
+    // normal VPTO compilation has no SelectTemplateCandidate pass. Preserve
+    // the ordinary TileLib route in that case instead of implicitly selecting
+    // the higher-priority hidden VMI candidate.
+    for (Attribute attr : candidates) {
+      auto candidate = dyn_cast<DictionaryAttr>(attr);
+      if (candidate && !candidateHasTag(candidate, "vmi")) {
+        selected = candidate;
+        break;
+      }
+    }
   }
   if (!selected) {
     tileOp->emitError(
@@ -1332,8 +1359,8 @@ func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
     return existing;
   }
 
-  return invokeInProcessTileLib(key, selectedName.getValue(), uniqueName, mod,
-                                ctx);
+  return invokeInProcessTileLib(key, selectedName.getValue(), uniqueName,
+                                tileOp, mod, ctx);
 }
 
 // ============================================================================

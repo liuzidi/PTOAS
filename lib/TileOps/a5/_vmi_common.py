@@ -42,7 +42,7 @@ from ptodsl._tile_template_tracing import (
 from ptodsl._vmi_namespace import vmi as _vmi_builder
 from ptodsl.tilelib import registry as _tilelib_registry
 from ptodsl.tilelib.registry import TileTemplateRegistry
-from mlir.dialects import pto as _pto_dialect
+from ptoas.mlir.dialects import pto as _pto_dialect
 
 
 ElementwiseCompute = Callable[[Sequence[_VectorValue], _MaskValue], _VectorValue]
@@ -967,7 +967,6 @@ def emit_elementwise_vmi(
         return
     if (
         logical_lanes == cols
-        and rows == 1
         and dst.element_type == f32
         and cols > native_lanes
         and cols % native_lanes == 0
@@ -1055,17 +1054,19 @@ def _emit_elementwise_contiguous_blocks_vmi(
     *,
     block_lanes: int,
 ) -> None:
-    """Keep a full one-row, multi-VL elementwise tile as one chunk loop."""
+    """Keep a full multi-VL elementwise tile as one flat chunk loop."""
 
     rows, cols = dst._spec.shape
-    if rows != 1 or cols % block_lanes != 0:
-        raise ValueError("contiguous VMI blocks require one exactly tiled row")
+    if cols % block_lanes != 0:
+        raise ValueError("contiguous VMI blocks require exactly tiled rows")
 
     _prepare_tile_access(*sources, dst)
     mask = _create_mask_lanes(
         block_lanes, block_lanes, dst.element_type, trace=dst._trace
     )
-    with for_(0, cols, step=block_lanes) as offset:
+    logical_blocks = rows * (cols // block_lanes)
+    with for_(0, logical_blocks, step=1) as block:
+        offset = index_mul(block, block_lanes)
         values = tuple(
             _vload_linear(source, offset, lanes=block_lanes)
             for source in sources
@@ -1842,35 +1843,38 @@ def emit_row_reduce_vmi(
             "registered 8x8/8x4 micro-tile form"
         )
     _prepare_tile_access(src, dst)
-    total_lanes = rows * physical_cols
     active = src._trace.index_const(valid_cols)
-    full_mask = _wrap_mask(
-        _vmi_builder.create_mask(
-            active.value, size=total_lanes, group=rows
-        ),
+    row_mask = _wrap_mask(
+        _vmi_builder.create_mask(active.value, size=physical_cols),
         f32,
     )
-    source = _vload_linear(src, 0, lanes=total_lanes)
-    if kind == "max":
-        reduced_value = _vmi_builder.vcmax(
-            source.value, full_mask.value, group=rows
-        )
-    else:
-        reduced_value = _vmi_builder.vcadd(
-            source.value, full_mask.value, group=rows, reassoc=True
-        )
-    reduced = _wrap_vreg(reduced_value, f32)
-
     dst_ptr = dst._trace.ensure_tile_ptr(dst)
-    offset = dst._trace._coerce_index(0)
-    row_stride = dst._trace._coerce_index(1)
-    _vmi_builder.vstore(
-        reduced.value,
-        dst_ptr.value,
-        offset.value,
-        stride=row_stride.value,
-        group=rows,
-    )
+    with for_(0, rows, step=1) as row:
+        src_offset = index_mul(row, physical_cols)
+        source = _vload_linear(src, src_offset, lanes=physical_cols)
+        if kind == "max":
+            reduced_value = _vmi_builder.vcmax(
+                source.value, row_mask.value, group=1
+            )
+        else:
+            reduced_value = _vmi_builder.vcadd(
+                source.value, row_mask.value, group=1, reassoc=True
+            )
+        reduced = _wrap_vreg(reduced_value, f32)
+        # A one-lane reduction result is stored at the corresponding compact
+        # destination row.  This keeps every VMI value within the supported
+        # lane-count set while preserving the original grouped reduction.
+        dst_offset = dst._trace._coerce_index(row)
+        scalar_mask = _wrap_mask(
+            _vmi_builder.create_mask(dst._trace.index_const(1).value, size=1),
+            f32,
+        )
+        _vmi_builder.vstore(
+            reduced.value,
+            dst_ptr.value,
+            dst_offset.value,
+            scalar_mask.value,
+        )
 
 
 def emit_row_expand_binary_vmi(

@@ -809,49 +809,37 @@ static LogicalResult lowerPush(TPushOp push,
   return success();
 }
 
-static LogicalResult replaceDeclaredTilePointerUsers(
-    TPopOp pop, MaterializeTileOp materialize, Value ringAddress) {
-  auto declaration =
-      materialize.getSource().getDefiningOp<DeclareTileMemRefOp>();
-  if (!declaration)
-    return pop.emitOpError(
-        "LLVM unified L2L tpop requires declare_tile_memref backing");
-  auto tileType = dyn_cast<TileBufType>(materialize.getResult().getType());
+static LogicalResult replaceDeclaredTileAddressUsers(
+    TPopOp pop, DeclareTileOp declaration, Value ringAddress) {
+  auto tileType = dyn_cast<TileBufType>(declaration.getTile().getType());
   auto tileSpace = tileType ? dyn_cast_or_null<AddressSpaceAttr>(
                                   tileType.getMemorySpace())
                             : AddressSpaceAttr{};
-  auto memrefSpace = dyn_cast_or_null<AddressSpaceAttr>(
-      declaration.getResult().getType().getMemorySpace());
-  if (!tileType || !tileSpace || tileSpace != memrefSpace)
-    return pop.emitOpError(
-        "declared consumer memref and tile must use the same PTO address space");
+  if (!tileType || !tileSpace)
+    return pop.emitOpError("declared consumer tile requires a PTO address space");
 
-  SmallVector<Operation *> pointerBridges;
-  for (Operation *user : declaration.getResult().getUsers()) {
-    if (user == materialize.getOperation())
+  SmallVector<TileBufAddrOp> addressUsers;
+  for (Operation *user : declaration.getTile().getUsers()) {
+    if (user == pop.getOperation())
       continue;
-    bool isPointerBridge = isa<CastPtrOp>(user);
-    if (auto bridge = dyn_cast<UnrealizedConversionCastOp>(user))
-      isPointerBridge = bridge->getNumOperands() == 1 &&
-                        bridge->getNumResults() == 1;
-    if (!isPointerBridge || user->getNumResults() != 1 ||
-        !isa<PtrType>(user->getResult(0).getType()))
+    auto address = dyn_cast<TileBufAddrOp>(user);
+    if (!address || !isa<PtrType>(address.getResult().getType()))
       return pop.emitOpError(
-          "declare_tile_memref has an unsupported non-pointer user");
-    pointerBridges.push_back(user);
+          "declare_tile has an unsupported non-address user");
+    addressUsers.push_back(address);
   }
 
   DominanceInfo dominance(pop->getParentOfType<func::FuncOp>());
-  for (Operation *bridge : pointerBridges) {
-    auto ptrType = cast<PtrType>(bridge->getResult(0).getType());
+  for (TileBufAddrOp address : addressUsers) {
+    auto ptrType = cast<PtrType>(address.getResult().getType());
     if (ptrType.getElementType() != tileType.getElementType() ||
         ptrType.getMemorySpace() != tileSpace)
       return pop.emitOpError(
-          "declared tile pointer bridge type does not match the consumer tile");
-    for (Operation *user : bridge->getResult(0).getUsers())
+          "declared tile address type does not match the consumer tile");
+    for (Operation *user : address.getResult().getUsers())
       if (!dominance.dominates(pop.getOperation(), user))
         return pop.emitOpError(
-            "declared tile pointer is used before its tpop assigns a FIFO slot");
+            "declared tile address is used before its tpop assigns a FIFO slot");
   }
 
   OpBuilder builder(pop);
@@ -859,9 +847,9 @@ static LogicalResult replaceDeclaredTilePointerUsers(
       pop.getLoc(),
       PtrType::get(builder.getContext(), tileType.getElementType(), tileSpace),
       ringAddress);
-  for (Operation *bridge : pointerBridges) {
-    bridge->getResult(0).replaceAllUsesWith(pointer);
-    bridge->erase();
+  for (TileBufAddrOp address : addressUsers) {
+    address.getResult().replaceAllUsesWith(pointer);
+    address.erase();
   }
   return success();
 }
@@ -871,11 +859,11 @@ static LogicalResult lowerPop(TPopOp pop,
   if (pop.getSplit() != 0 || pop.getAivSubblockid())
     return pop.emitOpError(
         "LLVM unified L2L lowering currently supports only split = 0");
-  auto materialize = pop.getTile().getDefiningOp<MaterializeTileOp>();
+  auto declaration = pop.getTile().getDefiningOp<DeclareTileOp>();
   auto tileType = dyn_cast<TileBufType>(pop.getTile().getType());
-  if (!materialize || !tileType || !materialize.getResult().hasOneUse())
+  if (!declaration || !tileType)
     return pop.emitOpError(
-        "tpop requires a uniquely-used materialize_tile consumer handle");
+        "tpop requires a declare_tile consumer handle");
   auto addressSpace = dyn_cast_or_null<AddressSpaceAttr>(
       tileType.getMemorySpace());
   if (!addressSpace)
@@ -903,24 +891,16 @@ static LogicalResult lowerPop(TPopOp pop,
   Value ringAddress = computeRingAddress(builder, loc, *base, index,
                                          state.init.getSlotNum(),
                                          state.init.getSlotSize());
-  if (failed(replaceDeclaredTilePointerUsers(pop, materialize, ringAddress)))
+  if (failed(replaceDeclaredTileAddressUsers(pop, declaration, ringAddress)))
     return failure();
   Value next = builder.create<arith::AddIOp>(
       loc, index, getI64Constant(builder, loc, 1));
   storePipeIndex(builder, loc, state.consumerIndex, next);
   pop.erase();
-  if (!materialize.use_empty())
-    return materialize.emitOpError(
-        "materialize_tile still has users after lowering its tpop");
-  auto declaration =
-      materialize.getSource().getDefiningOp<DeclareTileMemRefOp>();
-  materialize.erase();
-  if (declaration) {
-    if (!declaration.use_empty())
-      return declaration.emitOpError(
-          "declare_tile_memref still has users after FIFO pointer replacement");
-    declaration.erase();
-  }
+  if (!declaration.use_empty())
+    return declaration.emitOpError(
+        "declare_tile still has users after FIFO address replacement");
+  declaration.erase();
   return success();
 }
 
@@ -1010,8 +990,7 @@ LogicalResult lowerA5UnifiedL2LPipeOpsForLLVM(ModuleOp module) {
 
   bool hasOrphanedPlaceholder = false;
   module.walk([&](Operation *op) {
-    if (!isa<TPushOp, TPopOp, TFreeOp, MaterializeTileOp,
-             DeclareTileMemRefOp>(op))
+    if (!isa<TPushOp, TPopOp, TFreeOp>(op))
       return WalkResult::advance();
     op->emitOpError(
         "authoring-stage FIFO placeholder survived A5 LLVM lowering");

@@ -230,6 +230,9 @@ static int64_t getVRegAccessBytes(Type type) {
 }
 
 static std::optional<int64_t> getStaticInteger(Value value) {
+  if (auto c = value.getDefiningOp<arith::ConstantOp>())
+    if (auto attr = dyn_cast<IntegerAttr>(c.getValue()))
+      return attr.getInt();
   if (auto c = value.getDefiningOp<arith::ConstantIndexOp>())
     return c.value();
   if (auto c = value.getDefiningOp<arith::ConstantIntOp>())
@@ -436,10 +439,8 @@ static bool isInjectiveAffineOffset(Value offset, ArrayRef<Value> ivs) {
     if (lhsIV == rhsIV)
       return false; // both IV or both non-IV -> not the accepted form
     Value constSide = lhsIV ? rhs : lhs;
-    if (auto c = constSide.getDefiningOp<arith::ConstantOp>())
-      if (auto iv = dyn_cast<IntegerAttr>(c.getValue()))
-        return iv.getInt() > 0;
-    return false;
+    auto multiplier = getStaticInteger(constSide);
+    return multiplier && *multiplier > 0;
   }
   if (auto add = dyn_cast<arith::AddIOp>(def)) {
     // <injective affine> + constant: one side must be injective affine, the
@@ -660,7 +661,7 @@ static SmallVector<scf::ForOp, 8> membersAsLoops(ArrayRef<Member> members) {
 // side-effect-free and safe to relocate. Keep this exception list closed.
 static bool isKnownRelocatablePure(Operation *op) {
   return isPure(op) ||
-         isa<pto::PointerCastOp, pto::CastPtrOp, pto::VMICreateMaskOp>(op);
+         isa<pto::CastPtrOp, pto::VMICreateMaskOp>(op);
 }
 
 // Can `op` be hoisted above the fused for (run before any member executes)?

@@ -155,14 +155,6 @@ static Value getCanonicalTrackedValue(Value value) {
       value = cp->getOperand(0);
       continue;
     }
-    if (auto pc = dyn_cast<pto::PointerCastOp>(def)) {
-      if (!pc.getOperands().empty()) {
-        Value addr = pc.getOperands()[0];
-        if (auto c = addr.getDefiningOp<arith::ConstantOp>())
-          return pc.getResult(); // canonicalize to the pointer_cast result
-      }
-      break;
-    }
     break;
   }
   return value;
@@ -319,20 +311,19 @@ struct BaseIdentity {
 static BaseIdentity resolveBaseIdentity(Value base) {
   if (auto root = pto::resolveVmiStorageRoot(base))
     return {base, {}, true, root};
+  if (auto cast = base.getDefiningOp<pto::CastPtrOp>()) {
+    Value input = cast.getInput();
+    if (isa<IntegerType>(input.getType()) || input.getType().isIndex()) {
+      AffineAddr affine = parseAffineAddr(input);
+      if (affine.isAffine)
+        return {base, affine, affine.iv == nullptr, std::nullopt};
+    }
+  }
   Value canon = getCanonicalTrackedValue(base);
   if (!canon)
     return {};
   if (isa<BlockArgument>(canon))
     return {};
-  if (auto pc = canon.getDefiningOp<pto::PointerCastOp>()) {
-    if (pc.getOperands().empty())
-      return {};
-    Value addr = pc.getOperands()[0];
-    AffineAddr aff = parseAffineAddr(addr);
-    if (!aff.isAffine)
-      return {};
-    return {canon, aff, aff.iv == nullptr, std::nullopt};
-  }
   return {};
 }
 static bool isTrackableIdentity(const BaseIdentity &id) {
@@ -352,18 +343,6 @@ static bool areEquivalentValues(Value lhs, Value rhs) {
   Operation *rd = cr.getDefiningOp();
   if (!ld || !rd)
     return false;
-  // Two pointer_cast of the same constant address with the same memref type
-  // are the same UB.
-  if (auto lp = dyn_cast<pto::PointerCastOp>(ld)) {
-    auto rp = dyn_cast<pto::PointerCastOp>(rd);
-    if (!rp)
-      return false;
-    if (lp.getOperands().empty() || rp.getOperands().empty())
-      return false;
-    if (lp.getOperands()[0] == rp.getOperands()[0] &&
-        lp.getResult().getType() == rp.getResult().getType())
-      return true;
-  }
   // Two identical pure ops (same name, operands, attrs, result type) — e.g.
   // two pto.vmi.create_mask with the same active_lanes constant. This is what
   // makes masks produced by distinct create_mask ops compare equal.

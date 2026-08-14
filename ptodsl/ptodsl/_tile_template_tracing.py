@@ -45,6 +45,8 @@ from ._tracing import (
     TracingRuntime,
     require_active_runtime,
 )
+from ._tracing.module_builder import create_kernel_module
+from ._tracing.active import activate_runtime, activate_session
 from ._vmi_namespace import vmi as _vmi
 from .tilelib.metadata import TemplateMetadata as _RegistryTemplateMetadata
 from ._types import (
@@ -63,7 +65,7 @@ from ._types import (
 )
 
 from ptoas.mlir.dialects import arith, pto as _pto, scf
-from ptoas.mlir.ir import FloatAttr, InsertionPoint, IntegerType, Type
+from ptoas.mlir.ir import FloatAttr, InsertionPoint, IntegerType, Location, Type, UnitAttr
 
 
 @dataclass(frozen=True)
@@ -145,7 +147,12 @@ class TileSpec:
             slayout="NoneBox",
             fractal_size=512,
             pad="Null",
-            compact=self.compact_mode,
+            # Keep the VMI template argument type compatible with the
+            # materialized tile-op operands.  Normal/Null compactness is an
+            # implementation detail of the caller's handle bridge; omitting
+            # the explicit config here lets FoldTileBufIntrinsics recover the
+            # address from the original alloc_tile without a type bridge.
+            compact=("row_plus_one" if self.compact_mode == "row_plus_one" else "null"),
         )
 
 
@@ -514,7 +521,7 @@ class _TraceBuilder(TracingRuntime):
             spec = self.parameter_specs.get(param_name)
             if spec is None:
                 raise ValueError(f"missing specialization for parameter {param_name!r}")
-            if _is_tile_annotation(param.annotation):
+            if self._parameter_is_tile(param.annotation):
                 if not isinstance(spec, TileSpec):
                     raise TypeError(
                         f"parameter {param_name!r} is annotated as Tile but uses {spec!r}"
@@ -545,6 +552,19 @@ class _TraceBuilder(TracingRuntime):
             else:
                 args.append(_Value(arg_value))
         return tuple(args)
+
+    def _parameter_is_tile(self, annotation) -> bool:
+        """Accept both the surface marker and ``from __future__`` annotations."""
+        if _is_tile_annotation(annotation):
+            return True
+        # Built-in TileOps use ``pto.Tile`` annotations.  When the module was
+        # loaded with postponed annotations, inspect.signature exposes the
+        # string ``"pto.Tile"``; the generic helper above intentionally stays
+        # conservative for ordinary public templates, so handle this VMI seam
+        # explicitly.
+        if isinstance(annotation, str):
+            return annotation.rsplit(".", 1)[-1] == "Tile"
+        return getattr(annotation, "__name__", None) == "Tile"
 
     def trace_entry(self, *args):
         self.descriptor.py_fn(*args)
@@ -804,13 +824,65 @@ class _TraceBuilder(TracingRuntime):
             raise TypeError(f"expected value of type {ty}, got {coerced.type_text}")
         return coerced
 
+    def build_module_in_context(self, context):
+        """Materialize a VMI template into the compiler-owned MLIR context.
+
+        ExpandTileOp's in-process TileLib service must return IR owned by the
+        caller's context so the compiler can clone helper functions without
+        reparsing text.  The ordinary TileLib renderer exposes this seam via
+        ``_TemplateTrace.build_module_in_context``; VMI templates use the
+        lower-level tracer and therefore provide the same contract here.
+        """
+        if context is None:
+            raise TypeError("compiler materialization requires an explicit context")
+        with context, Location.unknown():
+            arg_types = list(self.compute_argument_types())
+            module, ir_fn = create_kernel_module(self.module_spec, arg_types)
+            # ExpandTileOp/PTOInlineLibCall identify materialized template
+            # instances through this marker.  VMI functions are backend-
+            # partitioned, but still follow the same private inline contract.
+            ir_fn.attributes["pto.tilelang.instance"] = UnitAttr.get()
+            session = self.create_session(module, ir_fn)
+            entry = ir_fn.add_entry_block()
+            with InsertionPoint(entry), activate_runtime(self), activate_session(session):
+                self.initialize_session(session, entry)
+                args = self.bind_entry_arguments(entry.arguments)
+                self.trace_entry(*args)
+                self.validate_trace_state()
+                self.emit_return()
+                self.finalize_session(session)
+                session.validate_final_state()
+            self.verify_module(module)
+            if module.context is not context:
+                raise RuntimeError(
+                    "VMI TileLib materialization returned a module from a different MLIRContext"
+                )
+            return module
+
 
 def _dtype_name(dtype) -> str:
     return getattr(dtype, "name", str(dtype))
 
 
 def _coerce_parameter_spec(spec):
-    if isinstance(spec, (TileSpec, ScalarType)):
+    if isinstance(spec, ScalarType):
+        return spec
+
+    if isinstance(spec, TileSpec):
+        compact_mode = spec.compact_mode
+        if compact_mode in (0, 1, "0", "1", "null", "normal"):
+            compact_mode = "normal"
+        elif compact_mode in (2, "2", "row_plus_one"):
+            compact_mode = "row_plus_one"
+        if compact_mode != spec.compact_mode:
+            return TileSpec(
+                shape=spec.shape,
+                dtype=spec.dtype,
+                memory_space=spec.memory_space,
+                b_layout=spec.b_layout,
+                valid_shape=spec.valid_shape,
+                compact_mode=compact_mode,
+            )
         return spec
 
     if hasattr(spec, "shape") and hasattr(spec, "dtype"):
@@ -823,6 +895,13 @@ def _coerce_parameter_spec(spec):
             raise ValueError(f"unsupported VMI tile-template dtype {spec.dtype!r}")
         s_layout = getattr(spec, "s_layout", "none_box")
         compact_mode = getattr(spec, "compact_mode", "normal")
+        # Compiler operand metadata encodes TileBuf compactness as the PTO
+        # enum integer (0/1 = Normal, 2 = RowPlusOne); the VMI tracer uses the
+        # author-facing string form.
+        if compact_mode in (0, 1, "0", "1", "null"):
+            compact_mode = "normal"
+        elif compact_mode in (2, "2"):
+            compact_mode = "row_plus_one"
         is_nd2nz_layout = (
             s_layout == "row_major"
             and getattr(spec, "b_layout", "row_major") == "col_major"

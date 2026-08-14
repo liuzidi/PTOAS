@@ -52,16 +52,6 @@ static std::optional<int64_t> getConstantInteger(Value value) {
   return std::nullopt;
 }
 
-static std::optional<int64_t> getConstantI64(Value value) {
-  auto c = value ? value.getDefiningOp<arith::ConstantOp>() : nullptr;
-  if (!c)
-    return std::nullopt;
-  auto attr = dyn_cast<IntegerAttr>(c.getValue());
-  if (!attr || !attr.getType().isInteger(64))
-    return std::nullopt;
-  return attr.getInt();
-}
-
 static std::optional<int64_t> getElementBytes(Type type) {
   Type element;
   if (auto memref = dyn_cast<MemRefType>(type))
@@ -79,38 +69,6 @@ static std::optional<int64_t> getElementBytes(Type type) {
   if (element.isInteger(64))
     return 8;
   return std::nullopt;
-}
-
-static std::optional<int64_t> getStaticMemrefBytes(Type type) {
-  auto memref = dyn_cast<MemRefType>(type);
-  if (!memref)
-    return std::nullopt;
-  auto elementBytes = getElementBytes(type);
-  if (!elementBytes)
-    return std::nullopt;
-  SmallVector<int64_t, 4> strides;
-  int64_t offset = 0;
-  if (failed(memref.getStridesAndOffset(strides, offset)) ||
-      ShapedType::isDynamic(offset) ||
-      llvm::any_of(strides, ShapedType::isDynamic))
-    return std::nullopt;
-  int64_t elements = 1;
-  for (auto [dim, stride] : llvm::zip(memref.getShape(), strides)) {
-    if (ShapedType::isDynamic(dim) || dim < 0 || stride < 0)
-      return std::nullopt;
-    if (dim == 0) {
-      elements = 0;
-      break;
-    }
-    int64_t term = 0;
-    if (dim > 0 && __builtin_mul_overflow(dim - 1, stride, &term))
-      return std::nullopt;
-    if (__builtin_add_overflow(elements, term, &elements))
-      return std::nullopt;
-  }
-  if (elements > INT64_MAX / *elementBytes)
-    return std::nullopt;
-  return elements * *elementBytes;
 }
 
 static std::optional<int64_t> getStaticOffset(Value value) {
@@ -194,35 +152,13 @@ std::optional<mlir::pto::VmiStorageRoot>
 mlir::pto::resolveVmiStorageRoot(Value base) {
   while (base) {
     if (auto cast = base.getDefiningOp<pto::CastPtrOp>()) {
-      base = cast->getOperand(0);
-      continue;
-    }
-    if (auto pointerCast = base.getDefiningOp<pto::PointerCastOp>()) {
-      if (pointerCast.getAddrs().empty())
-        return std::nullopt;
-      auto address = getConstantI64(pointerCast.getAddrs().front());
-      if (!address)
-        return std::nullopt;
-      Type viewType = pointerCast.getResult().getType();
-      if (auto memref = dyn_cast<MemRefType>(viewType)) {
-        SmallVector<int64_t, 4> strides;
-        int64_t offset = 0;
-        if (failed(memref.getStridesAndOffset(strides, offset)) ||
-            ShapedType::isDynamic(offset))
-          return std::nullopt;
-        auto elementBytes = getElementBytes(viewType);
-        int64_t offsetBytes = 0;
-        int64_t logicalAddress = 0;
-        if (!elementBytes ||
-            __builtin_mul_overflow(offset, *elementBytes, &offsetBytes) ||
-            __builtin_add_overflow(*address, offsetBytes, &logicalAddress))
-          return std::nullopt;
-        *address = logicalAddress;
+      Value input = cast.getInput();
+      if (isa<IntegerType>(input.getType()) || input.getType().isIndex()) {
+        if (auto address = getConstantInteger(input))
+          return VmiStorageRoot{*address, std::nullopt,
+                                cast.getResult().getType()};
       }
-      return VmiStorageRoot{*address, getStaticMemrefBytes(viewType), viewType};
-    }
-    if (auto bind = base.getDefiningOp<pto::BindTileOp>()) {
-      base = bind.getSource();
+      base = input;
       continue;
     }
     if (auto cast = base.getDefiningOp<memref::CastOp>()) {
