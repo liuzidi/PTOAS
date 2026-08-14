@@ -3127,8 +3127,11 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
-  result.objectEmissionOptions.disableBishengVFFusion =
-      useVMIFusionPipeline || disableBishengVFFusion;
+  // Always disable Bisheng VF fusion/ldst-elimination on the VPTO path:
+  // PTOAS handles fusion and UB load/store elision in its own pipeline
+  // (either VMI fusion or the legacy low-level fusion lifecycle).  Letting
+  // Bisheng run its own VF pipeline a second time would conflict/overlap.
+  result.objectEmissionOptions.disableBishengVFFusion = true;
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
