@@ -16,7 +16,8 @@
 两路都跑完后，按 §3 的取数命令给出：rvec_busy、kernal ticks、mte2/mte3 busy cycle、
 hazard 总数及类型分解（overlaps with）、compare 是否 PASS。
 把 core0_summary_log、core0.veccore0.instr_log.dump、validation.log 三类文件存档到
-log/ 下。若要看 membar pass 效果，额外加一路 --enable-vecscope-mem-bar 的组合。
+log/ 下。若要看 membar pass 效果，额外加一路 --enable-vecscope-mem-bar=false 的组合
+（注意：--enable-vecscope-mem-bar 默认为 on，关闭它才是需要显式指定的"额外一路"）。
 ```
 
 期待产物：`core0_summary_log`（SU busy cycle + ticks）、`core0.veccore0.instr_log.dump`（逐指令时间序列）、`validation.log`（含 hazard warning 行）。hazard 数与 compare PASS/FAIL 是正确性关键指标。
@@ -47,26 +48,40 @@ pto.mem_bar 插在哪、什么 kind。也 dump vmi-loop-fusion / vmi-load-store-
 
 ## 1. 路由
 
-- **VMI 路**：`--enable-vmi --enable-op-fusion=true`。ptoas 做 VF 融合（`VmiLoopFusion` + `VmiLoadStoreElision`）。
-- **非 VMI 路**：`--enable-op-fusion=false`。全 fusion 关闭。
+- **VMI 路**：`--enable-vmi --enable-op-fusion=true`。ptoas 做 VMI 循环融合（`PTOVmiLoopFusion`）+ UB load/store elision（`PTOVmiLoadStoreElision`）。
+- **非 VMI 路**：`--enable-op-fusion=false`。走 legacy 低层融合流水线（`PTOLowLevelLoopFusion` + `PTOFusionLoadStoreElision`）。
 
 两者互斥。`--enable-vmi` 单独置 true 无效，必须配 `--enable-op-fusion=true` 才进 VMI 路径。
+
+> **bisheng VF 融合**：VPTO 路径（无论 VMI 还是非 VMI）默认全关。PTOAS 自己负责所有 fusion 和 UB load/store elision，bisheng 只做 codegen，不重复跑 VF 融合/ldst 消除。因此不再需要手动传 `--disable-bisheng-vf-fusion` 或 `-mllvm -cce-vf-enable-*=false`。
 
 ## 2. 环境（每次新 shell 都要 source）
 
 ```bash
 cd <PTOAS_REPO_ROOT>
-export ASCEND_HOME_PATH=<your CANN root, e.g. .../cann-9.0.1>
+export ASCEND_HOME_PATH=<your CANN root, e.g. /usr/local/Ascend/cann-9.1.0-beta.3>
 source "$ASCEND_HOME_PATH/bin/setenv.bash"
 export PTODSL_PYTHON_ROOT=<PTOAS_REPO_ROOT>/ptodsl
-# ptodsl 源码 + mlir_core 必须在 install-llvm21 stale 副本之前
-export PYTHONPATH=<PTOAS_REPO_ROOT>/ptodsl:<PTOAS_REPO_ROOT>/mlir_core:${PYTHONPATH:-}
+# ptodsl 源码 + mlir_core 必须在 install 副本之前
+export PYTHONPATH=<PTOAS_REPO_ROOT>/ptodsl:<your mlir_core path>:${PYTHONPATH:-}
 export PTO_ISA_ROOT=<your pto-isa root>
-export PTOAS_BIN=<PTOAS_REPO_ROOT>/build-llvm21/tools/ptoas/ptoas
+export PTOAS_BIN=<PTOAS_REPO_ROOT>/build311/tools/ptoas/ptoas
 CASE=test/vpto/cases/vmi/fa-softmax-dn-init-rowplusone
 ```
 
-> build 用 `build-llvm21/tools/ptoas/ptoas`（python wrapper + `runtime-staging/lib/ptoas.so`）。重编：`ninja -C build-llvm21 ptoas_runtime && ninja -C build-llvm21 ptoas_runtime_staging`，必要时 `cp -f build-llvm21/python/pto/ptoas.so build-llvm21/runtime-staging/lib/ptoas.so`。
+> build 用 `build311/tools/ptoas/ptoas`（python wrapper 加载 `build311/python/ptoas/mlir/_mlir_libs/libPTOASCompiler.so`）。重编：`ninja -C build311 libPTOASCompiler.so`。
+>
+> 也可以写一个 wrapper 脚本封装 venv + env：
+> ```bash
+> # /tmp/rpo_ptoas_wrapper.sh
+> #!/usr/bin/env bash
+> export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0-beta.3
+> export PYTHONPATH=<mlir_core path>:<PTOAS_REPO_ROOT>/build311/python
+> export PTO_ISA_ROOT=<pto-isa root>
+> export LD_LIBRARY_PATH=<llvm build-shared>/lib:${LD_LIBRARY_PATH:-}
+> exec <PTOAS_REPO_ROOT>/.venv311/bin/python <PTOAS_REPO_ROOT>/build311/tools/ptoas/ptoas "$@"
+> ```
+> 这样 validation 脚本的 `PTOAS_BIN` 直接指向 wrapper 即可。
 
 ## 3. 两路性能（VPTO 路径，sim）
 
@@ -81,7 +96,7 @@ cp "$FLAGS_FILE" /tmp/rpo_flags.bak
 trap 'cp /tmp/rpo_flags.bak "$FLAGS_FILE"' EXIT   # 退出必恢复
 
 # --- 测1：VMI 融合 ---
-echo "--pto-arch a5 --pto-backend=vpto --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true" > "$FLAGS_FILE"
+echo "--pto-arch a5 --pto-backend=vpto --enable-vmi --enable-op-fusion=true" > "$FLAGS_FILE"
 WS=/tmp/fa_rpo_t1; rm -rf "$WS"; mkdir -p "$WS"
 WORK_SPACE="$WS" CASES_ROOT=$PWD/test/vpto/cases/vmi \
   ASCEND_HOME_PATH="$ASCEND_HOME_PATH" PTOAS_BIN="$PTOAS_BIN" \
@@ -106,7 +121,7 @@ cp /tmp/rpo_flags.bak "$FLAGS_FILE"   # 手动恢复（trap 兜底）
 ```bash
 for n in 1 2; do
   WS=/tmp/fa_rpo_t$n
-  DIR=$(find "$WS" -type d -name "vmi_fa-softmax-dn-init-rowplusone" | head -1)
+  DIR=$(find "$WS" -type d -name "fa-softmax-dn-init-rowplusone" | head -1)
   SUMMARY="$DIR/core0_summary_log"
   INSTLOG="$DIR/core0.veccore0.instr_log.dump"
   echo "=== 测$n ==="
@@ -139,7 +154,7 @@ done
 DEST=log/fa_vmi_rowplusone_full
 mkdir -p "$DEST"
 for n in 1 2; do  # 1=VMI, 2=非VMI
-  DIR=$(find /tmp/fa_rpo_t$n -type d -name "vmi_fa-softmax-dn-init-rowplusone" | head -1)
+  DIR=$(find /tmp/fa_rpo_t$n -type d -name "fa-softmax-dn-init-rowplusone" | head -1)
   tag=$([ "$n" = 1 ] && echo vmi || echo novmi)
   cp "$DIR/core0_summary_log" "$DEST/perf_${tag}_core0_summary.txt"
   cp "$DIR/core0.veccore0.instr_log.dump" "$DEST/perf_${tag}_instr_log.dump"
@@ -153,13 +168,13 @@ done
 ```bash
 # VMI 路：全量 MLIR（每个 pass 后的 IR）
 $PTOAS_BIN --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true \
+  --enable-vmi --enable-op-fusion=true \
   --mlir-print-ir-after-all \
   "$CASE/kernel.pto" -o /tmp/rpo_vmi.fatobj.o > /tmp/rpo_vmi_mlir.log 2>&1
 
 # VMI 路：最终汇编（VPTO→LLVM IR）
 $PTOAS_BIN --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true \
+  --enable-vmi --enable-op-fusion=true \
   --emit-vpto-llvm-ir \
   "$CASE/kernel.pto" -o /tmp/rpo_vmi.ll
 
@@ -221,7 +236,7 @@ chmod +x "$SHIM/bin/bisheng"
 ```bash
 cd <PTOAS_REPO_ROOT>
 # 接 §1 的环境变量
-PTOAS=build-llvm21/tools/ptoas/ptoas
+PTOAS=build311/tools/ptoas/ptoas
 K=test/vpto/cases/vmi/fa-softmax-dn-init-rowplusone/kernel.pto
 SHIM=/tmp/perf/asm/shim_capture
 
@@ -230,7 +245,7 @@ ART=/tmp/perf/asm/vmi; rm -rf "$ART"; mkdir -p "$ART"
 PTOAS_CAPTURE_LL="$ART/device_input.ll" \
   ASCEND_HOME_PATH="$SHIM" \
   "$PTOAS" --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true \
+  --enable-vmi --enable-op-fusion=true \
   "$K" -o "$ART/fa.fatobj.o"
 
 # 非 VMI 路:
@@ -238,13 +253,15 @@ ART=/tmp/perf/asm/novmi; rm -rf "$ART"; mkdir -p "$ART"
 PTOAS_CAPTURE_LL="$ART/device_input.ll" \
   ASCEND_HOME_PATH="$SHIM" \
   "$PTOAS" --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-op-fusion=false \
+  --enable-op-fusion=false \
   "$K" -o "$ART/fa.fatobj.o"
 
 ls -la /tmp/perf/asm/vmi/device_input.ll /tmp/perf/asm/novmi/device_input.ll
 ```
 
 > 关键 env：`PTOAS_CAPTURE_LL` 命名落盘文件，`ASCEND_HOME_PATH="$SHIM"` 让 ptoas 调 shim 而非真 bisheng。`--pto-level=level2` 要带（fusion 流水线才跑）。
+>
+> 注意：如果用 wrapper 脚本（§2），它内部 `export ASCEND_HOME_PATH` 会覆盖命令行的 `ASCEND_HOME_PATH="$SHIM"`。捕获 device IR 时需直接调 python，不经 wrapper，或在 wrapper 中允许外部 `ASCEND_HOME_PATH` 优先。
 
 ### 5.3 用 bisheng 编 aicore `.o` / `.s`（汇编）
 
@@ -265,62 +282,31 @@ bisheng --target=hiipu64-hisilicon-cce -march=dav-c310-vec \
 
 验证 `.o`：`file rpo_vmi.aicore.o` 应为 `ELF 64-bit LSB relocatable, *unknown arch 0x1029*`。
 
-### 5.4 vf-fusion off 的可读汇编：用后端 `-mllvm` 选项
+### 5.4 vf-fusion off 的可读汇编
 
-要看 bisheng SIMD VF 融合关闭后的汇编，有个限制：**可读 `.s` 和 vf-fusion 生效在简单 argv 下互斥**——前端 `--cce-simd-vf-fusion=false` 在 IR 路径下报 `argument unused`。
+> **VPTO 路径默认行为已改变**：PTOAS 现在对所有 VPTO 路径（VMI 和非 VMI）都自动禁用 bisheng 的 VF 融合/ldst 消除（见 §1）。因此 sim 和 `.o` 编译已经都是 VFOFF 行为，不再需要手动注入。
 
-破解：用 `-mllvm` 后端选项，不走前端语法糖。`--cce-simd-vf-fusion=false` 实际展开成这 7 个后端 pass 选项（false 分支，按编译器源码）：
-
-```
--mllvm -cce-vf-enable-vf-fusion=false
--mllvm -cce-vf-enable-vf-loop-extender=false
--mllvm -cce-vf-enable-loop-fusion=false
--mllvm -cce-vf-enable-vf-ldst-elimination=false
--mllvm -cce-vf-enable-ub-dead-st-elimination=false
--mllvm -cce-vf-auto-sync=off
--mllvm -cce-vf-enable-vf-ifelse-extender=false
-```
-
-这些走 LLVM 后端 pass，在简单 argv `-S` 路径也跑，所以同时拿到可读 `.s` 和 vf-fusion off 效果：
+要单独编出可读 `.s`，直接用 bisheng 的 `-S` 路径。由于 ptoas 在调 bisheng 时已经传了 VFOFF 选项（见 `ObjectEmission.cpp`），捕获的 device IR 编出的 `.s` 就是 VFOFF 效果：
 
 ```bash
-# vf-fusion OFF 的可读汇编（简单 argv -S + -mllvm 后端选项，false 分支）
+# VMI / 非 VMI 路都可读汇编（bisheng -S，VF 已由 ptoas 关闭）
 bisheng --target=hiipu64-hisilicon-cce -march=dav-c310-vec \
   --cce-aicore-arch=dav-c310-vec --cce-aicore-only -O2 \
-  -mllvm -cce-vf-enable-vf-fusion=false \
-  -mllvm -cce-vf-enable-vf-loop-extender=false \
-  -mllvm -cce-vf-enable-loop-fusion=false \
-  -mllvm -cce-vf-enable-vf-ldst-elimination=false \
-  -mllvm -cce-vf-enable-ub-dead-st-elimination=false \
-  -mllvm -cce-vf-auto-sync=off \
-  -mllvm -cce-vf-enable-vf-ifelse-extender=false \
-  -S -x ir <device_input.ll> -o output_vfoff.s
-# 对照：vf-fusion ON 的可读汇编（同简单 argv -S，不带 vf 选项）
+  -S -x ir <device_input.ll> -o rpo_vmi.s
+```
+
+如果需要对照 VFON（VF 融合开启）的汇编——即让 bisheng 后端自己做循环融合和 ldst 消除——不要传 `-mllvm -cce-vf-enable-*=false`：
+
+```bash
+# VFON 对照（bisheng -S，不传 VF 选项 = bisheng 默认开启）
 bisheng --target=hiipu64-hisilicon-cce -march=dav-c310-vec \
   --cce-aicore-arch=dav-c310-vec --cce-aicore-only -O2 \
   -S -x ir <device_input.ll> -o output_vfon.s
 ```
 
-> `--cce-simd-vf-fusion=true` 分支额外 push `-cce-vf-remove-membar=true` + `-cce-vf-auto-sync=fused`；`=false` 分支 push `-cce-vf-auto-sync=off` 但不 push `-cce-vf-remove-membar`（用后端默认）。
+> 注意：sim 性能跑出的结果就是 VFOFF 行为（ptoas 已在 bisheng argv 中传了关闭选项）。VFON 汇编仅供对照，不反映 sim 实际性能。
 >
-> 简单 argv（无 `-cce-bitcode-is-aicore`）`-S` 可用；full ptoas argv（带 `-cce-bitcode-is-aicore`）`-S` 报 `unsupported option '-S' on device side`，只能 `-c` 出 `.o`，且 `llvm-objdump -d` 对 arch 0x1029 全 `<not available>`（无 disassembler backend）。
-
-### 5.5 从 ptoas 注入 vf-fusion 选项跑 sim
-
-ptoas 调 bisheng 的 argv 由 `tools/ptoas/ObjectEmission.cpp` 构造，无原生透传机制。要让 sim 也跑 vf-fusion off，可在该文件的 vec-misched 注入之后加 env 读取，把 `PTOAS_BISHENG_VF_ARGS`（空格分隔）的 token 追加进 bisheng argv，然后 rebuild。跑 sim 时：
-
-```bash
-export PTOAS_BISHENG_VF_ARGS="-mllvm -cce-vf-enable-vf-fusion=false -mllvm -cce-vf-enable-vf-loop-extender=false -mllvm -cce-vf-enable-loop-fusion=false -mllvm -cce-vf-enable-vf-ldst-elimination=false -mllvm -cce-vf-enable-ub-dead-st-elimination=false -mllvm -cce-vf-auto-sync=off -mllvm -cce-vf-enable-vf-ifelse-extender=false"
-# 然后照 §3 跑 validation 脚本（该 env 会被 ptoas 读到，注入 bisheng）
-```
-
-`PTOAS_BISHENG_VF_ARGS` 传前端 `--cce-simd-vf-fusion=false` 在 sim 路也没用（同样的 unused），必须传后端 `-mllvm` 选项。用 strace 确认选项落到 ptoas 调 bisheng 的 argv 里：
-
-```bash
-strace -f -e trace=execve -s 4000 -o /tmp/strace_vf.log \
-  "$PTOAS_BIN" <full compile cmd>
-grep 'execve.*bisheng' /tmp/strace_vf.log   # 看 argv 是否含 -cce-vf-*
-```
+> 如果 bisheng `-S` 对某 IR 报 `unsupported option '-S' on device side`（full ptoas argv 带 `-cce-bitcode-is-aicore`），是因为该 argv 走的是 fatobj 路径。用 shim 捕获的 device IR 是裸 IR，直接 `-S` 可用。
 
 ## 6. hazard 计数 + 运行日志保存
 
@@ -341,7 +327,7 @@ sim 的 `overlaps with` warning = 运行时访存流水 hazard。每行带完整
 ```bash
 DEST=log/fa_vmi_rowplusone_full
 for n in 1 2; do  # 1=VMI, 2=非VMI
-  DIR=$(find /tmp/fa_rpo_t$n -type d -name "vmi_fa-softmax-dn-init-rowplusone" | head -1)
+  DIR=$(find /tmp/fa_rpo_t$n -type d -name "fa-softmax-dn-init-rowplusone" | head -1)
   tag=$([ "$n" = 1 ] && echo vmi || echo novmi)
   cp "$DIR/validation.log" "$DEST/perf_${tag}_run.log"
 done
@@ -361,7 +347,7 @@ done
 ```bash
 # 抓全 pipeline pass 列表（先做这步知道有哪些 pass 可 dump）
 $PTOAS_BIN --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true \
+  --enable-vmi --enable-op-fusion=true \
   --emit-vpto -o /dev/null --mlir-print-ir-after-all 2>&1 \
   | grep -oE "IR Dump After [A-Za-z0-9_]+ \([a-z0-9-]+\)" | awk '!seen[$0]++'
 ```
@@ -370,18 +356,18 @@ dump 单个 pass：
 
 ```bash
 $PTOAS_BIN --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-vmi --enable-op-fusion=true \
+  --enable-vmi --enable-op-fusion=true \
   --emit-vpto "$CASE/kernel.pto" -o /dev/null \
   --mlir-print-ir-after="<pass-arg>" 2>&1 \
   | grep -v '^TileLib daemon\|^Info: ptodsl' \
   | awk '/^\/\/ -----.*IR Dump/ {p=1} p {print}' > stage.mlir
 ```
 
-`--enable-vecscope-mem-bar` 的 pass 名 `pto-insert-vecscope-mem-bar`，跑在 `PTOInferVPTOVecScope` 之后、`VPTOExpandWrapperOps` 之前。dump 它的 before/after 看 membar 插入：
+> `--enable-vecscope-mem-bar` 默认为 on（pass 名 `pto-insert-vecscope-mem-bar`，跑在 `PTOInferVPTOVecScope` 之后、`VPTOExpandWrapperOps` 之前）。要 dump 它的 before/after 看 membar 插入：
 
 ```bash
 $PTOAS_BIN --pto-arch=a5 --pto-backend=vpto --pto-level=level2 \
-  --tile-lib-backend=ptodsl --enable-op-fusion=false --enable-vecscope-mem-bar \
+  --enable-vmi --enable-op-fusion=true \
   --emit-vpto "$CASE/kernel.pto" -o /dev/null \
   --mlir-print-ir-after="pto-insert-vecscope-mem-bar" 2>&1 \
   | grep -v '^TileLib daemon\|^Info: ptodsl' > membar_after.mlir
@@ -401,6 +387,10 @@ log/fa_vmi_rowplusone_full/
   perf_novmi_run.log               # 非 VMI 路
   vmi_device_input.ll              # VMI 路 device IR（shim 捕获）
   novmi_device_input.ll            # 非 VMI 路 device IR（shim 捕获）
-  rpo_vmi.s / rpo_novmi.s          # 两路汇编
-  rpo_vmi.aicore.o / rpo_novmi.aicore.o   # aicore obj（.text 校验）
+  rpo_vmi.s / rpo_novmi.s          # 两路汇编（VFOFF：bisheng VF 已关）
+  rpo_vmi.aicore.o / rpo_novmi.aicore.o   # aicore obj（.text 校验，ELF arch 0x1029）
+  vmi_mlir_all.log                 # VMI 路全 pass 中间 MLIR
+  novmi_mlir_all.log               # 非 VMI 路全 pass 中间 MLIR
 ```
+
+> 注意：两路 `.s` / `.o` / sim 性能现在都是 VFOFF 行为（bisheng VF 融合已由 ptoas 默认关闭）。如需 VFON 对照汇编，参考 §5.4。
