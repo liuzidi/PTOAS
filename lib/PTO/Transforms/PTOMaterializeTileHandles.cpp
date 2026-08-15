@@ -113,6 +113,44 @@ static bool shouldMaterializeYieldOperand(Operation *owner) {
   return isa<scf::YieldOp, pto::YieldOp>(owner);
 }
 
+static bool canRetypeValueUsesToTile(Value value) {
+  for (OpOperand &use : value.getUses()) {
+    Operation *owner = use.getOwner();
+    if (shouldMaterializeOperand(owner) || shouldMaterializeYieldOperand(owner))
+      continue;
+    return false;
+  }
+  return true;
+}
+
+static bool canMaterializeYieldOperandUse(OpOperand &use) {
+  Operation *owner = use.getOwner();
+  unsigned operandNo = use.getOperandNumber();
+
+  if (auto yield = dyn_cast<pto::YieldOp>(owner)) {
+    auto parent = dyn_cast_or_null<pto::FusionRegionOp>(yield->getParentOp());
+    if (!parent || operandNo >= parent.getNumResults())
+      return false;
+    return canRetypeValueUsesToTile(parent.getResult(operandNo));
+  }
+
+  if (auto yield = dyn_cast<scf::YieldOp>(owner)) {
+    Operation *parent = yield->getParentOp();
+    if (auto forOp = dyn_cast_or_null<scf::ForOp>(parent)) {
+      if (operandNo >= forOp.getNumResults())
+        return false;
+      return canRetypeValueUsesToTile(forOp.getResult(operandNo));
+    }
+    if (auto ifOp = dyn_cast_or_null<scf::IfOp>(parent)) {
+      if (operandNo >= ifOp.getNumResults())
+        return false;
+      return canRetypeValueUsesToTile(ifOp.getResult(operandNo));
+    }
+  }
+
+  return false;
+}
+
 static bool hasStringAttr(ArrayRef<NamedAttribute> attrs, StringRef name,
                           StringRef value) {
   return llvm::any_of(attrs, [&](NamedAttribute attr) {
@@ -240,6 +278,17 @@ static TileHandleMetadata getTileHandleMetadata(Value value,
   TileHandleMetadata meta;
   meta.source = value;
   meta.config = TileBufConfigAttr::getDefault(ctx);
+
+  if (auto result = dyn_cast<OpResult>(value)) {
+    if (auto fusionRegion =
+            dyn_cast<pto::FusionRegionOp>(result.getOwner())) {
+      auto yield = dyn_cast<pto::YieldOp>(
+          fusionRegion.getBody().front().getTerminator());
+      if (yield && result.getResultNumber() < yield.getNumOperands())
+        return getTileHandleMetadata(yield.getOperand(result.getResultNumber()),
+                                     ctx);
+    }
+  }
 
   if (auto bind = value.getDefiningOp<BindTileOp>()) {
     meta.source = bind.getSource();
@@ -519,6 +568,19 @@ static Value computeExplicitAddress(Value value, OpBuilder &builder,
     return ensureI64(cast.getAddrs().front(), builder, loc);
   }
 
+  // pto.alloc_tile carries its compile-time GM address as an explicit optional
+  // $addr operand. When a value resolves to an alloc_tile (e.g. the operand a
+  // pto.fusion_region yields — which is, by construction, a region-local
+  // alloc_tile / bind_tile / pointer_cast of a constant address), surface that
+  // addr. An addrless alloc_tile (a pure UB scratch buffer) returns Value() so
+  // the caller falls back to an addrless alloc_tile — same behavior as before
+  // this case was handled.
+  if (auto alloc = value.getDefiningOp<pto::AllocTileOp>()) {
+    if (Value addr = alloc.getAddr())
+      return ensureI64(addr, builder, loc);
+    return Value();
+  }
+
   if (auto subview = value.getDefiningOp<memref::SubViewOp>())
     return computeSubviewAddress(subview, builder, loc);
 
@@ -534,6 +596,21 @@ static Value computeExplicitAddress(Value value, OpBuilder &builder,
 
   if (auto cast = value.getDefiningOp<memref::CastOp>())
     return computeExplicitAddress(cast.getSource(), builder, loc);
+
+  if (auto regionResult = dyn_cast<OpResult>(value)) {
+    if (auto fusionRegion =
+            dyn_cast<pto::FusionRegionOp>(regionResult.getOwner())) {
+      auto yieldOp = dyn_cast<pto::YieldOp>(
+          fusionRegion.getBody().front().getTerminator());
+      if (!yieldOp)
+        return Value();
+      unsigned resultIndex = regionResult.getResultNumber();
+      if (resultIndex >= yieldOp.getNumOperands())
+        return Value();
+      return computeExplicitAddress(yieldOp.getOperand(resultIndex), builder,
+                                    loc);
+    }
+  }
 
   return Value();
 }
@@ -692,6 +769,8 @@ materializeSCFIfResults(ModuleOp module, DenseMap<Value, Value> &tileHandles) {
     for (auto [idx, result] : llvm::enumerate(ifOp.getResults())) {
       if (!isLocalTileMemRef(result.getType()))
         continue;
+      if (!canRetypeValueUsesToTile(result))
+        continue;
 
       Value thenTile =
           lookupMaterializedTileHandle(thenYield.getOperand(idx), tileHandles);
@@ -785,6 +864,9 @@ materializeSCFForResults(ModuleOp module, DenseMap<Value, Value> &tileHandles) {
 
     for (auto [idx, result] : llvm::enumerate(forOp.getResults())) {
       if (!isLocalTileMemRef(result.getType()))
+        continue;
+      if (!canRetypeValueUsesToTile(result) ||
+          !canRetypeValueUsesToTile(forOp.getRegionIterArg(idx)))
         continue;
 
       Value initTile =
@@ -887,6 +969,8 @@ materializeFusionRegionResults(ModuleOp module,
     for (auto [idx, result] : llvm::enumerate(fusionRegion.getResults())) {
       if (!isLocalTileMemRef(result.getType()))
         continue;
+      if (!canRetypeValueUsesToTile(result))
+        continue;
 
       Value yieldTile =
           lookupMaterializedTileHandle(yield.getOperand(idx), tileHandles);
@@ -974,6 +1058,11 @@ static void updateResultTypesAfterMaterializingOperand(Operation *op,
 static bool isTileViewSemantics(StringAttr viewSemantics) {
   return viewSemantics && (viewSemantics.getValue() == "treshape" ||
                            viewSemantics.getValue() == "bitcast");
+}
+
+static bool isDeclaredTileMemRefBacked(Value value) {
+  value = peelAddressSource(value);
+  return value.getDefiningOp<DeclareTileMemRefOp>() != nullptr;
 }
 
 static bool isTileOpHelper(func::FuncOp func) {
@@ -1338,7 +1427,8 @@ static Value materializeAnchorResult(Operation *anchor, Value anchoredValue,
   SmallVector<OpOperand *> usesToRewrite;
   for (OpOperand &use : anchoredValue.getUses()) {
     if (shouldMaterializeOperand(use.getOwner()) ||
-        shouldMaterializeYieldOperand(use.getOwner()))
+        (shouldMaterializeYieldOperand(use.getOwner()) &&
+         canMaterializeYieldOperandUse(use)))
       usesToRewrite.push_back(&use);
   }
 
@@ -1386,14 +1476,26 @@ static Value materializeAnchorResult(Operation *anchor, Value anchoredValue,
       failedMaterialization = true;
       return Value();
     }
-    auto alloc = builder.create<AllocTileOp>(
-        anchor->getLoc(), tileTy, addr ? addr : Value(),
-        getAllocValidOperand(tileTy, meta.validRow, 0, builder,
-                             anchor->getLoc()),
-        getAllocValidOperand(tileTy, meta.validCol, 1, builder,
-                             anchor->getLoc()));
-    copyMaterializedTileAttrs(meta.attrs, alloc);
-    materialized = alloc.getResult();
+    if (!addr && isDeclaredTileMemRefBacked(anchoredValue)) {
+      auto materialize = builder.create<MaterializeTileOp>(
+          anchor->getLoc(), tileTy, anchoredValue,
+          getAllocValidOperand(tileTy, meta.validRow, 0, builder,
+                               anchor->getLoc()),
+          getAllocValidOperand(tileTy, meta.validCol, 1, builder,
+                               anchor->getLoc()),
+          meta.config);
+      copyMaterializedTileAttrs(meta.attrs, materialize);
+      materialized = materialize.getResult();
+    } else {
+      auto alloc = builder.create<AllocTileOp>(
+          anchor->getLoc(), tileTy, addr ? addr : Value(),
+          getAllocValidOperand(tileTy, meta.validRow, 0, builder,
+                               anchor->getLoc()),
+          getAllocValidOperand(tileTy, meta.validCol, 1, builder,
+                               anchor->getLoc()));
+      copyMaterializedTileAttrs(meta.attrs, alloc);
+      materialized = alloc.getResult();
+    }
   }
 
   for (OpOperand *use : usesToRewrite) {
@@ -1507,14 +1609,26 @@ struct PTOMaterializeTileHandlesPass
         failedMaterialization = true;
         continue;
       }
-      auto alloc = builder.create<AllocTileOp>(
-          op->getLoc(), tileTy, addr ? addr : Value(),
-          getAllocValidOperand(tileTy, meta.validRow, 0, builder,
-                               op->getLoc()),
-          getAllocValidOperand(tileTy, meta.validCol, 1, builder,
-                               op->getLoc()));
-      copyMaterializedTileAttrs(meta.attrs, alloc);
-      materialized = alloc.getResult();
+      if (!addr && isDeclaredTileMemRefBacked(oldValue)) {
+        auto materialize = builder.create<MaterializeTileOp>(
+            op->getLoc(), tileTy, oldValue,
+            getAllocValidOperand(tileTy, meta.validRow, 0, builder,
+                                 op->getLoc()),
+            getAllocValidOperand(tileTy, meta.validCol, 1, builder,
+                                 op->getLoc()),
+            meta.config);
+        copyMaterializedTileAttrs(meta.attrs, materialize);
+        materialized = materialize.getResult();
+      } else {
+        auto alloc = builder.create<AllocTileOp>(
+            op->getLoc(), tileTy, addr ? addr : Value(),
+            getAllocValidOperand(tileTy, meta.validRow, 0, builder,
+                                 op->getLoc()),
+            getAllocValidOperand(tileTy, meta.validCol, 1, builder,
+                                 op->getLoc()));
+        copyMaterializedTileAttrs(meta.attrs, alloc);
+        materialized = alloc.getResult();
+      }
       tileHandles[oldValue] = materialized;
       op->setOperand(operandNo, materialized);
       updateResultTypesAfterMaterializingOperand(op, operandNo, tileTy);

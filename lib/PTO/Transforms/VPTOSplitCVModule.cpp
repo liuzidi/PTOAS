@@ -14,6 +14,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/STLExtras.h"
+#include <optional>
 
 namespace mlir {
 namespace pto {
@@ -34,6 +35,21 @@ static bool hasKernelKind(ModuleOp module) {
 static bool hasKernelKindChildModule(ModuleOp module) {
   return llvm::any_of(module.getOps<ModuleOp>(),
                       [](ModuleOp child) { return hasKernelKind(child); });
+}
+
+static std::optional<FunctionKernelKind>
+getFunctionKernelKind(func::FuncOp funcOp) {
+  auto kindAttr = funcOp->getAttrOfType<FunctionKernelKindAttr>(
+      FunctionKernelKindAttr::name);
+  if (!kindAttr)
+    return std::nullopt;
+  return kindAttr.getKernelKind();
+}
+
+static bool hasTopLevelKernelKindFunction(ModuleOp module) {
+  return llvm::any_of(module.getOps<func::FuncOp>(), [](func::FuncOp funcOp) {
+    return getFunctionKernelKind(funcOp).has_value();
+  });
 }
 
 static bool isSectionSplitCandidate(func::FuncOp funcOp);
@@ -236,12 +252,115 @@ static void rewriteSectionsForKind(ModuleOp module, FunctionKernelKind kind) {
 static ModuleOp cloneModuleForKind(ModuleOp source, FunctionKernelKind kind,
                                    OpBuilder &builder) {
   auto cloned = cast<ModuleOp>(source->clone());
-  cloned->setAttr(FunctionKernelKindAttr::name,
-                  FunctionKernelKindAttr::get(cloned.getContext(), kind));
+  auto kindAttr = FunctionKernelKindAttr::get(cloned.getContext(), kind);
+  cloned->setAttr(FunctionKernelKindAttr::name, kindAttr);
   eraseSectionSplitCandidatesWithoutSectionKind(cloned, kind);
   rewriteSectionsForKind(cloned, kind);
+  for (func::FuncOp funcOp : cloned.getOps<func::FuncOp>())
+    funcOp->setAttr(FunctionKernelKindAttr::name, kindAttr);
   builder.insert(cloned);
   return cloned;
+}
+
+static SmallVector<NamedAttribute>
+getKernelChildAttrs(ModuleOp source, FunctionKernelKind kind) {
+  SmallVector<NamedAttribute> attrs;
+  attrs.reserve(source->getAttrs().size() + 1);
+  for (NamedAttribute attr : source->getAttrs()) {
+    if (attr.getName() == SymbolTable::getSymbolAttrName() ||
+        attr.getName() == FunctionKernelKindAttr::name)
+      continue;
+    attrs.push_back(attr);
+  }
+  attrs.push_back(NamedAttribute(
+      StringAttr::get(source.getContext(), FunctionKernelKindAttr::name),
+      FunctionKernelKindAttr::get(source.getContext(), kind)));
+  return attrs;
+}
+
+static void cloneFuncIntoModule(func::FuncOp funcOp, ModuleOp target,
+                                FunctionKernelKind kind, OpBuilder &builder) {
+  builder.setInsertionPointToEnd(&target.getBodyRegion().front());
+  auto cloned = cast<func::FuncOp>(funcOp->clone());
+  cloned->setAttr(FunctionKernelKindAttr::name,
+                  FunctionKernelKindAttr::get(cloned.getContext(), kind));
+  builder.insert(cloned);
+}
+
+static void createChildModuleForFunctionKind(
+    ModuleOp source, FunctionKernelKind kind, ArrayRef<func::FuncOp> helpers,
+    ArrayRef<func::FuncOp> kernels, OpBuilder &builder) {
+  auto child = ModuleOp::create(source.getLoc());
+  child->setAttrs(DictionaryAttr::get(source.getContext(),
+                                      getKernelChildAttrs(source, kind)));
+  builder.insert(child);
+
+  OpBuilder childBuilder(source.getContext());
+  for (func::FuncOp helper : helpers)
+    cloneFuncIntoModule(helper, child, kind, childBuilder);
+  for (func::FuncOp kernel : kernels) {
+    std::optional<FunctionKernelKind> kernelKind = getFunctionKernelKind(kernel);
+    if (kernelKind && *kernelKind == kind)
+      cloneFuncIntoModule(kernel, child, kind, childBuilder);
+  }
+}
+
+static LogicalResult materializeTopLevelKernelKindFunctions(ModuleOp module) {
+  SmallVector<func::FuncOp> helpers;
+  SmallVector<func::FuncOp> kernels;
+  bool needVector = false;
+  bool needCube = false;
+
+  for (Operation &op : module.getBodyRegion().front().getOperations()) {
+    auto funcOp = dyn_cast<func::FuncOp>(op);
+    if (!funcOp)
+      return op.emitError()
+             << "cannot split top-level kernel_kind functions with "
+                "non-function sibling operation";
+
+    std::optional<FunctionKernelKind> kind = getFunctionKernelKind(funcOp);
+    if (!kind) {
+      helpers.push_back(funcOp);
+      continue;
+    }
+
+    kernels.push_back(funcOp);
+    if (*kind == FunctionKernelKind::Vector)
+      needVector = true;
+    else if (*kind == FunctionKernelKind::Cube)
+      needCube = true;
+    else
+      return funcOp.emitError("unsupported pto.kernel_kind on function");
+  }
+
+  if (kernels.empty())
+    return success();
+
+  if (hasCVSections(module))
+    return module.emitError()
+           << "cannot combine top-level function pto.kernel_kind splitting "
+              "with pto.section.cube/vector splitting";
+
+  SmallVector<NamedAttribute> outerAttrs;
+  outerAttrs.reserve(module->getAttrs().size());
+  for (NamedAttribute attr : module->getAttrs())
+    if (attr.getName() != SymbolTable::getSymbolAttrName() &&
+        attr.getName() != FunctionKernelKindAttr::name)
+      outerAttrs.push_back(attr);
+
+  auto outer = ModuleOp::create(module.getLoc());
+  outer->setAttrs(DictionaryAttr::get(module.getContext(), outerAttrs));
+  OpBuilder builder(outer.getBody(), outer.getBody()->end());
+  if (needVector)
+    createChildModuleForFunctionKind(module, FunctionKernelKind::Vector,
+                                     helpers, kernels, builder);
+  if (needCube)
+    createChildModuleForFunctionKind(module, FunctionKernelKind::Cube, helpers,
+                                     kernels, builder);
+
+  module.getBodyRegion().takeBody(outer.getBodyRegion());
+  module->setAttrs(outer->getAttrs());
+  return success();
 }
 
 static LogicalResult materializeExplicitKernelKindSections(ModuleOp module) {
@@ -253,12 +372,16 @@ static LogicalResult materializeExplicitKernelKindSections(ModuleOp module) {
       failed(verifyExplicitKernelKindMatchesSections(module)))
     return failure();
   rewriteSectionsForKind(module, kindAttr.getKernelKind());
+  for (func::FuncOp funcOp : module.getOps<func::FuncOp>())
+    funcOp->setAttr(FunctionKernelKindAttr::name, kindAttr);
   return success();
 }
 
 static LogicalResult splitCVModule(ModuleOp module) {
   if (hasKernelKind(module))
     return materializeExplicitKernelKindSections(module);
+  if (hasTopLevelKernelKindFunction(module))
+    return materializeTopLevelKernelKindFunctions(module);
   if (hasKernelKindChildModule(module)) {
     for (ModuleOp child : module.getOps<ModuleOp>()) {
       if (!hasKernelKind(child))

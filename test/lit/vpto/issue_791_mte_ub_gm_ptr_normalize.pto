@@ -35,14 +35,14 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 
 // NORMALIZE: // -----// IR Dump After
 // NORMALIZE-SAME: (vpto-ptr-normalize)
-// NORMALIZE-LABEL: func.func @issue_791_min(%arg0: !pto.ptr<f16, gm>) attributes {pto.aicore} {
+// NORMALIZE-LABEL: func.func @issue_791_min(%arg0: !pto.ptr<f16, gm>) attributes {pto.aicore, pto.kernel_kind = #pto.kernel_kind<vector>} {
 // NORMALIZE: %[[SRC:.*]] = pto.castptr %{{.*}} : i64 -> !pto.ptr<f16, ub>
 // NORMALIZE: pto.mte_ub_gm %[[SRC]], %arg0, %{{.*}} nburst(%{{.*}}, %{{.*}}, %{{.*}})
 // NORMALIZE-SAME: : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64
 
 // EXPAND: // -----// IR Dump After
 // EXPAND-SAME: (vpto-expand-wrapper-ops)
-// EXPAND-LABEL: func.func @issue_791_min(%arg0: !pto.ptr<f16, gm>) attributes {pto.aicore} {
+// EXPAND-LABEL: func.func @issue_791_min(%arg0: !pto.ptr<f16, gm>) attributes {pto.aicore, pto.kernel_kind = #pto.kernel_kind<vector>} {
 // EXPAND: %[[SRC:.*]] = pto.castptr %{{.*}} : i64 -> !pto.ptr<f16, ub>
 // EXPAND-NOT: pto.castptr %{{.*}} : memref<16x16xf16, #pto.address_space<vec>> -> !pto.ptr<f16, ub>
 // EXPAND: pto.copy_ubuf_to_gm %[[SRC]], %arg0, %{{.*}} : !pto.ptr<f16, ub>, !pto.ptr<f16, gm>, i64, i64, i64, i64, i64, i64

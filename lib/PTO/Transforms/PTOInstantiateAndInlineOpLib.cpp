@@ -38,6 +38,25 @@ static constexpr llvm::StringLiteral kOpLibAttrInstVariantId =
 static constexpr llvm::StringLiteral kOpLibAttrInstOp = "pto.oplib.instance.op";
 static constexpr llvm::StringLiteral kOpLibAttrInstDType =
     "pto.oplib.instance.dtype";
+static constexpr llvm::StringLiteral kTileLibImplAttr = "pto.tilelib.impl";
+static constexpr llvm::StringLiteral kTileLibCandidateAttr =
+    "pto.tilelib.candidate";
+static constexpr llvm::StringLiteral kVmiFusionSourceAttr =
+    "pto.vmi.fusion.source";
+static constexpr llvm::StringLiteral kVmiFusionTileOpAttr =
+    "pto.vmi.fusion.tileop";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
+    "pto.vmi.fusion.boundary_reason";
+static constexpr llvm::StringLiteral kVmiEstimatedPeakVectorBytesAttr =
+    "pto.vmi.resource.estimated_peak_vector_bytes";
+static constexpr llvm::StringLiteral kVmiEstimatedPeakVectorChunksAttr =
+    "pto.vmi.resource.estimated_peak_vector_chunks";
+static constexpr llvm::StringLiteral kVmiResourceEstimateExactAttr =
+    "pto.vmi.resource.estimate_exact";
+static constexpr llvm::StringLiteral kVmiFusionPrincipalLoopAttr =
+    "pto.vmi.fusion.principal_loop";
 static constexpr llvm::StringLiteral kErrInstanceBodyMissing =
     "E_OPLIB_INSTANCE_BODY_MISSING";
 
@@ -57,6 +76,10 @@ static bool isTilelangTemplateFunc(func::FuncOp fn) {
   return fn->hasAttr("pto.tilelang.instance") && fn.isPrivate();
 }
 
+static bool isTileOpProviderFunc(func::FuncOp fn) {
+  return fn->hasAttr("pto.tileop.instance") && fn.isPrivate();
+}
+
 static bool isInlineableBackendHelperFunc(func::FuncOp fn) {
   return isTileOpHelperFunc(fn);
 }
@@ -67,7 +90,7 @@ static bool isInlineableLibFunc(func::FuncOp fn) {
   // TileLang inline_proc helpers that only become meaningful after ExpandTileOp.
   if (isInstanceFunc(fn) || isTilelangInlineProcFunc(fn))
     return true;
-  return isTilelangTemplateFunc(fn);
+  return isTilelangTemplateFunc(fn) || isTileOpProviderFunc(fn);
 }
 
 static Value maybeUnwrapCastToExpected(Value operand, Type expectedType) {
@@ -114,6 +137,20 @@ static Operation *cloneOpForInlineWithFix(OpBuilder &builder, Operation &op,
   return builder.clone(op, mapping);
 }
 
+static void copyTileLibSelectionAttrs(Operation *dst, Operation *src) {
+  for (StringRef attrName :
+       {StringRef(kTileLibImplAttr), StringRef(kTileLibCandidateAttr),
+        StringRef(kVmiFusionSourceAttr), StringRef(kVmiFusionTileOpAttr),
+        StringRef(kVmiFusionBoundaryAttr),
+        StringRef(kVmiFusionBoundaryReasonAttr),
+        StringRef(kVmiEstimatedPeakVectorBytesAttr),
+        StringRef(kVmiEstimatedPeakVectorChunksAttr),
+        StringRef(kVmiResourceEstimateExactAttr)}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
+}
+
 static void eraseDeadBridgeCasts(func::FuncOp func) {
   bool changed = true;
   while (changed) {
@@ -157,6 +194,13 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
 
   OpBuilder builder(call);
   IRMapping mapping;
+  auto impl = callee->getAttrOfType<StringAttr>(kTileLibImplAttr);
+  const bool isFusionEligibleVmi =
+      impl && impl.getValue() == "vmi" &&
+      !callee->hasAttr(kVmiFusionBoundaryAttr);
+  const bool hasSinglePrincipalLoop =
+      llvm::count_if(entry.without_terminator(),
+                     [](Operation &op) { return isa<scf::ForOp>(op); }) == 1;
   for (auto [arg, operand] :
        llvm::zip(entry.getArguments(), call.getOperands()))
     mapping.map(arg, operand);
@@ -170,6 +214,10 @@ static LogicalResult inlineCall(func::CallOp call, func::FuncOp callee) {
       continue;
 
     Operation *newOp = cloneOpForInlineWithFix(builder, op, mapping);
+    copyTileLibSelectionAttrs(newOp, callee);
+    if (isa<scf::ForOp>(newOp) && isFusionEligibleVmi &&
+        hasSinglePrincipalLoop)
+      newOp->setAttr(kVmiFusionPrincipalLoopAttr, builder.getUnitAttr());
     for (auto [oldRes, newRes] :
          llvm::zip(op.getResults(), newOp->getResults()))
       mapping.map(oldRes, newRes);

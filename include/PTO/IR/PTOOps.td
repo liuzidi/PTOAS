@@ -4459,7 +4459,7 @@ def TCvtOp : PTO_TOp<"tcvt", [
     PTODpsType:$src,
     PTODpsType:$dst,
     DefaultValuedAttr<PTO_RoundModeAttr, "::mlir::pto::RoundMode::CAST_RINT">:$rmode,
-    DefaultValuedAttr<PTO_SaturationModeAttr, "::mlir::pto::SaturationMode::OFF">:$sat_mode
+    OptionalAttr<PTO_SaturationModeAttr>:$sat_mode
   );
 
   let results = (outs);

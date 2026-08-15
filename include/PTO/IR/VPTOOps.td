@@ -312,7 +312,9 @@ def StrictVecScopeOp : PTO_Op<"strict_vecscope", [SingleBlock, NoTerminator,
   }];
 }
 
-def PTO_MemBarOp : PTO_MicroOp<"mem_bar"> {
+def PTO_MemBarOp : PTO_MicroOp<"mem_bar", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+  ]> {
   let summary = "Low-level VPTO memory barrier";
   let description = [{
     Low-level memory ordering barrier that lowers to one of the

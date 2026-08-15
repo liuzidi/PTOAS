@@ -201,6 +201,13 @@ static Value unwrapBridgingCasts(Value v) {
 
 static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
                                                        Operation *user) {
+  // A tile_buf anchor may be a fusion_region result (possibly wrapped in
+  // bridging casts — e.g. when the producer carries a richer tile_buf type
+  // than the consumer declared, as for RowPlusOne ND2NZ where the alloc tile
+  // is compact=row_plus_one but a tstore template declared compact=normal).
+  // Unwrap casts first, then check for the fusion_region result so the
+  // region-yield→alloc recovery is not defeated by the bridging cast.
+  tileBuf = unwrapBridgingCasts(tileBuf);
   if (auto regionResult = dyn_cast<OpResult>(tileBuf)) {
     if (auto fusionRegion =
             dyn_cast<pto::FusionRegionOp>(regionResult.getOwner())) {
@@ -221,7 +228,6 @@ static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
     }
   }
 
-  tileBuf = unwrapBridgingCasts(tileBuf);
   if (auto alloc = tileBuf.getDefiningOp<pto::AllocTileOp>()) {
     auto tileTy = dyn_cast<pto::TileBufType>(alloc.getResult().getType());
     if (!tileTy) {

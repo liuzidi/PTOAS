@@ -16,6 +16,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
@@ -72,6 +73,15 @@ static bool isExplicitVectorScopeCarrier(Operation *op) {
   return isa<pto::VecScopeOp, pto::StrictVecScopeOp>(op);
 }
 
+static Operation *getEnclosingExplicitVectorScope(Operation *op) {
+  for (Operation *parent = op ? op->getParentOp() : nullptr; parent;
+       parent = parent->getParentOp()) {
+    if (isExplicitVectorScopeCarrier(parent))
+      return parent;
+  }
+  return nullptr;
+}
+
 static bool isForbiddenInsideInferredVectorScope(Operation *op) {
   return isa<pto::VbitsortOp, pto::Vmrgsort4Op>(op);
 }
@@ -79,11 +89,58 @@ static bool isForbiddenInsideInferredVectorScope(Operation *op) {
 static bool isCloneableMaskProducer(Operation *op) {
   return isa<pto::PsetB8Op, pto::PsetB16Op, pto::PsetB32Op, pto::PgeB8Op,
              pto::PgeB16Op, pto::PgeB32Op, pto::PltB8Op, pto::PltB16Op,
-             pto::PltB32Op>(op);
+             pto::PltB32Op, pto::PandOp, pto::PorOp, pto::PnotOp,
+             pto::PintlvB8Op, pto::PintlvB16Op, pto::PintlvB32Op>(op);
+}
+
+static bool isCloneableScalarBroadcastProducer(Operation *op) {
+  if (isa<pto::VbrOp>(op))
+    return true;
+  auto vdup = dyn_cast<pto::VdupOp>(op);
+  return vdup && !isa<pto::VRegType>(vdup.getInput().getType());
+}
+
+static bool isIndexedVectorMemoryConsumer(Operation *op) {
+  return isa<pto::Vgather2Op, pto::Vgather2BcOp, pto::VscatterOp>(op);
+}
+
+static bool hasOnlyIndexedVectorMemoryUsers(Operation *op) {
+  for (Value result : op->getResults()) {
+    for (Operation *user : result.getUsers()) {
+      if (isIndexedVectorMemoryConsumer(user))
+        continue;
+      auto vand = dyn_cast<pto::VandOp>(user);
+      if (!vand || !llvm::all_of(vand->getUsers(),
+                                 isIndexedVectorMemoryConsumer))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool isCloneableIndexedMemoryIndexProducer(Operation *op) {
+  return isa<pto::VciOp, pto::VandOp>(op) &&
+         hasOnlyIndexedVectorMemoryUsers(op);
+}
+
+static bool isCloneableScalarVRegProducer(Operation *op) {
+  return isa<pto::VbrOp>(op);
+}
+
+static bool isCloneableSharedProducer(Operation *op) {
+  return isCloneableMaskProducer(op) ||
+         isCloneableScalarBroadcastProducer(op) ||
+         isCloneableScalarVRegProducer(op) ||
+         isCloneableIndexedMemoryIndexProducer(op);
 }
 
 static bool isVectorScopeBoundaryOperation(Operation *op) {
   return isa<pto::BarrierOp, pto::BarrierSyncOp>(op);
+}
+
+static bool isPureAddressOperation(Operation *op) {
+  return isa<pto::PointerCastOp, pto::CastPtrOp, pto::AddPtrOp,
+             pto::TileBufAddrOp, pto::BindTileOp>(op);
 }
 
 static bool hasVecScopeTypedOperandOrResult(Operation *op) {
@@ -117,6 +174,8 @@ static bool isSafeScalarOperation(Operation *op) {
     return false;
   if (isa<func::CallOp>(op))
     return false;
+  if (isPureAddressOperation(op))
+    return true;
   if (isPTOOperation(op) && !isMemoryEffectFree(op))
     return false;
   return isMemoryEffectFree(op);
@@ -250,6 +309,37 @@ computeMovedOpsForResultlessScope(ArrayRef<Operation *> ops) {
   return movedOps;
 }
 
+static void pruneExternallyConsumedCloneableProducers(
+    llvm::SmallPtrSetImpl<Operation *> &movedOps) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *, 8> producersToPrune;
+    for (Operation *op : movedOps) {
+      if (!isCloneableSharedProducer(op))
+        continue;
+
+      bool hasExternalUser = false;
+      for (Value result : op->getResults()) {
+        for (Operation *user : result.getUsers()) {
+          if (!isUserInsideCluster(user, movedOps))
+            hasExternalUser = true;
+        }
+      }
+
+      // Keep cloneable producers out of the resultless scope whenever one of
+      // their users is external. They can be rematerialized in the eventual
+      // consumer scope; retaining them in the moved set would make the mask
+      // escape check fail before that rematerialization can happen.
+      if (hasExternalUser)
+        producersToPrune.push_back(op);
+    }
+
+    for (Operation *op : producersToPrune)
+      changed |= movedOps.erase(op);
+  }
+}
+
 static Operation *getAncestorInBlock(Operation *op, Block &block) {
   for (Operation *cur = op; cur; cur = cur->getParentOp()) {
     if (cur->getBlock() == &block)
@@ -280,34 +370,122 @@ static void keepEarliestUseFirst(SmallVectorImpl<OpOperand *> &uses,
     std::swap(uses.front(), uses[earliest]);
 }
 
-static void cloneSharedMaskProducers(Block &block, MLIRContext *context) {
+static bool isSeparatedByInferenceBoundary(Operation *producer,
+                                           Operation *user, Block &block) {
+  Operation *userAncestor = getAncestorInBlock(user, block);
+  if (!producer || producer->getBlock() != &block || !userAncestor ||
+      producer == userAncestor || !producer->isBeforeInBlock(userAncestor))
+    return false;
+
+  for (Operation *current = producer->getNextNode();
+       current && current != userAncestor; current = current->getNextNode()) {
+    if (classifyOperationForInference(current) ==
+        VPTOInferenceOpClass::Boundary)
+      return true;
+  }
+  return false;
+}
+
+static bool shouldCloneSharedResult(OpResult result) {
+  Type type = result.getType();
+  return isa<pto::MaskType, pto::VRegType>(type);
+}
+
+static void cloneSharedProducers(Block &block, MLIRContext *context) {
   IRRewriter rewriter(context);
-  SmallVector<Operation *, 32> ops;
-  for (Operation &op : block)
-    ops.push_back(&op);
+  bool changed = true;
+  while (changed) {
+    changed = false;
 
-  for (Operation *op : ops) {
-    if (!isCloneableMaskProducer(op))
-      continue;
+    SmallVector<Operation *, 32> ops;
+    for (Operation &op : block)
+      ops.push_back(&op);
 
-    for (OpResult result : op->getOpResults()) {
-      if (!isa<pto::MaskType>(result.getType()) || result.use_empty())
+    for (Operation *op : ops) {
+      if (!isCloneableSharedProducer(op))
         continue;
 
       SmallVector<OpOperand *, 8> uses;
-      for (OpOperand &use : result.getUses())
-        uses.push_back(&use);
-      if (uses.size() < 2)
-        continue;
+      for (OpResult result : op->getOpResults()) {
+        if (!shouldCloneSharedResult(result) || result.use_empty())
+          continue;
+        for (OpOperand &use : result.getUses())
+          uses.push_back(&use);
+      }
+      if (uses.size() < 2) {
+        if (uses.empty() ||
+            !isSeparatedByInferenceBoundary(op, uses.front()->getOwner(),
+                                            block))
+          continue;
+      }
 
       keepEarliestUseFirst(uses, block);
-      for (OpOperand *use : ArrayRef<OpOperand *>(uses).drop_front()) {
+      bool cloneFirst = isSeparatedByInferenceBoundary(
+          op, uses.front()->getOwner(), block);
+      ArrayRef<OpOperand *> usesToClone = uses;
+      if (!cloneFirst)
+        usesToClone = usesToClone.drop_front();
+      for (OpOperand *use : usesToClone) {
+        auto result = cast<OpResult>(use->get());
         Operation *user = use->getOwner();
         rewriter.setInsertionPoint(user);
         Operation *clone = rewriter.clone(*op);
         use->set(clone->getResult(result.getResultNumber()));
+        changed = true;
       }
+      if (cloneFirst && op->use_empty())
+        rewriter.eraseOp(op);
     }
+  }
+}
+
+// A boundary between a pure mask producer and an atomic vector loop can cause
+// the loop to be wrapped without its producer. If every use ended up in the
+// same dedicated vecscope, rematerialize the producer there instead of leaving
+// vector-scope-only data at the parent level.
+static void sinkCloneableProducersIntoDedicatedScopes(Block &block) {
+  SmallVector<Operation *, 16> producers;
+  for (Operation &op : block) {
+    if (isCloneableSharedProducer(&op))
+      producers.push_back(&op);
+  }
+
+  for (Operation *producer : llvm::reverse(producers)) {
+    Operation *commonScope = nullptr;
+    bool hasUse = false;
+    bool allUsersShareScope = true;
+    for (Value result : producer->getResults()) {
+      for (Operation *user : result.getUsers()) {
+        hasUse = true;
+        Operation *scope = getEnclosingExplicitVectorScope(user);
+        if (!scope || (commonScope && commonScope != scope)) {
+          allUsersShareScope = false;
+          break;
+        }
+        commonScope = scope;
+      }
+      if (!allUsersShareScope)
+        break;
+    }
+
+    if (!hasUse || !allUsersShareScope || !commonScope)
+      continue;
+
+    // Keep rematerialization local to the block currently being inferred.
+    // In particular, do not move an outer producer into a vecscope nested in
+    // an scf.for/scf.if region merely because all of its users happen to be
+    // there. Also require every operand to remain available at the scope
+    // entry before moving the producer to the start of the scope body.
+    if (commonScope->getBlock() != &block)
+      continue;
+    DominanceInfo dominance;
+    if (!llvm::all_of(producer->getOperands(), [&](Value operand) {
+          return dominance.dominates(operand, commonScope);
+        }))
+      continue;
+
+    Block &scopeBody = commonScope->getRegion(0).front();
+    producer->moveBefore(&scopeBody, scopeBody.begin());
   }
 }
 
@@ -343,9 +521,12 @@ emitEscapingVectorScopeValueError(const EscapingMovedValue &escapingValue) {
                                "users";
   if (escapingValue.value)
     diag << "; escaping value type is " << escapingValue.value.getType();
-  if (escapingValue.user)
+  if (escapingValue.user) {
+    diag << "; external user is '"
+         << escapingValue.user->getName().getStringRef() << "'";
     diag.attachNote(escapingValue.user->getLoc())
         << "external user is here";
+  }
   return failure();
 }
 
@@ -361,6 +542,7 @@ buildResultlessScopePlan(ArrayRef<Operation *> ops, ResultlessScopePlan &plan,
 
   llvm::SmallPtrSet<Operation *, 16> movedOps =
       computeMovedOpsForResultlessScope(ops);
+  pruneExternallyConsumedCloneableProducers(movedOps);
   if (movedOps.empty())
     return failure();
 
@@ -491,7 +673,7 @@ static LogicalResult wrapGreedySubclusters(ArrayRef<Operation *> ops,
 }
 
 static LogicalResult inferVecScopesInBlock(Block &block, MLIRContext *context) {
-  cloneSharedMaskProducers(block, context);
+  cloneSharedProducers(block, context);
 
   SmallVector<Operation *, 16> pending;
 
@@ -520,6 +702,8 @@ static LogicalResult inferVecScopesInBlock(Block &block, MLIRContext *context) {
   }
   if (failed(flush()))
     return failure();
+
+  sinkCloneableProducersIntoDedicatedScopes(block);
 
   SmallVector<Operation *, 32> remainingOps;
   for (Operation &op : block)

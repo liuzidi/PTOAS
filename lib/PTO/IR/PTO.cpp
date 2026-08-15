@@ -3590,10 +3590,12 @@ LogicalResult mlir::pto::SyncSetOp::verify() {
     switch (getPipe().getPipe()) {
     case PIPE::PIPE_FIX:
     case PIPE::PIPE_MTE3:
+    case PIPE::PIPE_V:
+    case PIPE::PIPE_MTE1:
       return success();
     default:
       return emitOpError()
-             << "A5 sync.set expects pipe to be one of <PIPE_FIX>, <PIPE_MTE3>";
+             << "A5 sync.set expects pipe to be one of <PIPE_FIX>, <PIPE_MTE1>, <PIPE_MTE3>, <PIPE_V>";
     }
   };
   return dispatchVerifierByArch(getOperation(), verifyA2A3, verifyA5);
@@ -8734,6 +8736,15 @@ void MemBarOp::print(OpAsmPrinter &p) {
   printLegacyOrAttrMemBar(p, getKind(), (*this)->getAttrs());
 }
 
+void MemBarOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
 static ParseResult parseBufSyncOp(OpAsmParser &parser, OperationState &result) {
   Attribute opTypeAttr;
   IntegerAttr bufIdAttr;
@@ -11345,15 +11356,27 @@ static bool isLocallyBoundTileSource(Value value) {
   if (!value || isa<BlockArgument>(value))
     return false;
 
+  Operation *def = value.getDefiningOp();
   if (isa<AllocTileOp, DeclareTileOp, BindTileOp, PointerCastOp,
-          MaterializeTileOp>(
-          value.getDefiningOp()))
+          MaterializeTileOp>(def))
     return true;
 
   if (auto bitcast = value.getDefiningOp<BitcastOp>())
     return isLocallyBoundTileSource(bitcast.getSrc());
   if (auto reshape = value.getDefiningOp<TReshapeOp>())
     return isLocallyBoundTileSource(reshape.getSrc());
+  if (auto subview = value.getDefiningOp<SubViewOp>())
+    return isLocallyBoundTileSource(subview.getSource());
+  if (auto fusionRegion = value.getDefiningOp<FusionRegionOp>()) {
+    auto result = dyn_cast<OpResult>(value);
+    if (!result)
+      return false;
+    auto yield =
+        dyn_cast<YieldOp>(fusionRegion.getBody().front().getTerminator());
+    if (!yield || result.getResultNumber() >= yield.getNumOperands())
+      return false;
+    return isLocallyBoundTileSource(yield.getOperand(result.getResultNumber()));
+  }
 
   return false;
 }
@@ -15227,7 +15250,8 @@ getEnclosingFunctionKernelKind(Operation *op) {
 
 static bool isInsideSectionOrAttributedKernel(Operation *op) {
   return isInsideSectionCube(op) || isInsideSectionVector(op) ||
-         isInsideTileOpHelper(op) || getEnclosingFunctionKernelKind(op).has_value();
+         isInsideTileOpHelper(op) ||
+         getEnclosingFunctionKernelKind(op).has_value();
 }
 
 static LogicalResult verifySplitAttr(Operation *op, int64_t split) {

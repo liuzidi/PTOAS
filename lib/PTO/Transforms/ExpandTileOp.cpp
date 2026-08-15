@@ -18,8 +18,8 @@
 //
 // Workflow per tile op:
 //   1. Extract SpecKey from ALL operands' tile_buf types.
-//   2. For PTODSL, read candidates attached by InsertTemplateAttributes and
-//      select the first candidate still present.
+//   2. For PTODSL, consume the candidate selected by
+//      SelectTemplateCandidate.
 //   3. Invoke the selected TileLib helper to generate a specialized MLIR
 //      function (with tile_buf parameters).
 //   4. Parse the generated MLIR and clone the function into the module.
@@ -31,6 +31,7 @@
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/Support/PythonExecutable.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/TileShapeStateAnalysis.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -50,6 +51,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
@@ -80,7 +82,39 @@ namespace pto {
 
 namespace {
 
-constexpr llvm::StringLiteral kCandidatesAttr = "candidates";
+constexpr llvm::StringLiteral kSelectedCandidateAttr =
+    "pto.tilelib.selected_candidate";
+constexpr llvm::StringLiteral kTileLibImplAttr = "pto.tilelib.impl";
+constexpr llvm::StringLiteral kTileLibCandidateAttr = "pto.tilelib.candidate";
+constexpr llvm::StringLiteral kVmiFusionSourceAttr = "pto.vmi.fusion.source";
+constexpr llvm::StringLiteral kVmiFusionTileOpAttr = "pto.vmi.fusion.tileop";
+constexpr llvm::StringLiteral kVmiFusionBoundaryAttr = "pto.vmi.fusion.boundary";
+constexpr llvm::StringLiteral kVmiFusionBoundaryReasonAttr =
+    "pto.vmi.fusion.boundary_reason";
+constexpr llvm::StringLiteral kVmiEstimatedPeakVectorBytesAttr =
+    "pto.vmi.resource.estimated_peak_vector_bytes";
+constexpr llvm::StringLiteral kVmiEstimatedPeakVectorChunksAttr =
+    "pto.vmi.resource.estimated_peak_vector_chunks";
+constexpr llvm::StringLiteral kVmiResourceEstimateExactAttr =
+    "pto.vmi.resource.estimate_exact";
+
+static bool hasPipeTypedValue(Operation *operation) {
+  for (Type type : operation->getOperandTypes()) {
+    if (isa<pto::PipeType>(type))
+      return true;
+  }
+  for (Type type : operation->getResultTypes()) {
+    if (isa<pto::PipeType>(type))
+      return true;
+  }
+  return false;
+}
+
+static bool shouldSkipTileLibExpansion(Operation *operation) {
+  if (isa<pto::TGetValOp, pto::TSetValOp>(operation))
+    return true;
+  return hasPipeTypedValue(operation);
+}
 
 // ============================================================================
 // OperandTypeInfo: describes one operand for template specialization.
@@ -113,6 +147,11 @@ struct OperandTypeInfo {
   int32_t slayout = 0;
   int32_t fractal = 0;
   uint64_t pad = 0;
+  // CompactMode: 0=null, 1=Normal, 2=RowPlusOne (TileBufConfigAttr::compactMode).
+  // Carried so the PTODSL VMI provider can emit RowPlusOne ND2NZ (UB +1 padding
+  // band) — without it the compact_mode is dropped before the JSON/spec reaches
+  // the Python helper, and RowPlusOne tiles can't be specialized.
+  int32_t compactMode = 0;
 
   // --- View-only (MemRefType) — for JSON / constraint checking only ---
   SmallVector<int64_t> viewShape;
@@ -135,7 +174,8 @@ struct OperandTypeInfo {
              tileValidShape == rhs.tileValidShape &&
              tileMemorySpace == rhs.tileMemorySpace &&
              blayout == rhs.blayout && slayout == rhs.slayout &&
-             fractal == rhs.fractal && pad == rhs.pad;
+             fractal == rhs.fractal && pad == rhs.pad &&
+             compactMode == rhs.compactMode;
     if (kind == OperandKind::Vector)
       return vectorShape == rhs.vectorShape;
     if (kind == OperandKind::Scalar)
@@ -173,7 +213,7 @@ struct SpecKeyInfo : public llvm::DenseMapInfo<SpecKey> {
       h = llvm::hash_combine(h, static_cast<int>(op.kind), op.dtype);
       if (op.kind == OperandKind::Tile) {
         h = llvm::hash_combine(h, op.tileMemorySpace, op.blayout,
-                               op.slayout, op.fractal, op.pad);
+                               op.slayout, op.fractal, op.pad, op.compactMode);
         for (int64_t d : op.tileShape)
           h = llvm::hash_combine(h, d);
         for (int64_t d : op.tileValidShape)
@@ -373,6 +413,14 @@ static std::optional<std::string> getTCvtRoundModeString(pto::TCvtOp op) {
   return std::nullopt;
 }
 
+static std::string getTCvtSaturationModeString(pto::TCvtOp op) {
+  auto explicitMode =
+      op->getAttrOfType<pto::SaturationModeAttr>("sat_mode");
+  if (!explicitMode)
+    return "DEFAULT";
+  return stringifySaturationMode(explicitMode.getValue()).str();
+}
+
 static StringRef getPrecisionTypeString(pto::DivPrecision precision) {
   switch (precision) {
   case pto::DivPrecision::Default:
@@ -446,6 +494,7 @@ static const llvm::StringSet<> &highPrecisionImplementedOps() {
     "pto.tcolexpanddiv",
     "pto.texp",
     "pto.tsqrt",
+    "pto.trsqrt",
   };
   return kImplementedOps;
 }
@@ -483,6 +532,7 @@ static void appendOpContextAttrs(
     std::optional<std::string> roundMode = getTCvtRoundModeString(tcvt);
     if (roundMode)
       attrs.emplace_back("round_mode", *roundMode);
+    attrs.emplace_back("sat_mode", getTCvtSaturationModeString(tcvt));
   }
   if (auto trandom = dyn_cast<pto::TRandomOp>(op))
     attrs.emplace_back("rounds", getTRandomRoundsString(trandom));
@@ -634,7 +684,8 @@ static void populateViewShapeAndStrides(Value value,
   }
 }
 
-static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value) {
+static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value,
+                                                           Operation *useOp = nullptr) {
   Type ty = value.getType();
   // Tile operand — from TileBufType.
   if (auto tbTy = dyn_cast<pto::TileBufType>(ty)) {
@@ -649,6 +700,11 @@ static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value) {
       info.tileValidShape.assign(tbTy.getShape().begin(), tbTy.getShape().end());
     else
       info.tileValidShape.assign(validShape.begin(), validShape.end());
+    if (llvm::any_of(info.tileValidShape, ShapedType::isDynamic)) {
+      SmallVector<int64_t, 2> resolvedValidShape;
+      if (pto::resolveStaticTileValidShape(value, resolvedValidShape, useOp))
+        info.tileValidShape = std::move(resolvedValidShape);
+    }
     info.tileMemorySpace = getMemorySpaceString(tbTy);
     if (auto config = tbTy.getConfigAttr()) {
       info.blayout = static_cast<int32_t>(config.getBLayout().getValue());
@@ -657,6 +713,8 @@ static std::optional<OperandTypeInfo> buildOperandTypeInfo(Value value) {
                          ? static_cast<int32_t>(config.getSFractalSize().getInt())
                          : 0;
       info.pad = static_cast<uint64_t>(config.getPad().getValue());
+      // CompactMode: 0=null/Normal, 2=RowPlusOne (TileBufType::getCompactModeI32).
+      info.compactMode = tbTy.getCompactModeI32();
     }
     return info;
   }
@@ -712,7 +770,7 @@ static std::optional<SpecKey> buildSpecKey(Operation *op) {
   key.targetArch = getTargetArchString(op);
 
   for (unsigned i = 0; i < op->getNumOperands(); ++i) {
-    auto info = buildOperandTypeInfo(op->getOperand(i));
+    auto info = buildOperandTypeInfo(op->getOperand(i), op);
     if (!info)
       return std::nullopt;
     key.operands.push_back(*info);
@@ -737,13 +795,15 @@ struct ExpandState {
   std::string daemonHelperModule;
   std::string pythonExe;
   std::string daemonSocketPath;
-
   std::optional<std::string>
   invokeTileLibHelper(const SpecKey &key, StringRef candidateId = {});
   func::FuncOp invokeTileLib(const SpecKey &key, Operation *tileOp,
                              ModuleOp mod, MLIRContext *ctx);
   func::FuncOp invokeTileLibDaemon(const SpecKey &key, StringRef candidateId,
-                                   ModuleOp mod, MLIRContext *ctx);
+                                   bool selectedVMI,
+                                   std::optional<StringRef> boundaryKind,
+                                   StringRef boundaryReason, ModuleOp mod,
+                                   MLIRContext *ctx);
 
   LogicalResult expandTileOpsInFunction(func::FuncOp func, ModuleOp mod,
                                         MLIRContext *ctx);
@@ -810,7 +870,9 @@ static std::string buildOperandSpecsJson(const SpecKey &key) {
       json += std::to_string(op.fractal);
       json += ",\"pad_value\":\"0x";
       json += llvm::utohexstr(op.pad, /*LowerCase=*/false);
-      json += "\"}}";
+      json += "\",\"compact_mode\":";
+      json += std::to_string(op.compactMode);
+      json += "}}";
       continue;
     }
 
@@ -864,8 +926,10 @@ static std::string dimSuffix(int64_t dim) {
   return std::to_string(dim);
 }
 
-static std::string buildUniqueFunctionBaseName(const SpecKey &key) {
-  std::string uniqueName = "__pto_tilelang_" + key.targetArch + "_" + key.opName;
+static std::string
+buildUniqueFunctionBaseName(const SpecKey &key,
+                            StringRef prefix = "__pto_tilelang_") {
+  std::string uniqueName = prefix.str() + key.targetArch + "_" + key.opName;
   for (const auto &op : key.operands) {
     uniqueName += op.kind == OperandKind::Tile   ? "_tile"
                  : op.kind == OperandKind::View ? "_view"
@@ -881,6 +945,7 @@ static std::string buildUniqueFunctionBaseName(const SpecKey &key) {
       uniqueName += "_sl" + std::to_string(op.slayout);
       uniqueName += "_fr" + std::to_string(op.fractal);
       uniqueName += "_pd" + llvm::utohexstr(op.pad, /*LowerCase=*/false);
+      uniqueName += "_cm" + std::to_string(op.compactMode);
     } else if (op.kind == OperandKind::View) {
       uniqueName += "_ms_" + op.viewMemorySpace;
       uniqueName += "_shape";
@@ -901,6 +966,40 @@ static std::string buildUniqueFunctionBaseName(const SpecKey &key) {
   for (const auto &[attrName, attrValue] : key.contextAttrs)
     uniqueName += "_ctx_" + attrName + "_" + attrValue;
   return uniqueName;
+}
+
+static void annotateTileLibSelection(Operation *op, MLIRContext *ctx,
+                                     const SpecKey &key, StringRef candidateId,
+                                     bool selectedVMI,
+                                     std::optional<StringRef> boundaryKind,
+                                     StringRef boundaryReason) {
+  op->setAttr(kTileLibImplAttr,
+              StringAttr::get(ctx, selectedVMI ? "vmi" : "ptodsl"));
+  if (!candidateId.empty())
+    op->setAttr(kTileLibCandidateAttr, StringAttr::get(ctx, candidateId));
+  op->setAttr(kVmiFusionSourceAttr, StringAttr::get(ctx, "tilelib"));
+  op->setAttr(kVmiFusionTileOpAttr, StringAttr::get(ctx, key.opName));
+  if (boundaryKind) {
+    op->setAttr(kVmiFusionBoundaryAttr, StringAttr::get(ctx, *boundaryKind));
+    if (!boundaryReason.empty()) {
+      op->setAttr(kVmiFusionBoundaryReasonAttr,
+                  StringAttr::get(ctx, boundaryReason));
+    }
+  }
+}
+
+static void copyTileLibSelectionAttrs(Operation *dst, Operation *src) {
+  for (StringRef attrName :
+       {StringRef(kTileLibImplAttr), StringRef(kTileLibCandidateAttr),
+        StringRef(kVmiFusionSourceAttr), StringRef(kVmiFusionTileOpAttr),
+        StringRef(kVmiFusionBoundaryAttr),
+        StringRef(kVmiFusionBoundaryReasonAttr),
+        StringRef(kVmiEstimatedPeakVectorBytesAttr),
+        StringRef(kVmiEstimatedPeakVectorChunksAttr),
+        StringRef(kVmiResourceEstimateExactAttr)}) {
+    if (Attribute attr = src->getAttr(attrName))
+      dst->setAttr(attrName, attr);
+  }
 }
 
 static std::string buildContextAttrsJson(const SpecKey &key) {
@@ -1023,6 +1122,9 @@ ExpandState::invokeTileLibHelper(const SpecKey &key,
 // ============================================================================
 func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
                                               StringRef candidateId,
+                                              bool selectedVMI,
+                                              std::optional<StringRef> boundaryKind,
+                                              StringRef boundaryReason,
                                               ModuleOp mod,
                                               MLIRContext *ctx) {
   auto mlirText = invokeTileLibHelper(key, candidateId);
@@ -1036,8 +1138,11 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
     return nullptr;
   }
 
-  // 9. Clone the generated function set into the target module.
-  auto parsedFuncs = parsedMod->getOps<func::FuncOp>();
+  // 9. Clone the generated function set into the target module.  VMI
+  // templates carry the function under a nested kernel module, while ordinary
+  // PTODSL templates may be top-level.
+  SmallVector<func::FuncOp, 4> parsedFuncs;
+  parsedMod->walk([&](func::FuncOp fn) { parsedFuncs.push_back(fn); });
   if (parsedFuncs.empty()) {
     llvm::errs() << "ExpandTileOp: no func.func in daemon output\n";
     return nullptr;
@@ -1050,7 +1155,9 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
   llvm::StringMap<std::string> renamedSymbols;
   SmallVector<func::FuncOp, 4> clonedFuncs;
 
-  std::string uniqueName = buildUniqueFunctionBaseName(key);
+  std::string uniqueName =
+      selectedVMI ? buildUniqueFunctionBaseName(key, "__pto_ptodsl_vmi_")
+                  : buildUniqueFunctionBaseName(key);
   if (!candidateId.empty())
     uniqueName += "__" + candidateId.str();
   SymbolTable targetSymTable(mod);
@@ -1072,6 +1179,11 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
     
     // Set visibility to Private for template functions (required for inline pass)
     cloned.setVisibility(SymbolTable::Visibility::Private);
+    if (selectedVMI && !cloned->hasAttr("pto.tilelang.instance"))
+      cloned->setAttr("pto.tileop.instance",
+                      StringAttr::get(ctx, "ptodsl"));
+    annotateTileLibSelection(cloned, ctx, key, candidateId, selectedVMI,
+                             boundaryKind, boundaryReason);
     
     clonedFuncs.push_back(cloned);
   }
@@ -1089,10 +1201,11 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
   }
 
   auto cloned = clonedFuncs.front();
-  if (!cloned->hasAttr("pto.tilelang.instance")) {
+  if (!cloned->hasAttr("pto.tilelang.instance") &&
+      !cloned->hasAttr("pto.tileop.instance")) {
     llvm::errs() << "ExpandTileOp: warning: daemon output function @"
                  << cloned.getSymName()
-                 << " missing pto.tilelang.instance attribute\n";
+                 << " missing template instance attribute\n";
   }
 
   // Keep the parsed module alive.
@@ -1107,38 +1220,49 @@ func::FuncOp ExpandState::invokeTileLibDaemon(const SpecKey &key,
 func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
                                         Operation *tileOp, ModuleOp mod,
                                         MLIRContext *ctx) {
+  const bool usesPTODSL = tileLibBackend == "ptodsl";
   // Try daemon first if daemon socket path is provided.
   if (!daemonSocketPath.empty()) {
     std::string candidateId;
-    if (tileLibBackend == "ptodsl") {
-      auto candidates =
-          tileOp->getAttrOfType<ArrayAttr>(kCandidatesAttr);
-      if (!candidates || candidates.empty()) {
-        tileOp->emitError(
-            "ExpandTileOp requires at least one template candidate");
-        return nullptr;
-      }
-
-      auto selected = dyn_cast<DictionaryAttr>(candidates[0]);
+    bool selectedVMI = false;
+    std::optional<StringRef> boundaryKind;
+    StringRef boundaryReason;
+    if (usesPTODSL) {
+      auto selected =
+          tileOp->getAttrOfType<DictionaryAttr>(kSelectedCandidateAttr);
       if (!selected) {
         tileOp->emitError(
-            "ExpandTileOp candidate 0 must be a dictionary");
+            "ExpandTileOp requires pto.tilelib.selected_candidate; run "
+            "pto-select-template-candidate first");
         return nullptr;
       }
       auto selectedName = selected.getAs<StringAttr>("name");
       if (!selectedName) {
         tileOp->emitError(
-            "ExpandTileOp candidate 0 requires a string name");
+            "ExpandTileOp selected candidate requires a string name");
         return nullptr;
       }
       candidateId = selectedName.getValue().str();
+      auto impl = tileOp->getAttrOfType<StringAttr>(kTileLibImplAttr);
+      if (!impl) {
+        tileOp->emitError("ExpandTileOp selected candidate requires "
+                          "pto.tilelib.impl");
+        return nullptr;
+      }
+      selectedVMI = impl.getValue() == "vmi";
+      if (auto boundary =
+              tileOp->getAttrOfType<StringAttr>(kVmiFusionBoundaryAttr))
+        boundaryKind = boundary.getValue();
+      if (auto reason = tileOp->getAttrOfType<StringAttr>(
+              kVmiFusionBoundaryReasonAttr))
+        boundaryReason = reason.getValue();
     }
 
-    func::FuncOp daemonResult =
-        invokeTileLibDaemon(key, candidateId, mod, ctx);
+    func::FuncOp daemonResult = invokeTileLibDaemon(
+        key, candidateId, selectedVMI, boundaryKind, boundaryReason, mod, ctx);
     if (daemonResult)
       return daemonResult;
-    if (tileLibBackend == "ptodsl") {
+    if (usesPTODSL) {
       llvm::errs()
           << "ExpandTileOp: PTODSL daemon RPC failed; refusing to fall back "
              "to TileLang\n";
@@ -1148,7 +1272,7 @@ func::FuncOp ExpandState::invokeTileLib(const SpecKey &key,
                     "TileLang subprocess mode\n";
   }
 
-  if (tileLibBackend == "ptodsl") {
+  if (usesPTODSL) {
     llvm::errs() << "ExpandTileOp: PTODSL backend requires its daemon\n";
     return nullptr;
   }
@@ -1352,6 +1476,8 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
   func.walk([&](Operation *op) {
     if (isa<pto::TReshapeOp>(op))
       return;
+    if (shouldSkipTileLibExpansion(op))
+      return;
     if (isa<pto::OpPipeInterface>(op))
       tileOps.push_back(op);
   });
@@ -1364,14 +1490,15 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
       return failure();
     }
 
-    // Invoke the selected TileLib backend (with daemon-side caching).
     func::FuncOp dslFn = invokeTileLib(*specKeyOpt, op, mod, ctx);
     if (!dslFn) {
       StringRef opName = getTileOpName(op);
-      op->emitError("ExpandTileOp: failed to instantiate TileLib template for " +
-                    opName);
+      op->emitError()
+          << "ExpandTileOp: failed to instantiate TileLib implementation for "
+          << opName;
       return failure();
     }
+    copyTileLibSelectionAttrs(dslFn, op);
 
     // Replace tile op with func.call.  For view operands whose caller type
     // (memref) differs from the template parameter type (tensor_view /
@@ -1388,7 +1515,8 @@ LogicalResult ExpandState::expandTileOpsInFunction(func::FuncOp func,
       }
       operands.push_back(operand);
     }
-    builder.create<func::CallOp>(op->getLoc(), dslFn, operands);
+    auto call = builder.create<func::CallOp>(op->getLoc(), dslFn, operands);
+    copyTileLibSelectionAttrs(call, dslFn);
     op->erase();
   }
 
@@ -1430,7 +1558,6 @@ void ExpandTileOpPass::runOnOperation() {
   state.daemonHelperModule = std::string(daemonHelperModule);
   state.pythonExe = std::string(pythonExe);
   state.daemonSocketPath = std::string(daemonSocketPath);
-
   for (auto func : mod.getOps<func::FuncOp>()) {
     if (func.isExternal())
       continue;

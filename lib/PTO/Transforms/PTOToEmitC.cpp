@@ -9526,14 +9526,15 @@ struct PTOCvtToEmitC : public OpConversionPattern<pto::TCvtOp> {
     Value rmodeVal = rewriter.create<emitc::ConstantOp>(
         loc, rmodeTy, emitc::OpaqueAttr::get(ctx, rmTok));
 
-    auto satModeTy = emitc::OpaqueType::get(ctx, "SaturationMode");
     auto satAttr = op.getSatModeAttr();
-    std::string satTok = satAttr ? saturationModeTok(satAttr)
-                                 : std::string("SaturationMode::OFF");
-    Value satModeVal = rewriter.create<emitc::ConstantOp>(
-        loc, satModeTy, emitc::OpaqueAttr::get(ctx, satTok));
-
-    SmallVector<Value, 4> operands{dst, src, rmodeVal, satModeVal};
+    SmallVector<Value, 4> operands{dst, src, rmodeVal};
+    if (satAttr) {
+      auto satModeTy = emitc::OpaqueType::get(ctx, "SaturationMode");
+      Value satModeVal = rewriter.create<emitc::ConstantOp>(
+          loc, satModeTy,
+          emitc::OpaqueAttr::get(ctx, saturationModeTok(satAttr)));
+      operands.push_back(satModeVal);
+    }
 
     rewriter.create<emitc::CallOpaqueOp>(
         loc, TypeRange{}, "TCVT",

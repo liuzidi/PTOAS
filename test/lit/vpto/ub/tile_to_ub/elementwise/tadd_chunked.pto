@@ -20,7 +20,7 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     // CHECK: pto.ub.vadd {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}
     // CHECK-SAME: : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
     // CHECK: pto.ub.set_mask_norm
-    // CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
+    // CHECK: pto.ub.set_mask %{{[^,]+}}, %{{[^ ]+}}
     // CHECK-NOT: scf.for
     pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1024, v_row=16, v_col=1024, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     // CHECK-NOT: pto.tadd

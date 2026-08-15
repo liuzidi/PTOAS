@@ -10,6 +10,7 @@
 #include "PTO/IR/PTOTypeUtils.h"
 #include "PTO/Support/PythonExecutable.h"
 #include "PTO/Transforms/Passes.h"
+#include "PTO/Transforms/TileShapeStateAnalysis.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -60,6 +61,10 @@ struct CandidateMetadata {
   int64_t loopDepth;
   bool postUpdate;
   bool tail;
+  SmallVector<std::string, 4> tags;
+  std::optional<std::string> resourceScope;
+  std::optional<int64_t> resourceVectorValues;
+  bool resourceChunkStreaming = false;
 };
 
 static std::string getDtypeString(Type elementType) {
@@ -195,6 +200,33 @@ static bool getStaticIntFromValue(Value value, int64_t &out) {
   if (auto constant = value.getDefiningOp<arith::ConstantIntOp>()) {
     out = constant.value();
     return true;
+  }
+  if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(add.getLhs(), lhs) &&
+        getStaticIntFromValue(add.getRhs(), rhs)) {
+      out = lhs + rhs;
+      return true;
+    }
+  }
+  if (auto sub = value.getDefiningOp<arith::SubIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(sub.getLhs(), lhs) &&
+        getStaticIntFromValue(sub.getRhs(), rhs)) {
+      out = lhs - rhs;
+      return true;
+    }
+  }
+  if (auto mul = value.getDefiningOp<arith::MulIOp>()) {
+    int64_t lhs = ShapedType::kDynamic;
+    int64_t rhs = ShapedType::kDynamic;
+    if (getStaticIntFromValue(mul.getLhs(), lhs) &&
+        getStaticIntFromValue(mul.getRhs(), rhs)) {
+      out = lhs * rhs;
+      return true;
+    }
   }
   return false;
 }
@@ -408,6 +440,14 @@ static std::optional<std::string> getTCvtRoundModeString(pto::TCvtOp op) {
   return std::nullopt;
 }
 
+static std::string getTCvtSaturationModeString(pto::TCvtOp op) {
+  auto explicitMode =
+      op->getAttrOfType<pto::SaturationModeAttr>("sat_mode");
+  if (!explicitMode)
+    return "DEFAULT";
+  return stringifySaturationMode(explicitMode.getValue()).str();
+}
+
 static StringRef getPrecisionTypeString(pto::DivPrecision precision) {
   switch (precision) {
   case pto::DivPrecision::Default:
@@ -484,6 +524,7 @@ static void appendOpContextAttrs(
   if (auto tcvt = dyn_cast<pto::TCvtOp>(op)) {
     if (auto roundMode = getTCvtRoundModeString(tcvt))
       attrs.emplace_back("round_mode", *roundMode);
+    attrs.emplace_back("sat_mode", getTCvtSaturationModeString(tcvt));
   }
   if (auto trandom = dyn_cast<pto::TRandomOp>(op))
     attrs.emplace_back("rounds", std::to_string(trandom.getRounds()));
@@ -545,15 +586,27 @@ static std::string buildContextAttrsJson(Operation *operation) {
   return json;
 }
 
-static void appendTileOperandSpecJson(std::string &json,
-                                      pto::TileBufType tileType) {
+static void appendTileOperandSpecJson(std::string &json, Value operand,
+                                      pto::TileBufType tileType,
+                                      Operation *useOp = nullptr) {
   std::string dtype = getDtypeString(tileType.getElementType());
   json += "{\"kind\":\"tile\",\"dtype\":\"" + dtype + "\",\"shape\":";
   appendJsonIntArray(json, tileType.getShape());
   json += ",\"valid_shape\":";
   auto validShape = tileType.getValidShape();
-  appendJsonIntArray(json, validShape.empty() ? tileType.getShape()
-                                              : validShape);
+  SmallVector<int64_t, 2> resolvedValidShape;
+  if (validShape.empty()) {
+    resolvedValidShape.assign(tileType.getShape().begin(),
+                              tileType.getShape().end());
+  } else {
+    resolvedValidShape.assign(validShape.begin(), validShape.end());
+  }
+  if (llvm::any_of(resolvedValidShape, ShapedType::isDynamic)) {
+    SmallVector<int64_t, 2> producerValidShape;
+    if (pto::resolveStaticTileValidShape(operand, producerValidShape, useOp))
+      resolvedValidShape = std::move(producerValidShape);
+  }
+  appendJsonDimArray(json, resolvedValidShape);
   json += ",\"memory_space\":\"";
   json += getMemorySpaceString(tileType);
 
@@ -663,7 +716,7 @@ buildOperandSpecsJson(Operation *operation) {
             "InsertTemplateAttributes encountered an unsupported tile dtype");
         return std::nullopt;
       }
-      appendTileOperandSpecJson(json, tileType);
+      appendTileOperandSpecJson(json, operand, tileType, operation);
       continue;
     }
 
@@ -709,6 +762,24 @@ buildOperandSpecsJson(Operation *operation) {
   }
   json += "]";
   return json;
+}
+
+static bool hasPipeTypedValue(Operation *operation) {
+  for (Type type : operation->getOperandTypes()) {
+    if (isa<pto::PipeType>(type))
+      return true;
+  }
+  for (Type type : operation->getResultTypes()) {
+    if (isa<pto::PipeType>(type))
+      return true;
+  }
+  return false;
+}
+
+static bool shouldSkipTemplateMetadata(Operation *operation) {
+  if (isa<pto::TGetValOp, pto::TSetValOp>(operation))
+    return true;
+  return hasPipeTypedValue(operation);
 }
 
 static std::optional<std::string>
@@ -779,6 +850,7 @@ invokeMetadataHelper(Operation *operation, StringRef pythonExe,
       "--op",            opName,          "--operand-specs",
       *operandSpecs,
   };
+  args.push_back("--include-vmi-candidates");
   if (contextAttrs != "{}") {
     args.push_back("--context-attrs");
     args.push_back(contextAttrs);
@@ -865,7 +937,7 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
     return failure();
   }
 
-  SmallVector<CandidateMetadata> parsedCandidates;
+  SmallVector<CandidateMetadata, 2> parsedCandidates;
   parsedCandidates.reserve(candidates->size());
   for (const auto &entry : *candidates) {
     auto *metadata = entry.second.getAsObject();
@@ -893,12 +965,46 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
       return failure();
     }
 
+    SmallVector<std::string, 4> tags;
+    if (auto *tagArray = metadata->getArray("tags")) {
+      for (const auto &tagValue : *tagArray) {
+        if (auto tag = tagValue.getAsString())
+          tags.push_back(tag->str());
+      }
+    }
+
+    std::optional<std::string> resourceScope;
+    if (auto scope = metadata->getString("resource_scope"))
+      resourceScope = scope->str();
+    std::optional<int64_t> resourceVectorValues;
+    if (auto count = metadata->getInteger("resource_vector_values"))
+      resourceVectorValues = *count;
+    const bool resourceChunkStreaming =
+        metadata->getBoolean("resource_chunk_streaming").value_or(false);
+    if (resourceScope && *resourceScope != "row" &&
+        *resourceScope != "tile") {
+      operation->emitError("InsertTemplateAttributes candidate has invalid "
+                           "resource_scope '")
+          << *resourceScope << "'";
+      return failure();
+    }
+    if (resourceVectorValues && *resourceVectorValues <= 0) {
+      operation->emitError(
+          "InsertTemplateAttributes candidate resource_vector_values must "
+          "be greater than zero");
+      return failure();
+    }
+
     parsedCandidates.push_back(CandidateMetadata{
         id.value_or(0),
         name->str(),
         *loopDepth,
         *postUpdate,
         *tail,
+        std::move(tags),
+        std::move(resourceScope),
+        resourceVectorValues,
+        resourceChunkStreaming,
     });
   }
 
@@ -921,21 +1027,36 @@ parseCandidateAttributes(Operation *operation, StringRef metadataJson) {
   SmallVector<Attribute> attributes;
   attributes.reserve(parsedCandidates.size());
   for (const CandidateMetadata &candidate : parsedCandidates) {
-    attributes.push_back(DictionaryAttr::get(
-        operation->getContext(),
-        {
-            builder.getNamedAttr("id", builder.getI64IntegerAttr(candidate.id)),
-            builder.getNamedAttr("name",
-                                 builder.getStringAttr(candidate.name)),
-            builder.getNamedAttr(
-                "loop_depth",
-                builder.getI64IntegerAttr(candidate.loopDepth)),
-            builder.getNamedAttr(
-                "postupdate",
-                builder.getI64IntegerAttr(candidate.postUpdate ? 1 : 0)),
-            builder.getNamedAttr(
-                "tail", builder.getI64IntegerAttr(candidate.tail ? 1 : 0)),
-        }));
+    SmallVector<Attribute> tagAttrs;
+    tagAttrs.reserve(candidate.tags.size());
+    for (const std::string &tag : candidate.tags)
+      tagAttrs.push_back(builder.getStringAttr(tag));
+
+    SmallVector<NamedAttribute> candidateAttrs{
+        builder.getNamedAttr("id", builder.getI64IntegerAttr(candidate.id)),
+        builder.getNamedAttr("name", builder.getStringAttr(candidate.name)),
+        builder.getNamedAttr("loop_depth",
+                             builder.getI64IntegerAttr(candidate.loopDepth)),
+        builder.getNamedAttr(
+            "postupdate",
+            builder.getI64IntegerAttr(candidate.postUpdate ? 1 : 0)),
+        builder.getNamedAttr(
+            "tail", builder.getI64IntegerAttr(candidate.tail ? 1 : 0)),
+        builder.getNamedAttr("tags", builder.getArrayAttr(tagAttrs)),
+    };
+    if (candidate.resourceScope)
+      candidateAttrs.push_back(builder.getNamedAttr(
+          "resource_scope", builder.getStringAttr(*candidate.resourceScope)));
+    if (candidate.resourceVectorValues)
+      candidateAttrs.push_back(builder.getNamedAttr(
+          "resource_vector_values",
+          builder.getI64IntegerAttr(*candidate.resourceVectorValues)));
+    if (candidate.resourceScope || candidate.resourceVectorValues)
+      candidateAttrs.push_back(builder.getNamedAttr(
+          "resource_chunk_streaming",
+          builder.getBoolAttr(candidate.resourceChunkStreaming)));
+    attributes.push_back(
+        DictionaryAttr::get(operation->getContext(), candidateAttrs));
   }
   return builder.getArrayAttr(attributes);
 }
@@ -956,6 +1077,8 @@ struct InsertTemplateAttributesPass
     SmallVector<Operation *> tileOperations;
     module.walk([&](Operation *operation) {
       if (isa<pto::TReshapeOp>(operation))
+        return;
+      if (shouldSkipTemplateMetadata(operation))
         return;
       if (isa<pto::OpPipeInterface>(operation))
         tileOperations.push_back(operation);

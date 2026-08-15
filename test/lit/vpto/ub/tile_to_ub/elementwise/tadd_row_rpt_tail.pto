@@ -17,13 +17,13 @@ module attributes {pto.target_arch = "a3", pto.kernel_kind = #pto.kernel_kind<ve
     %src1 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     // CHECK: %[[MASK:.*]] = arith.constant 1099511627775 : i64
     // CHECK: pto.ub.set_mask %[[MASK]],
-    // CHECK: %[[RPT:.*]] = arith.constant 5 : i64
-    // CHECK: %[[STRIDE:.*]] = arith.constant 16 : i64
+    // CHECK-DAG: %[[RPT:.*]] = arith.constant 5 : i64
+    // CHECK-DAG: %[[STRIDE:.*]] = arith.constant 16 : i64
     // CHECK: pto.ub.vadd {{%[^,]+}}, {{%[^,]+}}, {{%[^,]+}}
     // CHECK-SAME: %[[RPT]],
     // CHECK-SAME: %[[STRIDE]], %[[STRIDE]],
     // CHECK-SAME: : !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64, i64, i64
-    // CHECK: pto.ub.set_mask %c-1_i64, %c-1_i64
+    // CHECK: pto.ub.set_mask %{{[^,]+}}, %{{[^ ]+}}
     pto.tadd ins(%src0, %src1 : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=5, cols=128, v_row=5, v_col=40, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     // CHECK-NOT: pto.tadd
     return

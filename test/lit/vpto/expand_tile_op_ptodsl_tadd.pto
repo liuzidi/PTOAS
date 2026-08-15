@@ -7,15 +7,17 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 
 // InsertTemplateAttributes records a compact, ordered candidate list before
-// fusion. ExpandTileOp renders the first candidate that remains.
+// fusion. The unified PTODSL backend exposes both ordinary PTODSL templates and
+// legal VMI candidates to the compiler. SelectTemplateCandidate prefers the
+// VMI candidate for full-shape PIPE_V TileOps; ExpandTileOp only consumes it.
 //
 // Running without --enable-op-fusion proves metadata insertion is not gated
 // by fusion. Printing before FusionPlan proves its position when fusion is on.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-pto-ir --mlir-print-ir-after=pto-insert-template-attributes %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=META
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --pto-level=level2 --enable-op-fusion --emit-pto-ir --mlir-print-ir-before=pto-fusion-plan %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PREFUSION
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SELECT
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=EXPAND
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-pto-ir --mlir-print-ir-after=pto-insert-template-attributes %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=META
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --pto-level=level2 --emit-pto-ir --mlir-print-ir-before=pto-fusion-plan %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PREFUSION
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --mlir-print-ir-after=pto-expand-tile-op %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SELECT
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=EXPAND
 
 // META: pto.tadd
 // META-SAME: candidates = [
@@ -23,22 +25,36 @@
 // META-SAME: loop_depth = 2 : i64
 // META-SAME: name = "template_tadd"
 // META-SAME: postupdate = 0 : i64
+// META-SAME: tags = ["elementwise", "binary"]
+// META-SAME: tail = 0 : i64}
+// META-SAME: id = 1000 : i64
+// META-SAME: loop_depth = 1 : i64
+// META-SAME: name = "vmi_tadd_block64"
+// META-SAME: tags = ["vmi", "fusion_eligible", "single_logical_row_loop"]
 // META-SAME: tail = 0 : i64}]
-// META-NOT: priority =
-// META-NOT: tags =
-// META-NOT: fusible =
 
 // PREFUSION: IR Dump Before FusionPlan
 // PREFUSION: pto.tadd
 // PREFUSION-SAME: candidates = [
 
-// SELECT: func.func {{.*}}@{{.*}}__template_tadd
+// SELECT: call @{{.*}}__vmi_tadd_block64
+// SELECT-SAME: pto.tilelib.candidate = "vmi_tadd_block64"
+// SELECT-SAME: pto.tilelib.impl = "vmi"
+// SELECT: func.func private @{{.*}}__vmi_tadd_block64
+// SELECT: pto.vmi.vload
+// SELECT: pto.vmi.vadd
+// SELECT: pto.vmi.vstore
 
 // EXPAND: func.func @TADD
 // EXPAND-NOT: pto.tadd ins
 // EXPAND: pto.vecscope
 // EXPAND: pto.vadd
 // EXPAND: pto.vsts
+// EXPAND: pto.tilelib.candidate = "vmi_tadd_block64"
+// EXPAND: pto.tilelib.impl = "vmi"
+
+// This full-row shape selects VMI. Sub-VL and tail forms remain ordinary
+// PTODSL fallback until their physical access and mask contract is A5-proven.
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TADD() {

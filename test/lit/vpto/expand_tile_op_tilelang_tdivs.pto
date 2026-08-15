@@ -3,31 +3,33 @@
 // IMPORTANT: Do NOT use --enable-tile-op-expand for ops with scalar operands.
 // TDIVS has a scalar operand (f32), so it uses the PTOToVPTO lowering path.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-TILE-SCALAR --check-prefix=CHECK-SCALAR-TILE
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s --check-prefix=CHECK-TILE-SCALAR --check-prefix=CHECK-SCALAR-TILE
 
 // tile / scalar form:
 // CHECK-TILE-SCALAR-LABEL: func.func @TDIVS_TILE_SCALAR
 // CHECK-TILE-SCALAR-NOT: pto.tdivs ins
 // CHECK-TILE-SCALAR: pto.vecscope
 // CHECK-TILE-SCALAR: pto.castptr
-// CHECK-TILE-SCALAR: %[[MASK:.+]], %[[SCALAR_OUT:.+]] = pto.plt_b32
-// CHECK-TILE-SCALAR: %[[BR:.+]] = pto.vbr
+// CHECK-TILE-SCALAR: %[[MASK:.+]] = pto.pset_b32
+// CHECK-TILE-SCALAR: %[[BR:.+]] = pto.vdup
 // CHECK-TILE-SCALAR: scf.for
 // CHECK-TILE-SCALAR: %[[LD:.+]] = pto.vlds
 // CHECK-TILE-SCALAR: %[[DIV:.+]] = pto.vdiv %[[LD]], %[[BR]], %[[MASK]]
 // CHECK-TILE-SCALAR: pto.vsts %[[DIV]]
+// CHECK-TILE-SCALAR: pto.tilelib.candidate = "vmi_tdivs"
 
 // scalar / tile form:
 // CHECK-SCALAR-TILE-LABEL: func.func @TDIVS_SCALAR_TILE
 // CHECK-SCALAR-TILE-NOT: pto.tdivs ins
 // CHECK-SCALAR-TILE: pto.vecscope
 // CHECK-SCALAR-TILE: pto.castptr
-// CHECK-SCALAR-TILE: %[[MASK:.+]], %[[SCALAR_OUT:.+]] = pto.plt_b32
-// CHECK-SCALAR-TILE: %[[BR:.+]] = pto.vbr
+// CHECK-SCALAR-TILE: %[[MASK:.+]] = pto.pset_b32
+// CHECK-SCALAR-TILE: %[[BR:.+]] = pto.vdup
 // CHECK-SCALAR-TILE: scf.for
 // CHECK-SCALAR-TILE: %[[LD:.+]] = pto.vlds
 // CHECK-SCALAR-TILE: %[[DIV:.+]] = pto.vdiv %[[BR]], %[[LD]], %[[MASK]]
 // CHECK-SCALAR-TILE: pto.vsts %[[DIV]]
+// CHECK-SCALAR-TILE: pto.tilelib.candidate = "vmi_tdivs_scalar_tile"
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TDIVS_TILE_SCALAR() {

@@ -421,7 +421,8 @@ static void applyShapeConstraintsForNode(
     const FusionComputeNode &node) {
   const FusionOpSemantics &semantics = node.semantics;
   switch (semantics.computeFamily) {
-  case FusionComputeFamily::Elementwise: {
+  case FusionComputeFamily::Elementwise:
+  case FusionComputeFamily::Convert: {
     SmallVector<Value, 6> values;
     values.append(semantics.tileInputs.begin(), semantics.tileInputs.end());
     values.append(semantics.tileOutputs.begin(), semantics.tileOutputs.end());
@@ -456,6 +457,36 @@ static void applyShapeConstraintsForNode(
       mergeShapes(solver, output,
                   getValueDims(solver, dimsByValue, symbolDimByValue,
                                canonicalByValue, signatureMap, extraOutput));
+    return;
+  }
+  case FusionComputeFamily::ColBroadcastBinary: {
+    // Col-expand (tcolexpandsub/add/mul/div): reads [1,cols] col_values and
+    // [rows,cols] src, writes [rows,cols]. Merge src and output fully (they
+    // share the [R,C] iteration domain), but constrain col_values to
+    // [1,cols] only: its cols equal the output cols (broadcast across rows),
+    // and its rows is fixed to 1. Forcing col_values.rows into the same
+    // equivalence class as src/output rows would over-constrain R == 1 and
+    // produce a spurious InconsistentShape for any static R > 1 (mirrors the
+    // RowBroadcastBinary treatment of the [rows,1] broadcast operand below).
+    if (semantics.tileOutputs.empty())
+      return;
+    ShapeValueDims output = getValueDims(
+        solver, dimsByValue, symbolDimByValue, canonicalByValue, signatureMap,
+        semantics.tileOutputs.front());
+    if (!semantics.tileInputs.empty()) {
+      mergeShapes(solver,
+                  getValueDims(solver, dimsByValue, symbolDimByValue,
+                               canonicalByValue, signatureMap,
+                               semantics.tileInputs[0]),
+                  output);
+      if (semantics.tileInputs.size() >= 2) {
+        ShapeValueDims colInput = getValueDims(
+            solver, dimsByValue, symbolDimByValue, canonicalByValue,
+            signatureMap, semantics.tileInputs[1]);
+        mergeCols(solver, colInput, output);
+        solver.bindConstant(colInput.rows, 1);
+      }
+    }
     return;
   }
   case FusionComputeFamily::ReduceRow:
@@ -497,8 +528,10 @@ static ShapeValueDims getIterationDomainDimsForNode(
   const FusionOpSemantics &semantics = node.semantics;
   switch (semantics.computeFamily) {
   case FusionComputeFamily::Elementwise:
+  case FusionComputeFamily::Convert:
   case FusionComputeFamily::ScalarExpand:
   case FusionComputeFamily::RowBroadcastBinary:
+  case FusionComputeFamily::ColBroadcastBinary:
     if (!semantics.tileOutputs.empty())
       return getValueDims(solver, dimsByValue, symbolDimByValue,
                           canonicalByValue, signatureMap,
@@ -657,7 +690,8 @@ inferConsensusIterationDomain(ArrayRef<Value> anchorValues) {
 static IterationDomainInfo
 inferIterationDomainInfo(const FusionOpSemantics &semantics) {
   switch (semantics.computeFamily) {
-  case FusionComputeFamily::Elementwise: {
+  case FusionComputeFamily::Elementwise:
+  case FusionComputeFamily::Convert: {
     SmallVector<Value, 6> anchors;
     anchors.append(semantics.tileInputs.begin(), semantics.tileInputs.end());
     anchors.append(semantics.tileOutputs.begin(), semantics.tileOutputs.end());
@@ -665,6 +699,7 @@ inferIterationDomainInfo(const FusionOpSemantics &semantics) {
   }
   case FusionComputeFamily::ScalarExpand:
   case FusionComputeFamily::RowBroadcastBinary:
+  case FusionComputeFamily::ColBroadcastBinary:
     return inferConsensusIterationDomain(semantics.tileOutputs);
   case FusionComputeFamily::ReduceRow:
   case FusionComputeFamily::ReduceCol:

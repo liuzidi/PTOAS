@@ -41,6 +41,8 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kVmiFusionBoundaryAttr =
+    "pto.vmi.fusion.boundary";
 
 struct PlannedFusionGroup {
   SmallVector<const pto::FusionComputeNode *, 8> members;
@@ -72,11 +74,15 @@ static bool isCurrentlyPlannableOp(StringRef opName) {
   return llvm::StringSwitch<bool>(opName)
       .Cases("tmul", "tdiv", "tadd", "tsub", "tmax", "tmin", true)
       .Cases("tmuls", "tdivs", "tadds", "tsubs", "tmaxs", "tmins", true)
-      .Case("texp", true)
+      .Cases("texp", "tabs", "tneg", "trecip", "tsqrt", "trsqrt", true)
+      .Case("tmov", true)
       .Case("texpands", true)
       .Cases("trowexpandsub", "trowexpandmul", "trowexpanddiv", true)
+      .Cases("tcolexpandsub", "tcolexpandadd", "tcolexpandmul", "tcolexpanddiv",
+             true)
       .Cases("trowsum", "trowmax", "trowmin", true)
       .Cases("tcolsum", "tcolmax", "tcolmin", true)
+      .Case("tcvt", true)
       .Default(false);
 }
 
@@ -167,13 +173,40 @@ static void assignStableGroupMetadata(ArrayRef<PlannedFusionGroup> groups,
     const int64_t groupId = nextGroupId++;
     SmallVector<const pto::FusionComputeNode *, 8> stableOrder =
         buildStableInGroupOrder(group->members);
-    for (auto [order, node] : llvm::enumerate(stableOrder)) {
-      node->op->setAttr(kFusionGroupIdAttr,
-                        IntegerAttr::get(IntegerType::get(ctx, 64), groupId));
-      node->op->setAttr(
-          kFusionOrderAttr,
-          IntegerAttr::get(IntegerType::get(ctx, 64),
-                           static_cast<int64_t>(order)));
+    DenseSet<Operation *> memberOps;
+    for (const pto::FusionComputeNode *node : stableOrder)
+      memberOps.insert(node->op);
+
+    // Local fallbacks and structural scaffold are part of the same loose
+    // FusionRegion, but are not VMI compute nodes. Give them ordering metadata
+    // when they sit between selected compute members so RegionGen preserves
+    // their SSA definitions in the contiguous span. PTOVmiLoopFusion still
+    // stops at a non-VMI fallback loop.
+    Operation *first = stableOrder.front()->op;
+    Operation *last = stableOrder.back()->op;
+    int64_t order = 0;
+    for (Operation *op = first; op; op = op->getNextNode()) {
+      bool include = memberOps.contains(op);
+      if (!include)
+        include = pto::isFusionTransparentScaffold(op);
+      if (!include) {
+        FailureOr<pto::FusionOpSemantics> semanticsOr =
+            pto::getFusionOpSemantics(op);
+        include = succeeded(semanticsOr) &&
+                  semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
+                  op->hasAttr(kVmiFusionBoundaryAttr);
+      }
+      if (!include) {
+        if (op == last)
+          break;
+        continue;
+      }
+      op->setAttr(kFusionGroupIdAttr,
+                  IntegerAttr::get(IntegerType::get(ctx, 64), groupId));
+      op->setAttr(kFusionOrderAttr,
+                  IntegerAttr::get(IntegerType::get(ctx, 64), order++));
+      if (op == last)
+        break;
     }
   }
 }
@@ -517,6 +550,98 @@ public:
   }
 };
 
+// VMI F3-adjacency strategy: every plannable compute node (already filtered
+// into computeNodes by PreFusionAnalysis via getFusionOpSemantics' whitelist)
+// is wrapped into a loose fusion group. Pure alloc_tile resource declarations
+// and tile subviews are transparent: PTOOpScheduling can move compute members
+// across them before RegionGen builds a contiguous span. Hard non-plannable ops
+// (tload/tstore DMA, wait_flag/mem_bar sync, any other unknown op) close the
+// group. A local
+// fallback remains in the same loose group, but is not a compute node and
+// therefore still stops downstream VMI loop fusion.
+//
+// This layer does NOT do UB-overlap (MustAlias/NoAlias/partial-alias)
+// checking, unlike the deleted PTOPlanVmiFusionRegion pass. At this
+// tile-native PTO IR layer a tile_buf is a single SSA value with one fixed
+// type, so partial-alias (same address, different type) cannot arise — it
+// only becomes possible after PlanMemory binds addresses, which is
+// downstream of this pass. The reduce-final "stuck" case (a ColReduce whose
+// result is read by a later elementwise loop — a producer/consumer
+// dependency that loop-fusion refuses to fold into one iteration even though
+// the two nodes share a region) is deliberately handled downstream by
+// PTOVmiLoopFusion, which can see the scf.for-level SSA/UB def-use that this
+// compute-node layer cannot. A fusion_region assigned here is a container,
+// not a fusion mandate: same group does not force the inner scf.for ops to
+// fuse.
+//
+// Unlike the Conservative* engines this one ignores iteration-domain class,
+// direct dependency, and cost. Single-node groups are kept (not dropped) so
+// every plannable compute TileOp gets a fusion_region.
+class VMIUBDisjointStrategyEngine final : public StrategyEngine {
+public:
+  SmallVector<PlannedFusionGroup, 8>
+  planBlock(const PlanningContext &ctx,
+            const CostModel &costModel) const override {
+    const pto::FusionBlockAnalysis &block = ctx.blockAnalysis;
+    if (block.computeNodes.empty())
+      return {};
+
+    // Map node id -> whether a real hard boundary precedes it in block order.
+    // Structural allocation/view scaffold and pure scalar/index plumbing are
+    // transparent and are later annotated into the loose region. A local
+    // fallback also stays in the loose group, but stops downstream loop fusion.
+    DenseMap<unsigned, bool> precededByNonPlannable;
+    DenseMap<Operation *, unsigned> nodeIdByOp;
+    for (const pto::FusionComputeNode &n : block.computeNodes)
+      nodeIdByOp[n.op] = n.id;
+    bool sawCompute = false;
+    bool hardBoundarySinceCompute = false;
+    for (Operation &op : *block.block) {
+      auto it = nodeIdByOp.find(&op);
+      if (it != nodeIdByOp.end()) {
+        precededByNonPlannable[it->second] =
+            sawCompute && hardBoundarySinceCompute;
+        sawCompute = true;
+        hardBoundarySinceCompute = false;
+        continue;
+      }
+      if (pto::isFusionTransparentScaffold(&op))
+        continue;
+      FailureOr<pto::FusionOpSemantics> semanticsOr =
+          pto::getFusionOpSemantics(&op);
+      if (failed(semanticsOr) ||
+          semanticsOr->kind == pto::FusionOpKind::HardBoundary ||
+          (semanticsOr->kind == pto::FusionOpKind::LocalBoundary &&
+           !op.hasAttr(kVmiFusionBoundaryAttr)))
+        hardBoundarySinceCompute = true;
+    }
+
+    SmallVector<PlannedFusionGroup, 8> groups;
+    SmallVector<const pto::FusionComputeNode *, 8> curMembers;
+    auto flushCurrent = [&]() {
+      if (curMembers.empty())
+        return;
+      PlannedFusionGroup group;
+      group.members = buildStableInGroupOrder(curMembers);
+      groups.push_back(std::move(group));
+      curMembers.clear();
+    };
+
+    for (const pto::FusionComputeNode &node : block.computeNodes) {
+      // F3 boundary: a real non-plannable op sits between the previous
+      // plannable node and this one. Transparent scaffold was filtered above,
+      // so this closes the group for sync/DMA/call/unknown PTO operations.
+      auto precIt = precededByNonPlannable.find(node.id);
+      if (precIt != precededByNonPlannable.end() && precIt->second)
+        flushCurrent();
+
+      curMembers.push_back(&node);
+    }
+    flushCurrent();
+    return groups;
+  }
+};
+
 static void clearPlanningAttrs(func::FuncOp func) {
   func.walk([](Operation *op) {
     op->removeAttr(kFusionGroupIdAttr);
@@ -558,12 +683,36 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
     MLIRContext *ctx = &getContext();
     int64_t nextGroupId = 0;
     ConservativeDAGGreedyCostModel costModel;
-    ConservativeDAGGreedyStrategyEngine strategyEngine;
+    // Strategy selection. Only these two enumerated values are accepted; any
+    // other string (including typos) fails the pass instead of silently
+    // falling back, so a misconfigured --fusion-strategy cannot quietly change
+    // compilation behavior. The legacy a5 path uses ConservativeDAGGreedy; the
+    // VMI path uses VMIUBDisjoint, which groups plannable compute nodes by
+    // F3 adjacency (a non-plannable op between two plannable nodes closes the
+    // group) and keeps single-node groups so every compute TileOp gets a
+    // fusion_region. It does NOT judge UB disjointness, DFG dependency,
+    // iteration-domain class, or cost here — the resulting fusion_region is a
+    // *container* for downstream VMI analysis, not a proof that its inner
+    // scf.for loops can be fused (that is PTOVmiLoopFusion's job).
+    std::unique_ptr<StrategyEngine> strategyEngine;
+    const std::string strategyVal = strategy.getValue();
+    if (strategyVal == "conservative-dag-greedy")
+      strategyEngine =
+          std::make_unique<ConservativeDAGGreedyStrategyEngine>();
+    else if (strategyVal == "vmi-ub-disjoint")
+      strategyEngine = std::make_unique<VMIUBDisjointStrategyEngine>();
+    else {
+      emitError(getOperation()->getLoc())
+          << "unknown pto-fusion-plan --fusion-strategy='" << strategyVal
+          << "'; expected 'conservative-dag-greedy' or 'vmi-ub-disjoint'";
+      signalPassFailure();
+      return;
+    }
 
     for (const pto::FusionBlockAnalysis &blockAnalysis : analysis.blocks) {
       PlanningContext planningCtx{blockAnalysis};
       SmallVector<PlannedFusionGroup, 8> groups =
-          strategyEngine.planBlock(planningCtx, costModel);
+          strategyEngine->planBlock(planningCtx, costModel);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
     }
 

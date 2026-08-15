@@ -19,10 +19,11 @@
 // CHECK: func.func @TFILLPAD
 // CHECK-NOT: pto.tfillpad ins
 // CHECK: pto.vecscope
+// CHECK: pto.vdup
 // CHECK: pto.castptr
-// CHECK-DAG: pto.vdup
-// CHECK-DAG: pto.vlds
-// CHECK-DAG: pto.vsts
+// CHECK: pto.vlds
+// CHECK: pto.vsel
+// CHECK: pto.vsts
 // Note: vstus is not supported in TileLang DSL v1, so padding uses vsts instead
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
