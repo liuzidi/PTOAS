@@ -6,8 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Guards the level3 backend fusion lifecycle through loop fusion, predicate
-// elision, load/store elision, and final region flattening.
+// Guards the legacy level3 VPTO fusion lifecycle.
 //
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level3 --enable-op-fusion --emit-vpto %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLF
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level3 --enable-op-fusion --emit-vpto %s --mlir-print-ir-after=pto-fusion-predicate-elision -o /dev/null 2>&1 | FileCheck %s --check-prefix=PRED
@@ -78,8 +77,6 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // PRED: %[[REGION:.*]] = pto.fusion_region {
 // PRED: scf.for
 // PRED: pto.plt_b32
-// PRED: pto.vadd
-// PRED: pto.vsts
 // PRED: pto.vlds
 // PRED: pto.vlds
 // PRED: pto.vadd
@@ -87,18 +84,26 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // PRED: pto.vlds
 // PRED: pto.vlds
 // PRED: pto.vadd
+// PRED: pto.vsts
+// PRED: pto.vlds
+// PRED: pto.vlds
+// PRED: pto.vadd
+// PRED: pto.vsts
 // PRED: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x32xf32>) -> ()
 // PRED: pto.mte_ub_gm
 
 // LS: // -----// IR Dump After PTOFusionLoadStoreElision (pto-fusion-load-store-elision) //----- //
 // LS-LABEL: func.func @fusion_backend_lifecycle_level3(
 // LS: %[[REGION:.*]] = pto.fusion_region {
+// LS: pto.vlds
+// LS: pto.vlds
 // LS: pto.vadd
 // LS-NOT: pto.vsts
 // LS: pto.vlds
 // LS: pto.vlds
 // LS: pto.vadd
 // LS-NOT: pto.vsts
+// LS-NOT: pto.vlds
 // LS: pto.vadd
 // LS: pto.vsts
 // LS: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x32xf32>) -> ()
@@ -116,6 +121,7 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // FLAT: pto.vlds
 // FLAT: pto.vadd
 // FLAT-NOT: pto.vsts
+// FLAT-NOT: pto.vlds
 // FLAT: pto.vadd
 // FLAT: pto.vsts
 // FLAT: }
