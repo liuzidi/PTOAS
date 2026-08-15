@@ -94,6 +94,8 @@ LogicalResult validateIntToPtrUses(func::FuncOp func);
 std::unique_ptr<Pass> createPTOUnrollSIMTForPass();
 std::unique_ptr<Pass> createPTONarrowVPTOLoopCountersPass();
 std::unique_ptr<Pass> createPTOInferVPTOVecScopePass();
+std::unique_ptr<Pass> createPTOInsertVecScopeMemBarPass();
+std::unique_ptr<Pass> createPTOInsertVecScopeMemBarAllPass();
 std::unique_ptr<Pass> createVPTOExpandWrapperOpsPass();
 std::unique_ptr<Pass> createVPTOSoftPostUpdatePass();
 std::unique_ptr<Pass> createPTOVPTOPtrBoundaryPass();
@@ -131,6 +133,9 @@ std::unique_ptr<Pass> createVMIToVPTOPass();
 std::unique_ptr<Pass> createInsertTemplateAttributesPass();
 std::unique_ptr<Pass> createInsertTemplateAttributesPass(
     const InsertTemplateAttributesOptions &options);
+std::unique_ptr<Pass> createSelectTemplateCandidatePass();
+std::unique_ptr<Pass> createSelectTemplateCandidatePass(
+    const SelectTemplateCandidateOptions &options);
 std::unique_ptr<Pass> createExpandTileOpPass();
 std::unique_ptr<Pass> createExpandTileOpPass(const ExpandTileOpOptions &options);
 std::unique_ptr<Pass> createFoldTileBufIntrinsicsPass();
@@ -139,6 +144,8 @@ std::unique_ptr<Pass> createPTOCanonicalizeIRPass();
 std::unique_ptr<Pass> createLowerPTOToUBufOpsPass();
 std::unique_ptr<Pass>
 createPTOInlineLibCallPass(const PTOInlineLibCallOptions &options = {});
+std::unique_ptr<Pass> createPTOVmiLoopFusionPass();
+std::unique_ptr<Pass> createPTOVmiLoadStoreElisionPass();
 std::unique_ptr<Pass> createPTOInlineBackendHelpersPass(
     const PTOInlineBackendHelpersOptions &options = {});
 void registerPTOViewToMemrefPass();

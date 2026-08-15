@@ -280,7 +280,19 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
            "iteration-domain inference.  Only FusionPlan consumes this option; "
            "FusionRegionGen consumes only the shared pre-fusion dataflow graph "
            "(cached by the analysis manager) and never consults iteration-domain "
-           "classes, so it does not need the option.">
+           "classes, so it does not need the option.">,
+    Option<"strategy", "fusion-strategy",
+           "std::string", /*default=*/"\"conservative-dag-greedy\"",
+           "Fusion strategy: 'conservative-dag-greedy' (default, legacy a5) "
+           "or 'vmi-ub-disjoint' (VMI path). Any other value fails the pass "
+           "rather than silently falling back. 'vmi-ub-disjoint' groups "
+           "plannable compute nodes by F3 adjacency only (a non-plannable op "
+           "between two plannable nodes closes the group) and keeps "
+           "single-node groups so every compute TileOp gets a "
+           "fusion_region. It does NOT judge UB disjointness, DFG dependency, "
+           "iteration-domain class, or cost here: the resulting "
+           "fusion_region is a *container* for downstream VMI analysis, not a "
+           "proof that its inner scf.for loops can be fused.">
   ];
 }
 
@@ -513,8 +525,8 @@ def InsertTemplateAttributes
   let description = [{
     Queries the PTODSL TileLib daemon for legal template candidates and stores
     the compact candidate list on each tile operation as the `candidates`
-    attribute. Each candidate contains only id, name, loop_depth, postupdate,
-    and tail metadata.
+    attribute. Each candidate contains id, name, loop_depth, postupdate, tail,
+    and tags metadata.
   }];
   let constructor = "mlir::pto::createInsertTemplateAttributesPass()";
   let dependentDialects = [
@@ -537,14 +549,40 @@ def InsertTemplateAttributes
   ];
 }
 
+def SelectTemplateCandidate
+    : Pass<"pto-select-template-candidate", "ModuleOp"> {
+  let summary = "Select one implementation from each tile operation's candidates";
+  let description = [{
+    Applies candidate-selection policy before fusion planning. Hard-boundary
+    operations and candidates never select VMI implementations. For the
+    remaining operations, `prefer-vmi` selects a fusion-eligible VMI
+    implementation when its shape capability and candidate resource contract
+    fit the configured vector-byte budget, then falls back to an ordinary
+    PTODSL implementation.
+    `ordinary-only` excludes VMI implementations. The selected implementation
+    and any VMI fusion boundary are recorded for ExpandTileOp to consume.
+  }];
+  let constructor = "mlir::pto::createSelectTemplateCandidatePass()";
+  let dependentDialects = ["mlir::pto::PTODialect"];
+  let options = [
+    Option<"selectionPolicy", "selection-policy", "std::string",
+           /*default=*/"\"prefer-vmi\"",
+           "Candidate policy: prefer-vmi or ordinary-only">,
+    Option<"maxCandidateVectorBytes", "max-candidate-vector-bytes", "int64_t",
+           /*default=*/"6144",
+           "Maximum estimated peak vector bytes for one VMI candidate; zero disables the resource guard">,
+    Option<"emitResourceRemarks", "emit-resource-remarks", "bool",
+           /*default=*/"false",
+           "Emit candidate resource selection and fallback remarks">
+  ];
+}
+
 def ExpandTileOp : Pass<"pto-expand-tile-op", "ModuleOp"> {
-  let summary = "Expand tile ops into calls to TileLib template functions";
+  let summary = "Expand tile ops using the selected TileLib implementation";
   let description = [{
     Expands tile-level operations (pto.tadd, pto.tsub, etc.) by invoking the
-    selected Python TileLib backend to instantiate template libraries. The
-    generated template functions use tile_buf parameters and contain
-    vector-level implementations (pto.vecscope, pto.vlds, pto.vadd,
-    pto.vsts, etc.).
+    selected Python TileLib backend. For PTODSL, this pass consumes the result
+    recorded by SelectTemplateCandidate and does not apply selection policy.
 
     Each tile op is replaced by a func.call to the generated template function,
     with tile_buf operands passed directly (no type bridging).
@@ -689,6 +727,77 @@ def PTOInlineLibCall : Pass<"pto-inline-libcall", "ModuleOp"> {
       "debug", "debug", "bool",
       /*default=*/"false",
       "Enable verbose debug logging for OP-Lib instantiation/inlining">];
+}
+
+def PTOVmiLoopFusion : Pass<"pto-vmi-loop-fusion", "ModuleOp"> {
+  let summary = "Fuse same-header scf.for loops inside each pto.fusion_region";
+  let description = [{
+    Runs after `PTOFusionRegionGen` has wrapped compute TileOps into
+    `pto.fusion_region` regions (and before `VMILowerUnifiedToLegacy`).
+    Adjacent `scf.for` ops with structurally identical headers (same
+    lower/upper bound, step, and semantic attributes, including constant
+    offsets)
+    are merged into one fused loop: each original loop's region iter-args
+    (reduce carry) and body operations are concatenated in source order, and the
+    fused `scf.yield` concatenates the original yield operands mapped through the
+    fused loop's iter-args. The fused loop is built with a body-builder callback
+    so the yield is constructed in place. Whether two for's fuse is decided by
+    whether the ops between them can be legally relocated after fusion: hoisted
+    above the fused for (loop-invariant) or sunk below it. Between-ops form
+    dependency-connected components (SSA def-use or same-UB store->load); each
+    moves as a whole. A component that can neither hoist nor sink blocks fusion.
+    The pass operates only inside `pto.fusion_region` regions; IR outside
+    regions is untouched. It does not perform mem2reg (UB roundtrip elimination)
+    and does not build `pto.vecscope`. This replaces the legacy a5
+    `PTOLowLevelLoopFusion` for the ptodsl-vmi path.
+  }];
+  let constructor = "mlir::pto::createPTOVmiLoopFusionPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::arith::ArithDialect"];
+}
+
+def PTOVmiLoadStoreElision : Pass<"pto-vmi-load-store-elision", "func::FuncOp"> {
+  let summary = "Forward and elide fusion-region-local VMI loads/stores";
+  let description = [{
+    Two-pass + lane-interval tracking. Pass 1 forward scans each
+    `pto.fusion_region` (top-level segments between for's + each fused
+    `scf.for` body) building a content-version table and marking forward targets
+    without mutating IR; Pass 2 reverses to replace loads' uses with the
+    recorded source value and erase dead loads/stores (use_empty-guarded). The
+    canonical tracked value is resolved through the `pto.pointer_cast`/
+    `pto.castptr` UB alias chain, decomposing the address into a constant or an
+    affine `addi(muli(%iv, c), b)` key so two accesses with the same affine
+    (iv, baseOffset, coeff) are the same UB. A `pto.vmi.vload` has no mask
+    operand so its read lane set is inferred from its consuming op (mask-free
+    consumers like vcvt => full vreg). `create_mask %N` is a prefix predicate,
+    so lane sets are modeled as prefix intervals [0,N): store->load forward when
+    the store's write set contains the load's read set with no intervening
+    intersecting write; vload->vload dedup when read sets match with no
+    intervening intersecting write; merge-pmode stores only invalidate the lane
+    interval they write (partial overlap marks entries stale but not dead, so a
+    later vload of mixed content correctly does NOT forward — badref guard).
+    Forwarding requires must-alias bases. A store invalidates every may-alias
+    entry; when the bases may alias but do not must-alias, the old entry is only
+    marked stale and is not eligible for overwrite dead-store elimination.
+    Redundant-store elimination additionally requires equivalent original masks
+    and identical pmode attributes; normalized full lane ranges alone do not
+    prove that two `pmode=zero` stores write the same per-lane content.
+    Stores whose UB escapes the region (read by a later mte_ub_gm) are marked
+    non-erasable and preserved. CONTENT vs OBSERVABILITY are tracked separately:
+    a vload is a pure read so it never invalidates a preceding store's content, but
+    a store whose UB a later unknown/affine load MAY alias is marked non-erasable
+    (a later overwrite-DSE must not delete it). This first version primarily
+    forwards consumer loads; producer stores are erased only when the local
+    analysis also proves them dead, so it does not claim complete UB store-load
+    roundtrip removal. Must run after `PTOVmiLoopFusion` + CSE and before
+    `VMILowerUnifiedToLegacy` (which lowers `pto.vmi.vload/vstore` to
+    `pto.vlds/vsts`).
+  }];
+  let constructor = "mlir::pto::createPTOVmiLoadStoreElisionPass()";
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::memref::MemRefDialect"];
 }
 
 def PTOInlineBackendHelpers
@@ -873,12 +982,11 @@ def PTOInferVPTOVecScope
       "Infer missing pto.vecscope regions for VPTO vector operation clusters";
   let description = [{
     Runs near the VPTO emission boundary after VMI physicalization and the
-    existing pre-emission canonicalization, pointer normalization, and
-    wrapper-op expansion, but before VMI LICM and final cleanup. The pass
-    greedily clusters contiguous VPTO vector operations into `pto.vecscope`
-    regions while preserving explicit vector-scope carriers and treating
-    DMA/copy/sync, unresolved calls, terminators, and forbidden operations as
-    boundaries.
+    existing pre-emission canonicalization, before pointer normalization and
+    wrapper-op expansion. The pass greedily clusters contiguous VPTO vector
+    operations into `pto.vecscope` regions while preserving explicit
+    vector-scope carriers and treating DMA/copy/sync, unresolved calls,
+    terminators, and forbidden operations as boundaries.
 
     The inferred `pto.vecscope` form remains resultless. Values whose type is
     `!pto.vreg`, `!pto.mask`, or `!pto.align` must not escape the inferred
@@ -889,6 +997,44 @@ def PTOInferVPTOVecScope
                            "mlir::pto::PTODialect",
                            "mlir::arith::ArithDialect",
                            "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOInsertVecScopeMemBar
+    : Pass<"pto-insert-vecscope-mem-bar", "func::FuncOp"> {
+  let summary = "Insert memory barriers for VPTO vecscope memory hazards";
+  let description = [{
+    Inserts `pto.mem_bar` barriers for analyzable memory hazards between
+    vector UB loads/stores, including dependencies that cross sibling
+    `pto.vecscope` and `pto.strict_vecscope` regions. A read-only analysis
+    phase builds the function-level vector access/hazard schedule;
+    the codegen phase inserts barriers. Statically modelled domains drive
+    insertion on proven non-empty dependence; dynamic loop bounds fall back
+    conservatively.
+    Runs after vecscope inference, before `VPTOPtrNormalize`.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::affine::AffineDialect",
+                           "mlir::memref::MemRefDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOInsertVecScopeMemBarAll
+    : Pass<"pto-insert-vecscope-mem-bar-all", "func::FuncOp"> {
+  let summary = "Insert VV_ALL before every VPTO vecscope memory operation";
+  let description = [{
+    Debug-only mode that bypasses dependence analysis and inserts an independent
+    `pto.mem_bar "VV_ALL"` before every UB-backed vector memory operation in
+    `pto.vecscope` and `pto.strict_vecscope`. Existing barriers are retained;
+    this pass does not perform coverage or redundancy elimination.
+    Runs after vecscope inference, before `VPTOPtrNormalize`.
+  }];
+  let constructor = "mlir::pto::createPTOInsertVecScopeMemBarAllPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::pto::PTODialect",
                            "mlir::scf::SCFDialect"];
 }
 
@@ -1091,8 +1237,9 @@ def VMINormalizeSignlessIntToUnsigned :
 def VMILowerUnifiedToLegacy : Pass<"vmi-lower-unified-to-legacy", "ModuleOp"> {
   let summary = "Lower unified VMI ops to legacy equivalents before layout assignment";
   let description = [{
-    Expands most unified v-prefixed VMI ops into their legacy (mask-less)
-    equivalents so downstream layout and VMIToVPTO passes only see legacy ops.
+    Expands unified v-prefixed VMI ops into legacy equivalents when that
+    preserves their semantics. Ops with a direct physical instruction or no
+    legacy equivalent remain unified for layout assignment and VMIToVPTO.
 
     Ops lowered (Category A–C6):
       A:  vci, vinterpret_cast, vsel, vbrc  →  iota, bitcast, select, broadcast/group_broadcast
@@ -1104,14 +1251,16 @@ def VMILowerUnifiedToLegacy : Pass<"vmi-lower-unified-to-legacy", "ModuleOp"> {
       C2: vcvt        →  legacy extf/truncf/fptosi/sitofp/extsi/extui/trunci
       C3: vload/vstore  →  legacy load/store variants
       C4: pset/pge    →  create_mask/create_group_mask
-      C5: vadds/vmuls/vmaxs/vmins/vshls/vshrs
-          →  broadcast + legacy binary, discarding mask/pmode; vshrs selects
-             shrui for explicit unsigned elements and shrsi otherwise
+      C5: partial-mask vadds/vmuls/vmaxs/vmins and all vshls/vshrs
+          → broadcast + legacy binary; full-mask arithmetic scalar ops are
+             preserved for direct VMIToVPTO lowering; vshrs selects shrui for
+             explicit unsigned elements and shrsi otherwise
       C6: vcadd/vcmax/vcmin  →  legacy reduce variants
 
-    Ops NOT lowered (no legacy equivalent — require direct VMIToVPTO 1:N patterns):
+    Ops preserved for direct VMIToVPTO 1:N lowering:
       plt, vhist, vintlv, vdintlv, vselr,
       vgather, vgatherb, vscatter,
+      full-mask vadds, vmuls, vmaxs, vmins,
       vexpdif, vaxpy, vlrelu, vprelu, vmull, vmula
   }];
   let constructor = "mlir::pto::createVMILowerUnifiedToLegacyPass()";

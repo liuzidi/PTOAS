@@ -420,6 +420,9 @@ static llvm::cl::opt<bool> enableTileOpExpand(
 #ifndef PTOAS_DEFAULT_PTODSL_PKG_PATH
 #define PTOAS_DEFAULT_PTODSL_PKG_PATH ""
 #endif
+#ifndef PTOAS_DEFAULT_PTODSL_PYTHON_EXE
+#define PTOAS_DEFAULT_PTODSL_PYTHON_EXE "python3"
+#endif
 
 static llvm::cl::opt<std::string> tilelangPath(
     "tilelang-path",
@@ -438,6 +441,34 @@ static llvm::cl::opt<std::string> ptodslPkgPath(
     llvm::cl::desc("PYTHONPATH for the ptodsl package "
                    "(default: <source>/ptodsl, baked in at build time)"),
     llvm::cl::init(PTOAS_DEFAULT_PTODSL_PKG_PATH));
+
+static llvm::cl::opt<std::string> ptodslPythonExe(
+    "ptodsl-python-exe",
+    llvm::cl::desc("Python executable matching the PTODSL PTO bindings"),
+    llvm::cl::init(PTOAS_DEFAULT_PTODSL_PYTHON_EXE));
+
+static llvm::cl::opt<bool> enableVMI(
+    "enable-vmi",
+    llvm::cl::desc("Enable the VMI fusion pipeline when combined with an "
+                   "explicit --enable-op-fusion on A5 VPTO level2/level3"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableVMILoopFusion(
+    "enable-vmi-loop-fusion",
+    llvm::cl::desc("Enable VMI loop fusion inside the VMI fusion pipeline"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableVMILoadStoreElision(
+    "enable-vmi-load-store-elision",
+    llvm::cl::desc(
+        "Enable VMI load/store elision inside the VMI fusion pipeline"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> disableBishengVFFusion(
+    "disable-bisheng-vf-fusion",
+    llvm::cl::desc("Disable Bisheng VF, loop-fusion, and load/store "
+                   "elimination for VPTO device compilation"),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<std::string> daemonSocketPath(
     "daemon-socket-path",
@@ -473,7 +504,7 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
   expandOpts.tilelangPath = tilelangPath;
   expandOpts.tilelangPkgPath = tilelangPkgPath;
   expandOpts.pythonExe = resolveTileLibPythonExe();
-  const bool usePTODSLTileLib = tileLibBackend == TileLibBackend::PTODSL;
+  const bool usePTODSLTileLib = tileLibBackend != TileLibBackend::TileLang;
   std::string resolvedPtodslPkgPath = ptodslPkgPath;
 
   if (!hasCLIOption(argc, argv, "--ptodsl-pkg-path")) {
@@ -496,6 +527,8 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
   expandOpts.tileLibPkgPath =
       usePTODSLTileLib ? resolvedPtodslPkgPath
                        : std::string(expandOpts.tilelangPkgPath);
+  if (usePTODSLTileLib)
+    expandOpts.pythonExe = ptodslPythonExe;
 
   // Daemon mode is default (no CLI option needed)
   // Automatically start daemon for instance caching
@@ -570,6 +603,18 @@ static llvm::cl::opt<bool> disableInferLayout(
 static llvm::cl::opt<bool> enableSoftPostUpdate(
     "enable-vpto-soft-postupdate",
     llvm::cl::desc("Enable VPTO soft post-update optimization"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableVecScopeMemBar(
+    "enable-vecscope-mem-bar",
+    llvm::cl::desc("Insert pto.mem_bar for VPTO vecscope memory hazards "
+                   "(default: on)"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableVecScopeMemBarAll(
+    "enable-vecscope-mem-bar-all",
+    llvm::cl::desc("Insert VV_ALL before every UB-backed vector memory "
+                   "operation in vecscope debug mode (default: off)"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> emitAddPtrTrace(
@@ -2682,7 +2727,10 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
          llvm::any_of(module.getOps<emitc::FuncOp>(), hasMultiBlockFunc);
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm);
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionOptimizations,
+                                      bool enableLoopFusion,
+                                      bool enableLoadStoreElision);
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
@@ -2698,6 +2746,14 @@ static void prepareVPTOForEmission(PassManager &pm) {
       pto::createPTOUnrollSIMTForPass());
   kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTOInferVPTOVecScopePass());
+  if (enableVecScopeMemBar)
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarPass());
+  if (enableVecScopeMemBarAll)
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarAllPass());
   kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
   kernelModulePM.addPass(pto::createVPTOPtrCastCleanupPass());
@@ -2706,8 +2762,6 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addNestedPass<func::FuncOp>(
       createVPTOExpandWrapperOpsPass());
   kernelModulePM.addPass(createCSEPass());
-  kernelModulePM.addNestedPass<func::FuncOp>(
-      pto::createPTOInferVPTOVecScopePass());
   if (enableSoftPostUpdate)
     kernelModulePM.addPass(pto::createVPTOSoftPostUpdatePass());
   kernelModulePM.addPass(createLoopInvariantCodeMotionPass());
@@ -2720,14 +2774,12 @@ static void prepareVPTOForEmission(PassManager &pm) {
 
 static void
 lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
-                      const pto::ExpandTileOpOptions &expandOpts) {
+                      const pto::ExpandTileOpOptions &expandOpts,
+                      bool enableLegacyFusionLifecycle) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   auto moduleArchAttr =
       module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
   const bool isA2A3 = moduleArchAttr && isA2A3Arch(moduleArchAttr.getValue());
-  const bool enableA5VPTOPostLoweringFusionLifecycle =
-      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
-
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createLowerPTOToUBufOpsPass());
   if (isA2A3) {
@@ -2742,7 +2794,7 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createFoldTileBufIntrinsicsPass("shape-only"));
-  if (enableA5VPTOPostLoweringFusionLifecycle) {
+  if (enableLegacyFusionLifecycle) {
     kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
     kernelModulePM.addPass(mlir::createCanonicalizerPass());
     kernelModulePM.addPass(mlir::createCSEPass());
@@ -2775,7 +2827,8 @@ buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion,
 
 static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
                                  bool emitHostStub,
-                                 const pto::CANNVersion &cannVersion) {
+                                 const pto::CANNVersion &cannVersion,
+                                 bool useVMIFusionPipeline) {
   if (emitVPTO) {
     result.kind = PTOASCompileResultKind::Text;
     llvm::raw_string_ostream os(result.textOutput);
@@ -2819,6 +2872,8 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.objectEmissionOptions.disableBishengVFFusion =
+      useVMIFusionPipeline || disableBishengVFFusion;
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
@@ -2826,7 +2881,9 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
                                             bool hasTileOpsToExpand,
                                             const pto::ExpandTileOpOptions
-                                                *expandOptions) {
+                                                *expandOptions,
+                                            bool useVMIFusionPipeline,
+                                            bool enableLegacyFusionLifecycle) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   pm.addPass(pto::createVPTOSplitCVModulePass());
@@ -2837,7 +2894,8 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
                       "options.\n";
       return failure();
     }
-    lowerPTOToVPTOBackend(pm, module.get(), *expandOptions);
+    lowerPTOToVPTOBackend(pm, module.get(), *expandOptions,
+                          enableLegacyFusionLifecycle);
   }
   auto &kernelModulePM = pm.nest<ModuleOp>();
   // Inline legal direct calls before VMI layout assignment so private helper
@@ -2847,7 +2905,21 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   // the pipeline can use MLIR's standard Func inliner implementation.
   kernelModulePM.addPass(std::make_unique<ApplySIMTEntryNoInlinePass>());
   kernelModulePM.addPass(createInlinerPass());
-  appendVMISemanticPipeline(kernelModulePM);
+  // VMI semantic/layout/lowering is mandatory for direct VMI input whenever
+  // VMI is enabled or already present. Loop fusion and load/store forwarding
+  // remain opt-in.
+  bool containsVMI = false;
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef().starts_with("pto.vmi.")) {
+      containsVMI = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (enableVMI || containsVMI)
+    appendVMISemanticPipeline(kernelModulePM, useVMIFusionPipeline,
+                              enableVMILoopFusion,
+                              enableVMILoadStoreElision);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -2859,11 +2931,30 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   return success();
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm) {
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionOptimizations,
+                                      bool enableLoopFusion,
+                                      bool enableLoadStoreElision) {
   // Normalize signless integer element types on whitelisted ops to unsigned
   // before any verifier, layout, or lowering pass sees them.
   pm.addNestedPass<func::FuncOp>(
       pto::createVMINormalizeSignlessIntToUnsignedPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  if (enableFusionOptimizations) {
+    // Optimize fusion regions while loads and stores are still unified VMI ops.
+    if (enableLoopFusion) {
+      pm.addPass(pto::createPTOVmiLoopFusionPass());
+      pm.addPass(createCanonicalizerPass());
+      pm.addPass(createCSEPass());
+    }
+    if (enableLoadStoreElision) {
+      pm.addNestedPass<func::FuncOp>(
+          pto::createPTOVmiLoadStoreElisionPass());
+      pm.addPass(createCanonicalizerPass());
+      pm.addPass(createCSEPass());
+    }
+  }
   // Expand unified VMI ops to legacy ops before layout assignment,
   // so downstream passes only see legacy ops.
   pm.addPass(pto::createVMILowerUnifiedToLegacyPass());
@@ -2891,6 +2982,8 @@ static void appendVMISemanticPipeline(OpPassManager &pm) {
   pm.addPass(createCSEPass());
   pm.addPass(pto::createVMILegalizeArithSelectPass());
   pm.addPass(pto::createPTOValidateVMILayoutIRPass());
+  pm.addNestedPass<func::FuncOp>(
+      pto::createPTOFlattenFusionRegionPass());
   pm.addPass(pto::createVMIToVPTOPass());
 }
 
@@ -2960,6 +3053,13 @@ int mlir::pto::compilePTOASModule(
       enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
   const bool enableA5VPTOFusionPath =
       enableA5FusionPath && effectiveBackend == PTOBackend::VPTO;
+  // Preserve the existing VPTO pipeline unless both experimental controls
+  // were explicitly requested. A5's default-enabled op fusion alone must not
+  // select VMI candidates or replace the legacy fusion lifecycle.
+  const bool useVMIFusionPipeline =
+      enableVMI && requestedEnableOpFusion && enableA5VPTOFusionPath;
+  const bool enableLegacyVPTOFusionLifecycle =
+      enableA5VPTOFusionPath && !useVMIFusionPipeline;
 
   bool invalidAutoSyncTailHint = false;
   module->walk([&](mlir::func::FuncOp func) {
@@ -3079,7 +3179,7 @@ int mlir::pto::compilePTOASModule(
   const bool hasTileOpsToExpand = hasUnexpandedTileOps(*module);
   std::optional<pto::ExpandTileOpOptions> expandOptions;
   if (effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand &&
-      tileLibBackend == TileLibBackend::PTODSL)
+      tileLibBackend != TileLibBackend::TileLang)
     expandOptions = resolveExpandTileOpOptions(argc, argv);
 
   if (effectiveBackend == PTOBackend::VPTO && !hasTileOpsToExpand) {
@@ -3088,11 +3188,13 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand,
-                                      /*expandOptions=*/nullptr)))
+    if (failed(runVPTOBackendPipeline(
+            module, hasTileOpsToExpand, /*expandOptions=*/nullptr,
+            useVMIFusionPipeline, enableLegacyVPTOFusionLifecycle)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
-                                 context.getCANNVersionOrDefault());
+                                 context.getCANNVersionOrDefault(),
+                                 useVMIFusionPipeline);
   }
 
   // Main PassManager
@@ -3133,6 +3235,16 @@ int mlir::pto::compilePTOASModule(
         buildInsertTemplateAttributesOptions(*expandOptions);
     pm.addPass(
         pto::createInsertTemplateAttributesPass(insertOptions));
+
+    // The VMI planner must see the selected implementation and its fallback
+    // boundary before it forms tile-native fusion regions. Keep the legacy
+    // path's ordinary selection in its historical position below so existing
+    // MI fusion behavior is unchanged.
+    if (useVMIFusionPipeline) {
+      pto::SelectTemplateCandidateOptions selectOptions;
+      selectOptions.selectionPolicy = "prefer-vmi";
+      pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
+    }
   }
 
   // Keep frontend fusion on tile-native PTO IR and annotate last_use directly
@@ -3145,6 +3257,8 @@ int mlir::pto::compilePTOASModule(
   // so it takes no option here.
   pto::FusionPlanOptions fusionPlanOpts;
   fusionPlanOpts.enableShapeInference = enableShapeInference;
+  if (useVMIFusionPipeline)
+    fusionPlanOpts.strategy = "vmi-ub-disjoint";
   if (!isA2A3 && enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));
@@ -3155,6 +3269,12 @@ int mlir::pto::compilePTOASModule(
         pto::createFusionPlanPass(fusionPlanOpts));
     pm.addNestedPass<mlir::func::FuncOp>(pto::createOpSchedulingPass());
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOFusionRegionGenPass());
+  }
+  if (!isA2A3 && expandOptions &&
+      expandOptions->tileLibBackend == "ptodsl" && !useVMIFusionPipeline) {
+    pto::SelectTemplateCandidateOptions selectOptions;
+    selectOptions.selectionPolicy = "ordinary-only";
+    pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
   }
 
   pm.addPass(pto::createPTOViewToMemrefPass());
@@ -3256,10 +3376,12 @@ int mlir::pto::compilePTOASModule(
 
     if (failed(runVPTOBackendPipeline(
             module, hasTileOpsToExpand,
-            expandOptions ? &*expandOptions : nullptr)))
+            expandOptions ? &*expandOptions : nullptr,
+            useVMIFusionPipeline, enableLegacyVPTOFusionLifecycle)))
       return 1;
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,
-                                 context.getCANNVersionOrDefault());
+                                 context.getCANNVersionOrDefault(),
+                                 useVMIFusionPipeline);
   }
 
   if (failed(pm.run(*module))) {

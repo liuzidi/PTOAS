@@ -45,6 +45,7 @@ function(ptoas_configure_runtime_target target_name)
     PTOAS_DEFAULT_TILELANG_PATH="${CMAKE_SOURCE_DIR}/lib/TileOps"
     PTOAS_DEFAULT_TILELANG_PKG_PATH="${CMAKE_SOURCE_DIR}/tilelang-dsl/python"
     PTOAS_DEFAULT_PTODSL_PKG_PATH="${CMAKE_SOURCE_DIR}/ptodsl"
+    PTOAS_DEFAULT_PTODSL_PYTHON_EXE="${Python3_EXECUTABLE}"
     ${ARGN}
   )
   target_link_libraries(${target_name} PRIVATE
