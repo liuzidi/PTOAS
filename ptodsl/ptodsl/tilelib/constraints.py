@@ -57,6 +57,7 @@ class _ConfigView:
 
     b_layout: str
     s_layout: str
+    pad_value: object
 
 
 def build_context(tile_specs: dict, target: str, op: str) -> dict:
@@ -122,6 +123,7 @@ def build_context(tile_specs: dict, target: str, op: str) -> dict:
         memory_space = getattr(spec, "memory_space", "ub")
         b_layout = getattr(spec, "b_layout", "row_major")
         s_layout = getattr(spec, "s_layout", "none_box")
+        pad_value = getattr(spec, "pad_value", "Null")
         operand_memory_spaces.append(memory_space)
         operand_sizes.append(_shape_size(shape))
         operand_b_layouts.append(b_layout)
@@ -133,6 +135,7 @@ def build_context(tile_specs: dict, target: str, op: str) -> dict:
         context[f"{name}_config"] = _ConfigView(
             b_layout=b_layout,
             s_layout=s_layout,
+            pad_value=pad_value,
         )
         if len(shape) == 2:
             context[f"{name}_rows"], context[f"{name}_cols"] = shape

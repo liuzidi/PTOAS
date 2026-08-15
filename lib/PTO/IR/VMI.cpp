@@ -1767,6 +1767,12 @@ LogicalResult VMIFPToSIOp::verify() {
                        "type");
   if (getVMIElementBitWidth(resultType.getElementType()) != 32)
     return emitOpError("requires 32-bit integer result element type");
+  if (auto roundingAttr = (*this)->getAttrOfType<StringAttr>("rounding")) {
+    StringRef rounding = roundingAttr.getValue();
+    if (rounding != "R" && rounding != "A" && rounding != "H" &&
+        rounding != "Z")
+      return emitOpError("rounding attr must be R, A, H, or Z");
+  }
   auto satAttr = (*this)->getAttrOfType<StringAttr>("saturate");
   if (!satAttr)
     return emitOpError("'saturate' attribute is required (SAT or NOSAT)");
@@ -1791,6 +1797,12 @@ LogicalResult VMISIToFPOp::verify() {
     return emitOpError("requires 32-bit integer source element type");
   if (!resultType.getElementType().isF32())
     return emitOpError("requires f32 result element type");
+  if (auto roundingAttr = (*this)->getAttrOfType<StringAttr>("rounding")) {
+    StringRef rounding = roundingAttr.getValue();
+    if (rounding != "R" && rounding != "A" && rounding != "H" &&
+        rounding != "Z")
+      return emitOpError("rounding attr must be R, A, H, or Z");
+  }
   return success();
 }
 
@@ -3466,9 +3478,10 @@ LogicalResult VMICvtOp::verify() {
 
   // --- rounding ---
   if (auto roundingAttr = (*this)->getAttrOfType<StringAttr>("rounding")) {
-    if (dir != CvtDirection::FpNarrow)
+    if (dir != CvtDirection::FpNarrow && dir != CvtDirection::FpToSi &&
+        dir != CvtDirection::SiToFp)
       return emitOpError("'rounding' attribute is only valid for "
-                         "fp-narrowing conversions");
+                         "fp-narrowing, fp-to-si, or si-to-fp conversions");
     StringRef rnd = roundingAttr.getValue();
     if (rnd != "R" && rnd != "A" && rnd != "H" && rnd != "Z")
       return emitOpError("rounding must be 'R' (nearest-even), "
@@ -3696,6 +3709,14 @@ ParseResult VMIvStoreOp::parse(OpAsmParser &parser, OperationState &result) {
                           {static_cast<int32_t>(nValues), 1, 1,
                            hasStride ? 1 : 0, hasBlock ? 1 : 0,
                            hasRepeat ? 1 : 0, hasMask ? 1 : 0}));
+  // Optional `-> updated_base_type` result (block-stride post_update form).
+  // Mirrors VMIvStoreOp::print which emits ` -> type` when updated_base exists.
+  if (succeeded(parser.parseOptionalArrow())) {
+    Type updatedBaseType;
+    if (parser.parseType(updatedBaseType))
+      return failure();
+    result.types.push_back(updatedBaseType);
+  }
   return success();
 }
 
@@ -3726,9 +3747,22 @@ void VMIvStoreOp::print(OpAsmPrinter &p) {
   p << getDestination().getType();
   if (!getMask().empty())
     p << ", " << getMask()[0].getType();
+  if (Value updatedBase = getUpdatedBase())
+    p << " -> " << updatedBase.getType();
 }
 
 LogicalResult VMIvStoreOp::verify() {
+  bool hasBlock = static_cast<bool>(getBlockStride());
+  bool hasRepeat = static_cast<bool>(getRepeatStride());
+  if (Value updatedBase = getUpdatedBase()) {
+    if (!(hasBlock && hasRepeat))
+      return emitOpError(
+          "updated_base result requires block_stride and repeat_stride");
+    if (updatedBase.getType() != getDestination().getType())
+      return emitOpError(
+          "updated_base result type must match destination type");
+  }
+
   // group and dist_mode are mutually exclusive
   if (getGroup() && getDistMode())
     return emitOpError("group and dist_mode are mutually exclusive");
@@ -3750,8 +3784,6 @@ LogicalResult VMIvStoreOp::verify() {
 
   // block_stride / repeat_stride: paired, mutually exclusive with
   // dist_mode and group
-  bool hasBlock = static_cast<bool>(getBlockStride());
-  bool hasRepeat = static_cast<bool>(getRepeatStride());
   if (hasBlock != hasRepeat)
     return emitOpError(
         "block_stride and repeat_stride must both be present or absent");

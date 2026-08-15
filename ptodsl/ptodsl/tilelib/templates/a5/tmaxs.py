@@ -19,3 +19,25 @@ template_tmaxs = register_scalar_binary(
     vector_op=pto.vmaxs,
     dtypes=same_dtype_signatures(3),
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _vmaxs as _vmi_vmaxs,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tmaxs",
+    name="vmi_tmaxs",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tmaxs(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vmaxs(values[0], scalar, mask),
+    )

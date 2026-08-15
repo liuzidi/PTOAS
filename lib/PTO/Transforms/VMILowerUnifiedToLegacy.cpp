@@ -433,12 +433,16 @@ static LogicalResult lowerVCvt(VMICvtOp op, OpBuilder &builder) {
                                      saturateAttr)
             .getResult();
   } else if (direction == "fptosi") {
+    StringAttr roundingAttr = op.getRoundingAttr();
     result =
-        builder.create<VMIFPToSIOp>(loc, resultType, source, saturateAttr)
+        builder.create<VMIFPToSIOp>(loc, resultType, source, roundingAttr,
+                                    saturateAttr)
             .getResult();
   } else if (direction == "sitofp") {
+    StringAttr roundingAttr = op.getRoundingAttr();
     result =
-        builder.create<VMISIToFPOp>(loc, resultType, source).getResult();
+        builder.create<VMISIToFPOp>(loc, resultType, source, roundingAttr)
+            .getResult();
   } else if (direction == "widen_int") {
     // Use source type signedness to decide signed vs unsigned extension.
     bool useSigned = true;
@@ -624,9 +628,20 @@ static LogicalResult lowerVStore(VMIvStoreOp op, OpBuilder &builder) {
     }
     Value bs = op.getBlockStride();
     Value rs = op.getRepeatStride();
-    builder.create<VMIStrideStoreOp>(op->getLoc(), op.getValues()[0],
-                                    op.getDestination(), op.getOffset(), bs, rs,
-                                    mask);
+    Value updatedBase = op.getUpdatedBase();
+    if (updatedBase) {
+      // Forward the updated_base result: build stride_store so it produces the
+      // updated dst pointer, then replace the vstore result uses with it.
+      auto strideStore = builder.create<VMIStrideStoreOp>(
+          op->getLoc(), updatedBase.getType(), op.getValues()[0],
+          op.getDestination(), op.getOffset(), bs, rs, mask);
+      updatedBase.replaceAllUsesWith(strideStore.getUpdatedBase());
+    } else {
+      // No result: pass an empty Type for the optional updated_base result.
+      builder.create<VMIStrideStoreOp>(op->getLoc(), Type{}, op.getValues()[0],
+                                       op.getDestination(), op.getOffset(), bs,
+                                       rs, mask);
+    }
     op->erase();
     return success();
   }
@@ -1164,9 +1179,9 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
         isa<VMIvLoadOp, VMIvStoreOp>(op) ||
         // Category C4
         isa<VMIPsetOp, VMIPgeOp, VMIPltOp>(op) ||
-        // Category C5
-        isa<VMIAddSOp, VMIMulSOp, VMIMaxSOp, VMIMinSOp, VMIShlSOp,
-            VMIShrSOp>(op) ||
+        // Category C5. Keep arithmetic vector-scalar ops for direct VPTO
+        // instruction selection; only shifts still require legacy expansion.
+        isa<VMIShlSOp, VMIShrSOp>(op) ||
         // Category C6 — unified reduce (partial coverage)
         isa<VMIvcaddOp, VMIvcmaxOp, VMIvcminOp>(op) ||
         // Category C7 — fused multiply-add family → legacy fma
@@ -1181,6 +1196,27 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
     //   plt, vintlv, vdintlv, vselr, vgatherb, vmull
     // These are intentionally NOT added to the worklist — they flow through
     // to VMIToVPTO which must provide direct 1:N lowering patterns.
+    if (auto scalarOp = dyn_cast<VMIAddSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMulSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMaxSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+    if (auto scalarOp = dyn_cast<VMIMinSOp>(op)) {
+      if (!isAllActiveSeed(scalarOp.getMask()))
+        worklist.push_back(op);
+      return;
+    }
+
     if (isa<VMIVintlvOp, VMIVdintlvOp, VMIVselrOp,
             VMIVgatherbOp, VMIVmullOp>(op)) {
       op->emitRemark("VMI unified op has no legacy equivalent — "
@@ -1312,7 +1348,8 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
 
     if (auto vop = dyn_cast<VMIAddSOp>(op)) {
       Type elemType = getVMIElementType(vop.getSrc());
-      auto createLegacy = [&](Location loc, Type ty, Value lhs, Value rhs) -> Value {
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
         if (isFloatType(elemType))
           return builder.create<VMIAddFOp>(loc, ty, lhs, rhs).getResult();
         return builder.create<VMIAddIOp>(loc, ty, lhs, rhs).getResult();
@@ -1323,7 +1360,8 @@ void VMILowerUnifiedToLegacyPass::runOnOperation() {
 
     if (auto vop = dyn_cast<VMIMulSOp>(op)) {
       Type elemType = getVMIElementType(vop.getSrc());
-      auto createLegacy = [&](Location loc, Type ty, Value lhs, Value rhs) -> Value {
+      auto createLegacy = [&](Location loc, Type ty, Value lhs,
+                              Value rhs) -> Value {
         if (isFloatType(elemType))
           return builder.create<VMIMulFOp>(loc, ty, lhs, rhs).getResult();
         return builder.create<VMIMulIOp>(loc, ty, lhs, rhs).getResult();

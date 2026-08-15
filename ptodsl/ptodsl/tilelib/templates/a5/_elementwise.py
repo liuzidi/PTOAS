@@ -19,10 +19,44 @@ def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_lay
     )
 
 
+def _known_eq(lhs, rhs):
+    return lhs is None or rhs is None or lhs == rhs
+
+
+def _same_physical_shape(*operand_names):
+    def predicate(**context):
+        shapes = [context.get(f"{name}_shape") for name in operand_names]
+        return (
+            bool(shapes)
+            and None not in shapes
+            and all(shape == shapes[0] for shape in shapes[1:])
+        )
+
+    return predicate
+
+
+def _same_or_dynamic_valid_shape(*operand_names):
+    def predicate(**context):
+        shapes = [context.get(f"{name}_valid_shape") for name in operand_names]
+        if not shapes or None in shapes:
+            return False
+        rank = len(shapes[0])
+        if any(len(shape) != rank for shape in shapes):
+            return False
+        return all(
+            _known_eq(lhs, rhs)
+            for shape in shapes[1:]
+            for lhs, rhs in zip(shapes[0], shape)
+        )
+
+    return predicate
+
+
 def _common_constraints(*operand_names):
     return [
         _ub_or_vec_row_major,
-        tilelib.require_same_valid_shape(*operand_names),
+        _same_physical_shape(*operand_names),
+        _same_or_dynamic_valid_shape(*operand_names),
     ]
 
 

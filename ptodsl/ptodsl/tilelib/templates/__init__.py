@@ -48,6 +48,7 @@ _TEMPLATE_MODULES = {
     ("a5", "pto.tfillpad"): ".a5.tfillpad",
     ("a5", "pto.tfillpad_expand"): ".a5.tfillpad_expand",
     ("a5", "pto.tfillpad_inplace"): ".a5.tfillpad_inplace",
+    ("a5", "pto.tgather"): ".a5.tgather",
     ("a5", "pto.tgatherb"): ".a5.tgatherb",
     ("a5", "pto.tgemv"): ".a5.tgemv",
     ("a5", "pto.tgemv.acc"): ".a5.tgemv_acc",
@@ -77,6 +78,7 @@ _TEMPLATE_MODULES = {
         ".a5.tmov2scale",
         ".a5.tmov2vec",
         ".a5.tmov_fp",
+        ".a5.tmov_nd2nz",
     ),
     ("a5", "pto.tmul"): ".a5.tmul",
     ("a5", "pto.tmuls"): ".a5.tmuls",
@@ -129,7 +131,6 @@ _TEMPLATE_MODULES = {
     ("a5", "pto.thistogram"): ".a5.thistogram",
 }
 
-
 @lru_cache(maxsize=None)
 def load_template(op: str, target: str) -> bool:
     """Import and register only the template module for ``(target, op)``.
@@ -137,14 +138,16 @@ def load_template(op: str, target: str) -> bool:
     Both this cache and Python's module cache make repeated requests no-ops.
     Returns ``False`` when this TileLib has no module for the requested pair.
     """
+    loaded = False
     module_names = _TEMPLATE_MODULES.get((target, op))
     if module_names is None:
-        return False
-    if isinstance(module_names, str):
+        module_names = ()
+    elif isinstance(module_names, str):
         module_names = (module_names,)
     for module_name in module_names:
         import_module(module_name, package=__name__)
-    return True
+        loaded = True
+    return loaded
 
 
 __all__ = ["load_template"]

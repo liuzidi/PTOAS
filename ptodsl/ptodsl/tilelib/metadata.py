@@ -268,6 +268,9 @@ class TemplateMetadata:
     op_engine: str = "other"
     op_class: str = "other"
     tags: tuple = ()
+    resource_scope: str | None = None
+    resource_vector_values: int | None = None
+    resource_chunk_streaming: bool = False
 
     @staticmethod
     def _normalize_iteration_axis(value):
@@ -300,7 +303,15 @@ class TemplateMetadata:
     def build(*, op, target, name, dtypes=(), layouts=(), memory_spaces=(),
               constraints=(), priority=0, fusible=False, loop_depth=None,
               id=None, Tail=None, is_post_update=False, iteration_axis="none",
-              op_engine="other", op_class="other", tags=()):
+              op_engine="other", op_class="other", tags=(),
+              resource_scope=None, resource_vector_values=None,
+              resource_chunk_streaming=False):
+        if resource_scope not in {None, "row", "tile"}:
+            raise ValueError(
+                "resource_scope must be None, 'row', or 'tile'"
+            )
+        if resource_vector_values is not None and resource_vector_values <= 0:
+            raise ValueError("resource_vector_values must be greater than zero")
         return TemplateMetadata(
             op=op,
             target=target,
@@ -319,6 +330,9 @@ class TemplateMetadata:
             op_engine=TemplateMetadata._normalize_op_engine(op_engine),
             op_class=TemplateMetadata._normalize_op_class(op_class),
             tags=tuple(tags),
+            resource_scope=resource_scope,
+            resource_vector_values=resource_vector_values,
+            resource_chunk_streaming=bool(resource_chunk_streaming),
         )
 
 

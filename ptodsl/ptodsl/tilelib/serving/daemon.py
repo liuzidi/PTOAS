@@ -168,6 +168,9 @@ def _metadata_for_descriptor(descriptor, constraint_context: dict) -> dict:
         "op_engine": metadata.op_engine,
         "op_class": metadata.op_class,
         "tags": list(metadata.tags),
+        "resource_scope": metadata.resource_scope,
+        "resource_vector_values": metadata.resource_vector_values,
+        "resource_chunk_streaming": metadata.resource_chunk_streaming,
     }
 
 
@@ -181,6 +184,10 @@ def _registered_candidates(target: str, op: str) -> list:
             f"no template registered for op={op!r} target={target!r}"
         )
     return candidates
+
+
+def _is_vmi_descriptor(descriptor) -> bool:
+    return "vmi" in getattr(descriptor.metadata, "tags", ())
 
 
 def _legal_candidate_specs(
@@ -243,15 +250,50 @@ def _select_descriptor_and_specs(
     context_attrs: dict | None = None,
     candidate_id: str | None = None,
 ):
-    legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
     if candidate_id:
-        for descriptor, specs in legal:
-            if descriptor.name == candidate_id:
+        for descriptor in _registered_candidates(target, op):
+            if descriptor.name != candidate_id:
+                continue
+            try:
+                specs = _build_tile_specs(descriptor, operand_specs)
+            except Exception as exc:
+                raise _registry.NoMatchingTemplate(
+                    f"candidate {candidate_id!r} cannot bind operands for "
+                    f"op={op!r} target={target!r}: {exc}"
+                ) from exc
+
+            legality = _constraints.evaluate_candidate(
+                descriptor,
+                specs,
+                target,
+                op,
+                context_attrs,
+            )
+            if legality.legal:
                 return descriptor, specs
-        legal_names = ", ".join(descriptor.name for descriptor, _ in legal)
+            raise _registry.NoMatchingTemplate(
+                f"candidate {candidate_id!r} is not a legal template for "
+                f"op={op!r} target={target!r}: {legality.reason}"
+            )
+
+        registered_names = ", ".join(
+            descriptor.name for descriptor in _registered_candidates(target, op)
+        )
         raise _registry.NoMatchingTemplate(
-            f"candidate {candidate_id!r} is not a legal template for op={op!r} "
-            f"target={target!r}; legal candidates: {legal_names}"
+            f"candidate {candidate_id!r} is not registered for op={op!r} "
+            f"target={target!r}; registered candidates: {registered_names}"
+        )
+
+    legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
+
+    legal = [
+        (descriptor, specs)
+        for descriptor, specs in legal
+        if not _is_vmi_descriptor(descriptor)
+    ]
+    if not legal:
+        raise _registry.NoMatchingTemplate(
+            f"no public TileLib template for op={op!r} target={target!r}"
         )
 
     if len(legal) == 1:
@@ -277,9 +319,16 @@ def metadata_request(
     op: str,
     operand_specs: list,
     context_attrs: dict | None = None,
+    include_vmi_candidates: bool = False,
 ) -> dict:
     """Return every legal candidate and its selection metadata."""
     legal = _legal_candidate_specs(target, op, operand_specs, context_attrs)
+    if not include_vmi_candidates:
+        legal = [
+            (descriptor, specs)
+            for descriptor, specs in legal
+            if not _is_vmi_descriptor(descriptor)
+        ]
     return {
         "target": target,
         "op": op,
@@ -363,8 +412,21 @@ class TileLibDaemonServer(socketserver.UnixStreamServer):
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-    def _get_metadata(self, target, op, operand_specs, context_attrs=None):
-        return metadata_request(target, op, operand_specs, context_attrs)
+    def _get_metadata(
+        self,
+        target,
+        op,
+        operand_specs,
+        context_attrs=None,
+        include_vmi_candidates=False,
+    ):
+        return metadata_request(
+            target,
+            op,
+            operand_specs,
+            context_attrs,
+            include_vmi_candidates=include_vmi_candidates,
+        )
 
     def _get_stats(self):
         requests = self._stats["hits"] + self._stats["misses"]

@@ -561,6 +561,7 @@ def VMITruncFOp : VMI_Op<"truncf", [Pure]> {
 def VMIFPToSIOp : VMI_Op<"fptosi", [Pure]> {
   let summary = "VMI floating-point to signed integer elementwise conversion";
   let arguments = (ins VMI_VRegTypeConstraint:$source,
+                   OptionalAttr<StrAttr>:$rounding,
                    OptionalAttr<StrAttr>:$saturate);
   let results = (outs VMI_VRegTypeConstraint:$result);
   let hasVerifier = 1;
@@ -569,7 +570,8 @@ def VMIFPToSIOp : VMI_Op<"fptosi", [Pure]> {
 
 def VMISIToFPOp : VMI_Op<"sitofp", [Pure]> {
   let summary = "VMI signed integer to floating-point elementwise conversion";
-  let arguments = (ins VMI_VRegTypeConstraint:$source);
+  let arguments = (ins VMI_VRegTypeConstraint:$source,
+                   OptionalAttr<StrAttr>:$rounding);
   let results = (outs VMI_VRegTypeConstraint:$result);
   let hasVerifier = 1;
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
@@ -732,9 +734,11 @@ def VMIStrideStoreOp : VMI_Op<"stride_store", [DeclareOpInterfaceMethods<MemoryE
   let arguments = (ins VMI_VRegTypeConstraint:$value, PtrOrMemRef:$destination,
                        Index:$offset, I16:$block_stride, I16:$repeat_stride,
                        VMI_MaskTypeConstraint:$mask);
-  let results = (outs);
+  let results = (outs Optional<PtrOrMemRef>:$updated_base);
   let hasVerifier = 1;
-  let assemblyFormat = "$value `,` $destination `[` $offset `]` `,` $block_stride `,` $repeat_stride `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($block_stride) `,` type($repeat_stride) `,` type($mask)";
+  let assemblyFormat = [{
+    $value `,` $destination `[` $offset `]` `,` $block_stride `,` $repeat_stride `,` $mask attr-dict `:` type($value) `,` type($destination) `,` type($block_stride) `,` type($repeat_stride) `,` type($mask) (`->` type($updated_base)^)?
+  }];
 }
 
 def VMIScatterOp : VMI_Op<"scatter", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
@@ -1303,8 +1307,8 @@ def VMICvtOp : VMI_Op<"vcvt", [Pure]> {
     - int → int, |dst| < |src|: integer truncation         (replaces trunci)
 
     Attributes:
-    - `rounding`: rounding mode for fp narrowing (A=away-from-zero,
-      H=half-up). Valid only when dst bit-width < src bit-width for fp types.
+    - `rounding`: physical rounding mode (R/A/H/Z) for fp narrowing,
+      fp-to-signed-int, and signed-int-to-fp conversions.
     - `saturate`: saturating behavior on overflow ("SAT"). Valid for any
       narrowing conversion (fp or int).
     - `pmode`: predication mode ("merge" | "zero").
@@ -1384,6 +1388,9 @@ def VMIvStoreOp : VMI_Op<"vstore",
     block-stride mode (mutually exclusive with dist-mode and group):
     - {block_stride = B, repeat_stride = R}: block-strided masked store
 
+    The optional updated_base result is valid only in block-stride mode and
+    has the same type as destination. It represents post-update address state.
+
     pmode governs inactive lane behavior:
     - "zero" (default):  inactive lanes store 0
     - "merge":           inactive lanes skip write (needs mask)
@@ -1402,7 +1409,7 @@ def VMIvStoreOp : VMI_Op<"vstore",
     OptionalAttr<I64Attr>:$group,
     OptionalAttr<StrAttr>:$pmode
   );
-  let results = (outs);
+  let results = (outs Optional<PtrOrMemRef>:$updated_base);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }

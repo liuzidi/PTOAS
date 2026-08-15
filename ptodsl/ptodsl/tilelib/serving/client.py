@@ -37,7 +37,14 @@ class DaemonClient:
     def ping(self):
         return self._call("ping")
 
-    def get_metadata(self, target, op, operand_specs, context_attrs=None):
+    def get_metadata(
+        self,
+        target,
+        op,
+        operand_specs,
+        context_attrs=None,
+        include_vmi_candidates=False,
+    ):
         return self._call(
             "get_metadata",
             {
@@ -45,6 +52,7 @@ class DaemonClient:
                 "op": op,
                 "operand_specs": operand_specs,
                 "context_attrs": context_attrs or {},
+                "include_vmi_candidates": bool(include_vmi_candidates),
             },
         )
 

@@ -41,3 +41,27 @@ def template_tsubs(src: pto.Tile, scalar, dst: pto.Tile):
             scalar_value = pto.vbr(scalar)
             result = pto.vsub(value, scalar_value, mask)
             pto.vsts(result, dst[row, col:], mask)
+
+
+from ._vmi_common import (  # noqa: E402
+    _negate_scalar,
+    _vadds as _vmi_vadds,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tsubs",
+    name="vmi_tsubs",
+    dtypes=(("f32", "f32", "f32"),),
+)
+def vmi_tsubs(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    negated = _negate_scalar(scalar, f32)
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vadds(values[0], negated, mask),
+    )

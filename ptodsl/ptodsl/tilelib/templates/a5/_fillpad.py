@@ -152,6 +152,26 @@ def _fill_inplace(dst, src_valid_rows, src_valid_cols, dst_valid_rows, dst_valid
     _fill(dst, src_valid_rows, dst_valid_rows, 0, dst_valid_cols)
 
 
+def _copy_and_fill_short_rows(
+    src, dst, src_valid_rows, src_valid_cols, dst_valid_rows, dst_valid_cols
+):
+    """Copy and pad a sub-VL row without unaligned or scalar UB writes."""
+
+    dtype = dst.dtype
+    fill_scalar = _fill_scalar(dst)
+    src_mask, _ = pto.make_mask(dtype, src_valid_cols)
+    dst_mask, _ = pto.make_mask(dtype, dst_valid_cols)
+    pad = pto.vdup(fill_scalar, dst_mask)
+    if str(dtype) in {"ui8", "si8", "ui16", "si16", "ui32", "si32"}:
+        pad = pto.vbitcast(pad, dtype)
+    with pto.for_(0, src_valid_rows, step=1) as row:
+        data = pto.vlds(src[row, 0:])
+        merged = pto.vsel(data, pad, src_mask)
+        pto.vsts(merged, dst[row, 0:], dst_mask)
+    with pto.for_(src_valid_rows, dst_valid_rows, step=1) as row:
+        pto.vsts(pad, dst[row, 0:], dst_mask)
+
+
 def register_fillpad(*, op, name, copy):
     @tilelib.tile_template(
         op=op,
@@ -174,6 +194,20 @@ def register_fillpad(*, op, name, copy):
         aligned_cols = (src_valid_cols // lanes) * lanes
         if not copy:
             _fill_inplace(dst, src_valid_rows, src_valid_cols, dst_valid_rows, dst_valid_cols)
+            return
+        # A short row fits in one native vector. Preserve its valid prefix
+        # before writing padding because TileOp memory planning may assign src
+        # and dst the same UB address. Filling the whole row first would
+        # destroy the source prefix before the later copy.
+        if dst.shape[1] <= lanes:
+            _copy_and_fill_short_rows(
+                src,
+                dst,
+                src_valid_rows,
+                src_valid_cols,
+                dst_valid_rows,
+                dst_valid_cols,
+            )
             return
         if copy:
             _copy_region(src, dst, src_valid_rows, 0, aligned_cols)

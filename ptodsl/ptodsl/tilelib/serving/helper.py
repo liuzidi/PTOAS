@@ -35,6 +35,11 @@ def main(argv=None):
         default="instantiate",
     )
     parser.add_argument("--candidate-id", default=None)
+    parser.add_argument(
+        "--include-vmi-candidates",
+        action="store_true",
+        help="Include internal VMI TileLib candidates in metadata responses.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -51,6 +56,7 @@ def main(argv=None):
                 args.op,
                 operand_specs,
                 context_attrs,
+                include_vmi_candidates=args.include_vmi_candidates,
             )
             sys.stdout.write(json.dumps(result))
             return

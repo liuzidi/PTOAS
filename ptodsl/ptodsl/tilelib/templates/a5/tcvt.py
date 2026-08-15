@@ -427,7 +427,7 @@ def template_tcvt_f16_to_ui8(src: pto.Tile, dst: pto.Tile):
     op="pto.tcvt",
     target="a5",
     name="template_tcvt_f16_to_si8",
-    dtypes=[("f16", "si8")],
+    dtypes=[("f16", "si8"), ("f16", "i8")],
     iteration_axis="none",
     op_engine="vector",
     op_class="other",
@@ -472,6 +472,8 @@ def template_tcvt_f16_to_si8(src: pto.Tile, dst: pto.Tile):
                 sat=pto.VcvtSatMode.NOSAT,
                 part=pto.VcvtPartMode.EVEN,
             )
+            if dst.dtype == "i8":
+                vec_si8 = pto.vbitcast(vec_si8, pto.i8)
             pto.vsts(vec_si8, dst[row, col:], store_mask, dist=pto.VStoreDist.PK_B16)
             col_loop.update(remained=remained)
 
@@ -591,6 +593,51 @@ template_tcvt_i32_to_ui16 = _register_tcvt(
     mask_dtype="src",
     convert_mask="src_full",
 )
+
+
+@tilelib.tile_template(
+    op="pto.tcvt",
+    target="a5",
+    name="template_tcvt_i32_to_f16",
+    dtypes=[("i32", "f16")],
+    iteration_axis="none",
+    op_engine="vector",
+    op_class="other",
+    constraints=[_rowwise],
+    id=38,
+    loop_depth=2,
+    is_post_update=False,
+    tags=("convert", "rowwise"),
+)
+def template_tcvt_i32_to_f16(src: pto.Tile, dst: pto.Tile):
+    valid_rows, valid_cols = dst.valid_shape
+    lanes_i32 = pto.elements_per_vreg(src.dtype)
+    full_mask_i32 = pto.make_mask(src.dtype, pto.PAT.ALL)
+    full_mask_f32 = pto.make_mask(pto.f32, pto.PAT.ALL)
+    with pto.for_(0, valid_rows, step=1) as row:
+        remained = valid_cols
+        col_loop = pto.for_(0, valid_cols, step=lanes_i32).carry(remained=remained)
+        with col_loop:
+            col = col_loop.iv
+            store_mask, remained = pto.make_mask(src.dtype, remained)
+            vec_i32 = pto.vlds(src[row, col:])
+            vec_f32 = pto.vcvt(
+                vec_i32,
+                pto.f32,
+                full_mask_i32,
+                rnd=_round_mode(),
+            )
+            vec_f16 = pto.vcvt(
+                vec_f32,
+                pto.f16,
+                full_mask_f32,
+                rnd=_round_mode(),
+                sat=pto.VcvtSatMode.SAT,
+                part=pto.VcvtPartMode.EVEN,
+            )
+            pto.vsts(vec_f16, dst[row, col:], store_mask, dist=pto.VStoreDist.PK_B32)
+            col_loop.update(remained=remained)
+
 
 template_tcvt_ui32_to_i16 = _register_tcvt(
     name="template_tcvt_ui32_to_i16",
@@ -1034,3 +1081,34 @@ def template_tcvt_bf16_to_fp4(src: pto.Tile, dst: pto.Tile):
             pto.mem_bar(pto.BarrierType.VST_VST)
             pto.vsts(result, dst[row, col:], dst_mask, dist=pto.VStoreDist.NORM_B8)
             col_loop.update(remained=remained, src_remained=src_remained)
+
+
+from ._vmi_common import (  # noqa: E402
+    canonical_vmi_template,
+    convert_vmi_constraint,
+    emit_convert_vmi,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tcvt",
+    name="vmi_tcvt",
+    dtypes=(
+        ("bf16", "f32"),
+        ("f16", "f32"),
+        ("i32", "f32"),
+        ("f32", "bf16"),
+        ("f32", "f16"),
+        ("f32", "i32"),
+        ("i32", "f16"),
+    ),
+    context_constraints={
+        "round_mode": ("RINT", "ROUND", "TRUNC"),
+        "sat_mode": ("DEFAULT", "ON", "OFF"),
+    },
+    constraints=(convert_vmi_constraint,),
+    min_row_bytes=128,
+)
+def vmi_tcvt(src: pto.Tile, dst: pto.Tile):
+    emit_convert_vmi(src, dst)

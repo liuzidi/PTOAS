@@ -19,3 +19,44 @@ template_tadds = register_scalar_binary(
     vector_op=pto.vadds,
     dtypes=same_dtype_signatures(3),
 )
+
+
+from ._vmi_common import (  # noqa: E402
+    _vadds as _vmi_vadds,
+    canonical_vmi_template,
+    emit_elementwise_vmi,
+    f32,
+    sinkhorn_compact_elementwise_vmi_constraint,
+)
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tadds",
+    name="vmi_tadds",
+    dtypes=(("f32", "f32", "f32"),),
+    min_row_bytes=128,
+)
+def vmi_tadds(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vadds(values[0], scalar, mask),
+    )
+
+
+@canonical_vmi_template(
+    target="a5",
+    op="tadds",
+    name="vmi_tadds_sinkhorn_compact",
+    dtypes=(("f32", "f32", "f32"),),
+    constraints=(sinkhorn_compact_elementwise_vmi_constraint,),
+    requires_full_physical_row=False,
+    tags=("supports_partial_valid_shape",),
+)
+def vmi_tadds_sinkhorn_compact(src: pto.Tile, scalar: f32, dst: pto.Tile):
+    emit_elementwise_vmi(
+        dst,
+        (src,),
+        lambda values, mask: _vmi_vadds(values[0], scalar, mask),
+    )
