@@ -4713,6 +4713,15 @@ ParseResult VMIvStoreOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
   }
 
+  // Optional `-> updated_base_type` result for block-stride post-update mode.
+  Type updatedBaseType;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseType(updatedBaseType)) {
+      return failure();
+    }
+    result.addTypes(updatedBaseType);
+  }
+
   bool hasGroup = result.attributes.get("group") != nullptr;
   bool hasStride = false;
   bool hasBlock = false;
@@ -4842,6 +4851,9 @@ void VMIvStoreOp::print(OpAsmPrinter &p) {
   p << getDestination().getType();
   if (!getMask().empty()) {
     p << ", " << getMask()[0].getType();
+  }
+  if (getUpdatedBase()) {
+    p << " -> " << getUpdatedBase().getType();
   }
 }
 

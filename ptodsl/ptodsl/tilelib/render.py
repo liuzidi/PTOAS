@@ -10,7 +10,7 @@
 ``render_best`` is the seam ``ExpandTileOp`` will call: select the legal/best template
 for an op+target+operand specialization, then render it via ptodsl's engine.
 
-CLI (standalone):
+CLI (standalone, parallels lib/TileOps/render_template_mlir.py):
 
     python3 -m ptodsl.tilelib.render --op pto.tadd --target a5 \\
         --tile dst=8x64@ub:f32 --tile src0=8x64@ub:f32 --tile src1=8x64@ub:f32 \\

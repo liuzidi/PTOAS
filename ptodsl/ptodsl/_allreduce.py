@@ -28,8 +28,8 @@ from ._ops import const as _const, get_laneid, get_tid_x, redux_add, redux_max, 
 from ._surface_values import unwrap_surface_value
 from ._types import _resolve, float16 as _f16_dtype, float32 as _f32_dtype, si32 as _si32_dtype, ui32 as _ui32_dtype
 
-from ptoas.mlir.dialects import pto as _pto
-from ptoas.mlir.ir import F16Type, F32Type, IntegerType
+from mlir.dialects import pto as _pto
+from mlir.ir import F16Type, F32Type, IntegerType
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

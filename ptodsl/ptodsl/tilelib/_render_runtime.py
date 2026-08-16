@@ -8,9 +8,9 @@
 """
 TileLib render runtime.
 
-Traces a tilelang-style template body into a standalone ``func.func`` whose MLIR
-uses tile-native handles plus pointer-style ``pto.tile_buf_addr`` /
-``pto.vlds/vadd/vsts`` and dynamic ``pto.tile_valid_rows/cols``.
+Traces a tilelang-style template body into a standalone ``func.func`` whose MLIR is on
+par with the legacy tilelang-dsl render (``tile_buf_addr`` -> memref, ``memref.subview``,
+``pto.vlds/vadd/vsts``, dynamic ``pto.tile_valid_rows/cols``).
 
 Control flow is handled by the engine's AST rewrite (``rewrite_jit_function``): plain
 ``for x in range(...)`` in the template body is rewritten at trace time to
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 from .metadata import ScalarSpec, TileSpec, VectorSpec, ViewSpec, scalar_descriptor
 from .._ast_rewrite import rewrite_jit_function
-from .._context import make_context
+from .._bootstrap import make_context
 from .._surface_types import Tile
 from .._surface_values import PartitionTensorViewValue, TensorViewValue, TileValue
 from .._tracing import KernelModuleSpec, ModuleStyle, TracingRuntime
@@ -36,8 +36,8 @@ from .._tracing.active import activate_runtime, activate_session
 from .._surface_values import wrap_surface_value
 from .._types import _DType, _resolve
 
-from ptoas.mlir.dialects import func
-from ptoas.mlir.ir import Attribute, InsertionPoint, Location, Module, StringAttr, UnitAttr
+from mlir.dialects import func
+from mlir.ir import Attribute, InsertionPoint, Location, Module, StringAttr, UnitAttr
 
 
 # ── tile handle handed to the template body ────────────────────────────────────────
@@ -54,7 +54,8 @@ class _TemplateTile(TileValue):
     static ``v_row/v_col`` carried in the tile_buf type).
 
     Metadata (shape/dtype/memory_space) is supplied from the ``TileSpec`` because a raw
-    entry-block ``tile_buf`` type is not introspectable by ``parse_tile_type_metadata``.
+    entry-block ``tile_buf`` type is not introspectable by ``parse_tile_type_metadata``;
+    supplying it explicitly takes the fast path in ``infer_memref_type_from_surface_value``.
     """
 
     def __init__(self, value, spec: TileSpec):
@@ -69,7 +70,7 @@ class _TemplateTile(TileValue):
         )
         # Force the dynamic valid-shape ops to match the tilelang render.
         self.static_valid_shape = None
-        self._valid_shape_cache.clear()
+        self._valid_shape._cache.clear()
         self._template_static_valid_shape = tuple(spec.valid_shape or spec.shape)
         self._template_config = _TemplateTileConfig(
             b_layout=spec.b_layout,
@@ -176,15 +177,9 @@ class _TemplateTrace(TracingRuntime):
         rewritten(*args)
 
     # Custom golden-shaped container: single module(target_arch) + func(instance, kernel_kind).
-    def build_standalone_module(self):
-        """Build a module in a fresh context for standalone PTODSL use."""
-        return self.build_module_in_context(make_context())
-
-    def build_module_in_context(self, context):
-        """Build a compiler-owned source module in the explicit context."""
-        if context is None:
-            raise TypeError("compiler materialization requires an explicit context")
-        with context, Location.unknown():
+    def build_module(self):
+        ctx = make_context()
+        with ctx, Location.unknown():
             arg_types = list(self.compute_argument_types())
             module, ir_fn = self._create_instance_module(arg_types)
             session = self.create_session(module, ir_fn)
@@ -198,10 +193,6 @@ class _TemplateTrace(TracingRuntime):
                 self.finalize_session(session)
                 session.validate_final_state()
             self.verify_module(module)
-            if module.context is not context:
-                raise RuntimeError(
-                    "TileLib materialization returned a module from a different context"
-                )
             return module
 
     def _create_instance_module(self, arg_types):

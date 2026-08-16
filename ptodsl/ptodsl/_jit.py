@@ -28,13 +28,13 @@ from ._tracing import (
     current_runtime,
 )
 
-from ptoas.mlir.ir import InsertionPoint, Module, WalkResult
+from mlir.ir import InsertionPoint
 
 
-_MODULE_ATTRS = ("pto.target_arch", "pto.backend")
+_MODULE_ATTRS = ("pto.target_arch",)
 _SUPPORTED_FRONTEND_OPTION_KEYS = {"ast_rewrite", "rewrite_part", "dump_rewritten_source"}
 _SUPPORTED_REWRITE_PARTS = {"control_flow"}
-_DEFAULT_KERNEL_KIND = None
+_DEFAULT_KERNEL_KIND = "vector"
 
 
 class _DefaultKernelKindSentinel:
@@ -139,34 +139,15 @@ def merge_jit_modules(*kernels: KernelHandle):
     """
     Merge multiple ``@pto.jit`` kernels into one MLIR module.
 
-    Each handle must have compatible top-level attributes and use the same
-    flat or backend-partitioned module shape. Payload order follows *kernels*.
-    Backend child modules are independent symbol tables, so they may contain
-    equal function names. Flat modules must use distinct function symbols;
-    pass ``name=`` to ``@pto.jit`` when merging otherwise identical kernels.
+    Each handle must have been compiled with compatible outer-container
+    attributes. Child module order follows *kernels*.
     """
     if not kernels:
         raise ValueError("merge_jit_modules() requires at least one kernel handle")
 
     merged = kernels[0].build()
     expected_attrs = _module_attr_map(merged)
-    merged_is_partitioned = all(
-        op.operation.name == "builtin.module" for op in merged.body.operations
-    )
 
-    def direct_function_symbols(module):
-        return {
-            str(op.operation.attributes["sym_name"])
-            for op in module.body.operations
-            if op.operation.name == "func.func"
-            and "sym_name" in op.operation.attributes
-        }
-
-    merged_symbols = (
-        direct_function_symbols(merged) if not merged_is_partitioned else set()
-    )
-
-    target_context = merged.context
     for kernel in kernels[1:]:
         module = kernel.build()
         actual_attrs = _module_attr_map(module)
@@ -175,32 +156,13 @@ def merge_jit_modules(*kernels: KernelHandle):
                 "merge_jit_modules() requires compatible module attributes; "
                 f"expected {expected_attrs}, got {actual_attrs}"
             )
-        module_is_partitioned = all(
-            op.operation.name == "builtin.module" for op in module.body.operations
-        )
-        if module_is_partitioned != merged_is_partitioned:
-            raise ValueError(
-                "merge_jit_modules() cannot mix flat and backend-partitioned PTODSL modules"
-            )
-        if not merged_is_partitioned:
-            module_symbols = direct_function_symbols(module)
-            duplicates = merged_symbols & module_symbols
-            if duplicates:
-                raise ValueError(
-                    "merge_jit_modules() cannot merge duplicate function symbols "
-                    "in a flat module; assign distinct @pto.jit(name=...) values: "
-                    f"{sorted(duplicates)!r}"
-                )
-            merged_symbols.update(module_symbols)
-
-        # Kernel modules are built in independent MLIR contexts.  Cloning an
-        # operation directly across contexts leaves its types and attributes
-        # owned by the source context, which may be destroyed before the
-        # merged module.  Reparse the source text in the target context before
-        # cloning so every operation in the merged module has one owner.
-        module = Module.parse(str(module), target_context)
         with InsertionPoint(merged.body):
             for op in module.body.operations:
+                if op.operation.name != "builtin.module":
+                    raise ValueError(
+                        "merge_jit_modules() expects backend-partitioned PTODSL containers "
+                        "whose payload is expressed entirely through child modules"
+                    )
                 op.operation.clone()
 
     merged.operation.verify()
@@ -211,7 +173,7 @@ def jit(
     name=None,
     *,
     target: str = "a5",
-    kernel_kind: str | None = _DEFAULT_KERNEL_KIND_SENTINEL,
+    kernel_kind: str = _DEFAULT_KERNEL_KIND_SENTINEL,
     backend: str = "vpto",
     entry: bool = True,
     mode: str = "auto",
@@ -229,8 +191,8 @@ def jit(
     target:      Target architecture string, e.g. ``"a5"``.
     kernel_kind: optional authored physical kind, used for native build selection
                  and explicit single-kind VPTO authoring intent. When omitted,
-                 PTODSL leaves the kind unspecified so PTOAS can split mixed
-                 cube/vector regions.
+                 PTODSL keeps the historical vector default while allowing
+                 subkernel sections to express mixed cube/vector regions.
     backend:     ``"vpto"`` or ``"emitc"`` – records the intended backend.
     entry:       ``True`` for launchable kernel entries, ``False`` for helpers.
     mode:        ``"auto"`` or ``"explicit"`` – feeds child compile policy.

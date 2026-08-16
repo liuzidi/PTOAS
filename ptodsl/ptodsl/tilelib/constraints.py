@@ -28,7 +28,6 @@ import inspect
 from dataclasses import dataclass
 from enum import Enum
 
-from .._types import _normalize_compact_mode
 from .metadata import ScalarSpec, VectorSpec, ViewSpec
 
 
@@ -53,12 +52,12 @@ class CandidateLegality:
 
 @dataclass(frozen=True)
 class _ConfigView:
-    """The ``{name}_config`` object exposed to constraint predicates."""
+    """The ``{name}_config`` object a constraint sees (``.b_layout`` / ``.s_layout`` strings,
+    which compare equal to the BLayout/SLayout str-enums)."""
 
     b_layout: str
     s_layout: str
-    s_fractal_size: int | None
-    compact_mode: str | int | None
+    pad_value: object
 
 
 def build_context(tile_specs: dict, target: str, op: str) -> dict:
@@ -70,12 +69,9 @@ def build_context(tile_specs: dict, target: str, op: str) -> dict:
     operand_rows = []
     operand_cols = []
     operand_sizes = []
-    operand_valid_rows = []
     operand_valid_cols = []
     operand_b_layouts = []
     operand_s_layouts = []
-    operand_s_fractal_sizes = []
-    operand_compact_modes = []
     for name, spec in tile_specs.items():
         dtype = spec.dtype.name
         operand_dtypes.append(dtype)
@@ -127,53 +123,35 @@ def build_context(tile_specs: dict, target: str, op: str) -> dict:
         memory_space = getattr(spec, "memory_space", "ub")
         b_layout = getattr(spec, "b_layout", "row_major")
         s_layout = getattr(spec, "s_layout", "none_box")
-        s_fractal_size = getattr(spec, "s_fractal_size", None)
-        compact_mode = getattr(spec, "compact_mode", None)
+        pad_value = getattr(spec, "pad_value", "Null")
         operand_memory_spaces.append(memory_space)
         operand_sizes.append(_shape_size(shape))
         operand_b_layouts.append(b_layout)
         operand_s_layouts.append(s_layout)
-        operand_s_fractal_sizes.append(s_fractal_size)
-        operand_compact_modes.append(compact_mode)
         context[f"{name}_kind"] = "tile"
         context[f"{name}_shape"] = shape
         context[f"{name}_valid_shape"] = valid
         context[f"{name}_memory_space"] = memory_space
-        context[f"{name}_s_fractal_size"] = s_fractal_size
-        context[f"{name}_compact_mode"] = compact_mode
         context[f"{name}_config"] = _ConfigView(
             b_layout=b_layout,
             s_layout=s_layout,
-            s_fractal_size=s_fractal_size,
-            compact_mode=compact_mode,
+            pad_value=pad_value,
         )
         if len(shape) == 2:
             context[f"{name}_rows"], context[f"{name}_cols"] = shape
-            if len(valid) == 2:
-                (
-                    context[f"{name}_valid_rows"],
-                    context[f"{name}_valid_cols"],
-                ) = valid
+            context[f"{name}_valid_rows"], context[f"{name}_valid_cols"] = valid
             operand_rows.append(shape[0])
             operand_cols.append(shape[1])
-            if len(valid) == 2:
-                operand_valid_rows.append(valid[0])
-                operand_valid_cols.append(valid[1])
-            else:
-                operand_valid_rows.append(None)
-                operand_valid_cols.append(None)
+            operand_valid_cols.append(valid[1])
     context["operand_dtypes"] = tuple(operand_dtypes)
     context["operand_kinds"] = tuple(operand_kinds)
     context["operand_memory_spaces"] = tuple(operand_memory_spaces)
     context["operand_rows"] = tuple(operand_rows)
     context["operand_cols"] = tuple(operand_cols)
     context["operand_sizes"] = tuple(operand_sizes)
-    context["operand_valid_rows"] = tuple(operand_valid_rows)
     context["operand_valid_cols"] = tuple(operand_valid_cols)
     context["operand_b_layouts"] = tuple(operand_b_layouts)
     context["operand_s_layouts"] = tuple(operand_s_layouts)
-    context["operand_s_fractal_sizes"] = tuple(operand_s_fractal_sizes)
-    context["operand_compact_modes"] = tuple(operand_compact_modes)
     return context
 
 
@@ -329,414 +307,11 @@ def require_contiguous(required=True):
     def _require_contiguous(operand_rows, operand_cols, operand_valid_cols, **_):
         if not required:
             return True
-        if (
-            len(operand_valid_cols) != len(operand_cols)
-            or None in operand_valid_cols
-        ):
-            return False
-        full_cols = all(
-            valid == cols
-            for valid, cols in zip(operand_valid_cols, operand_cols)
-        )
+        full_cols = all(valid == cols for valid, cols in zip(operand_valid_cols, operand_cols))
         single_row = all(rows == 1 for rows in operand_rows)
         return full_cols or single_row
 
     return _require_contiguous
-
-
-def require_elementwise_1d(*operand_names, memory_spaces=("ub", "vec")):
-    """Require ordinary element-wise operands to describe one flat range.
-
-    The rule is intentionally limited to rank-2 local tiles with a row-major,
-    unboxed, gap-free physical layout. All named tiles must have the same
-    static logical valid shape. A range is flattenable when every tile uses
-    its full physical column axis, or when the logical range occupies only the
-    first row. Predicate and conversion representations need family-specific
-    constraints in addition to, or instead of, this ordinary rule.
-    """
-
-    allowed_memory_spaces = frozenset(memory_spaces)
-
-    def _require_elementwise_1d(**context):
-        if not operand_names:
-            return False
-
-        shapes = []
-        valid_shapes = []
-        for name in operand_names:
-            if not _is_flat_local_tile(context, name, allowed_memory_spaces):
-                return False
-
-            shape = context.get(f"{name}_shape")
-            valid_shape = context.get(f"{name}_valid_shape")
-            shapes.append(shape)
-            valid_shapes.append(valid_shape)
-
-        if any(valid_shape != valid_shapes[0] for valid_shape in valid_shapes[1:]):
-            return False
-
-        full_columns = all(
-            valid_shape[1] == shape[1]
-            for shape, valid_shape in zip(shapes, valid_shapes)
-        )
-        single_logical_row = valid_shapes[0][0] == 1
-        return full_columns or single_logical_row
-
-    return _require_elementwise_1d
-
-
-def require_conversion_1d(
-    source_operand="src",
-    destination_operand="dst",
-    *,
-    source_elements_per_destination=1,
-    memory_spaces=("ub", "vec"),
-):
-    """Require two typed conversion streams to be independently flattenable.
-
-    Conversion source and destination tiles need not have the same element
-    width. Their typed pointers still advance over one common logical range,
-    provided each tile is gap-free and the valid shapes obey the conversion's
-    element-count relationship. ``source_elements_per_destination`` models
-    packed forms such as A5 BF16-to-FP4, where one destination storage element
-    represents two source elements.
-
-    Multi-row ranges must fill the physical column axis of both tiles. A
-    single logical row is also legal because neither stream crosses a row
-    boundary. Unknown layout or compact-mode metadata rejects the candidate.
-    """
-
-    allowed_memory_spaces = frozenset(memory_spaces)
-    ratio = source_elements_per_destination
-
-    def _require_conversion_1d(**context):
-        if not isinstance(ratio, int) or ratio <= 0:
-            return False
-
-        operands = (source_operand, destination_operand)
-        shapes = []
-        valid_shapes = []
-        for name in operands:
-            if not _is_flat_local_tile(context, name, allowed_memory_spaces):
-                return False
-
-            shape = context.get(f"{name}_shape")
-            valid_shape = context.get(f"{name}_valid_shape")
-            shapes.append(shape)
-            valid_shapes.append(valid_shape)
-
-        src_shape, dst_shape = shapes
-        src_valid, dst_valid = valid_shapes
-        if src_shape[0] != dst_shape[0] or src_valid[0] != dst_valid[0]:
-            return False
-        if (
-            src_shape[1] != dst_shape[1] * ratio
-            or src_valid[1] != dst_valid[1] * ratio
-        ):
-            return False
-
-        full_columns = (
-            src_valid[1] == src_shape[1]
-            and dst_valid[1] == dst_shape[1]
-        )
-        return full_columns or dst_valid[0] == 1
-
-    return _require_conversion_1d
-
-
-_PREDICATE_PACKING_LAYOUTS = {
-    # A5 stores one predicate bit per compared element. 32-bit comparisons
-    # combine two 64-lane masks before a 16-byte PK store; 16-bit comparisons
-    # use one 128-lane 16-byte PK store; and 8-bit comparisons use one
-    # 256-lane 32-byte NORM store.
-    "f32": (128, 16),
-    "i32": (128, 16),
-    "f16": (128, 16),
-    "i16": (128, 16),
-    "i8": (256, 32),
-    "ui8": (256, 32),
-}
-
-
-def require_predicate_compare_1d(
-    *data_operand_names,
-    predicate_operand="dst",
-    flattened_destination=False,
-    memory_spaces=("ub", "vec"),
-):
-    """Require an A5 compare and its packed predicate output to be flattenable.
-
-    Data operands must describe the same static contiguous logical range. The
-    predicate destination has a different representation: one bit per source
-    element, written in complete dtype-dependent predicate-store blocks.
-
-    A single logical row is flattenable when its destination row has enough
-    physical bytes for the rounded store. Multiple rows normally require every
-    source row to end on a predicate-store boundary and the destination row
-    stride to equal the exact bytes produced for one row.
-
-    ``flattened_destination`` models operations such as ``tcmps`` whose 1D
-    form writes the packed predicate into one continuous destination prefix.
-    It accepts either an exact packed row stride or a destination row with one
-    predicate container element per physical data element. The latter is an
-    explicit logical-range capacity contract, not a packed-byte requirement;
-    arbitrary intermediate predicate-row padding remains a 2D fallback.
-    """
-
-    allowed_memory_spaces = frozenset(memory_spaces)
-
-    def _require_predicate_compare_1d(**context):
-        if not data_operand_names:
-            return False
-
-        data_shapes = []
-        data_valid_shapes = []
-        for name in data_operand_names:
-            if not _is_flat_local_tile(context, name, allowed_memory_spaces):
-                return False
-            shape = context.get(f"{name}_shape")
-            valid_shape = context.get(f"{name}_valid_shape")
-            data_shapes.append(shape)
-            data_valid_shapes.append(valid_shape)
-
-        if any(
-            valid_shape != data_valid_shapes[0]
-            for valid_shape in data_valid_shapes[1:]
-        ):
-            return False
-
-        predicate_name = predicate_operand
-        if not _is_flat_local_tile(
-            context,
-            predicate_name,
-            allowed_memory_spaces,
-        ):
-            return False
-
-        predicate_shape = context.get(f"{predicate_name}_shape")
-        predicate_valid_shape = context.get(f"{predicate_name}_valid_shape")
-        valid_rows, valid_cols = data_valid_shapes[0]
-        if predicate_valid_shape[0] != valid_rows:
-            return False
-
-        dtype = context.get(f"{data_operand_names[0]}_dtype")
-        store_layout = _PREDICATE_PACKING_LAYOUTS.get(dtype)
-        if store_layout is None:
-            return False
-        elements_per_store, bytes_per_store = store_layout
-
-        predicate_dtype = context.get(f"{predicate_name}_dtype")
-        predicate_bytewidth = _dtype_bytewidth(predicate_dtype)
-        if predicate_bytewidth is None:
-            return False
-        predicate_row_bytes = predicate_shape[1] * predicate_bytewidth
-        if predicate_row_bytes % 32 != 0:
-            return False
-        row_store_count = _ceil_div(valid_cols, elements_per_store)
-        required_row_bytes = row_store_count * bytes_per_store
-        if predicate_row_bytes < required_row_bytes:
-            return False
-
-        single_logical_row = valid_rows == 1
-        if single_logical_row:
-            required_data_row_elements = row_store_count * elements_per_store
-            return all(
-                shape[1] >= required_data_row_elements
-                for shape in data_shapes
-            )
-
-        data_rows_are_contiguous = all(
-            valid_shape[1] == shape[1]
-            for shape, valid_shape in zip(data_shapes, data_valid_shapes)
-        )
-        required_logical_row_bytes = (
-            max(shape[1] for shape in data_shapes) * predicate_bytewidth
-        )
-        destination_holds_logical_range = (
-            predicate_row_bytes >= required_logical_row_bytes
-        )
-        if flattened_destination and destination_holds_logical_range:
-            total_elements = valid_rows * valid_cols
-            total_store_count = _ceil_div(
-                total_elements,
-                elements_per_store,
-            )
-            required_total_bytes = total_store_count * bytes_per_store
-            predicate_total_bytes = (
-                predicate_shape[0] * predicate_row_bytes
-            )
-            return (
-                data_rows_are_contiguous
-                and predicate_total_bytes >= required_total_bytes
-            )
-
-        rows_end_on_store_boundary = valid_cols % elements_per_store == 0
-        predicate_rows_are_contiguous = predicate_row_bytes == required_row_bytes
-        return (
-            data_rows_are_contiguous
-            and rows_end_on_store_boundary
-            and predicate_rows_are_contiguous
-        )
-
-    return _require_predicate_compare_1d
-
-
-def require_predicate_select_1d(
-    predicate_operand,
-    *data_operand_names,
-    temporary_operand=None,
-    memory_spaces=("ub", "vec"),
-):
-    """Require A5 packed-predicate select operands to be flattenable.
-
-    Data operands must describe one static contiguous logical range. The mask
-    is a byte-addressed packed predicate whose row capacity and stride are
-    checked using the selected data dtype. A5 does not access the ABI
-    temporary, but its tile metadata must still be complete and supported.
-    """
-
-    allowed_memory_spaces = frozenset(memory_spaces)
-
-    def _require_predicate_select_1d(**context):
-        if not data_operand_names:
-            return False
-
-        data_shapes = []
-        data_valid_shapes = []
-        for name in data_operand_names:
-            if not _is_flat_local_tile(context, name, allowed_memory_spaces):
-                return False
-            data_shapes.append(context.get(f"{name}_shape"))
-            data_valid_shapes.append(context.get(f"{name}_valid_shape"))
-
-        if any(
-            valid_shape != data_valid_shapes[0]
-            for valid_shape in data_valid_shapes[1:]
-        ):
-            return False
-
-        if not _is_flat_local_tile(
-            context,
-            predicate_operand,
-            allowed_memory_spaces,
-        ):
-            return False
-        if temporary_operand is not None and not _is_flat_local_tile(
-            context,
-            temporary_operand,
-            allowed_memory_spaces,
-        ):
-            return False
-
-        predicate_shape = context.get(f"{predicate_operand}_shape")
-        predicate_valid_shape = context.get(
-            f"{predicate_operand}_valid_shape"
-        )
-        valid_rows, valid_cols = data_valid_shapes[0]
-        if predicate_valid_shape[0] != valid_rows:
-            return False
-
-        dtype = context.get(f"{data_operand_names[0]}_dtype")
-        store_layout = _PREDICATE_PACKING_LAYOUTS.get(dtype)
-        if store_layout is None:
-            return False
-        elements_per_store, bytes_per_store = store_layout
-
-        predicate_dtype = context.get(f"{predicate_operand}_dtype")
-        predicate_bytewidth = _dtype_bytewidth(predicate_dtype)
-        if predicate_bytewidth is None:
-            return False
-        predicate_row_bytes = predicate_shape[1] * predicate_bytewidth
-        if predicate_row_bytes % 32 != 0:
-            return False
-
-        row_store_count = _ceil_div(valid_cols, elements_per_store)
-        required_predicate_row_bytes = row_store_count * bytes_per_store
-        if predicate_row_bytes < required_predicate_row_bytes:
-            return False
-
-        single_logical_row = valid_rows == 1
-        if single_logical_row:
-            required_data_row_elements = row_store_count * elements_per_store
-            return all(
-                shape[1] >= required_data_row_elements
-                for shape in data_shapes
-            )
-
-        data_rows_are_contiguous = all(
-            valid_shape[1] == shape[1]
-            for shape, valid_shape in zip(data_shapes, data_valid_shapes)
-        )
-        rows_end_on_store_boundary = valid_cols % elements_per_store == 0
-        predicate_rows_are_contiguous = (
-            predicate_row_bytes == required_predicate_row_bytes
-        )
-        return (
-            data_rows_are_contiguous
-            and rows_end_on_store_boundary
-            and predicate_rows_are_contiguous
-        )
-
-    return _require_predicate_select_1d
-
-
-def _is_flat_local_tile(context, name, allowed_memory_spaces) -> bool:
-    if context.get(f"{name}_kind") != "tile":
-        return False
-    shape = context.get(f"{name}_shape")
-    valid_shape = context.get(f"{name}_valid_shape")
-    if not _is_static_rank2_shape(shape) or not _is_static_rank2_shape(
-        valid_shape
-    ):
-        return False
-    if any(valid > physical for valid, physical in zip(valid_shape, shape)):
-        return False
-    if context.get(f"{name}_memory_space") not in allowed_memory_spaces:
-        return False
-
-    config = context.get(f"{name}_config")
-    return (
-        config is not None
-        and _enum_value(config.b_layout) == BLayout.ROW_MAJOR.value
-        and _enum_value(config.s_layout) == SLayout.NONE_BOX.value
-        and _has_gap_free_row_stride(config.compact_mode)
-    )
-
-
-def _dtype_bytewidth(dtype) -> int | None:
-    widths = {
-        "i8": 1,
-        "ui8": 1,
-        "i16": 2,
-        "ui16": 2,
-        "f16": 2,
-        "bf16": 2,
-        "i32": 4,
-        "ui32": 4,
-        "f32": 4,
-    }
-    return widths.get(dtype)
-
-
-def _ceil_div(value, divisor):
-    return (value + divisor - 1) // divisor
-
-
-def _is_static_rank2_shape(shape) -> bool:
-    return (
-        isinstance(shape, tuple)
-        and len(shape) == 2
-        and all(isinstance(dim, int) and dim > 0 for dim in shape)
-    )
-
-
-def _has_gap_free_row_stride(compact_mode) -> bool:
-    return _normalize_compact_mode(_enum_value(compact_mode)) in {
-        0,
-        1,
-        "Null",
-        "Normal",
-    }
 
 
 def passes(predicates, context: dict) -> bool:
@@ -781,10 +356,6 @@ __all__ = [
     "evaluate_candidate",
     "passes",
     "require_contiguous",
-    "require_conversion_1d",
-    "require_elementwise_1d",
-    "require_predicate_compare_1d",
-    "require_predicate_select_1d",
     "require_same_valid_shape",
     "require_valid_rows",
 ]

@@ -1,0 +1,174 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+"""Shared PTODSL implementations for remainder/fmod-style TileOps."""
+
+from ptodsl import pto
+import ptodsl.tilelib as tilelib
+
+from ._common import ub_row_major_constraints
+
+
+FMOD_DTYPES = [("f32", "f32", "f32"), ("f16", "f16", "f16"), ("i16", "i16", "i16"), ("ui16", "ui16", "ui16")]
+FMODS_DTYPES = [("f32", "f32", "f32"), ("f16", "f16", "f16"), ("i32", "i32", "i32"), ("i16", "i16", "i16")]
+REM_DTYPES = [("f32", "f32", "f32", "f32"), ("f16", "f16", "f16", "f16"), ("i32", "i32", "i32", "i32")]
+REMS_DTYPES = [("f32", "f32", "f32", "f32"), ("f16", "f16", "f16", "f16")]
+
+
+def _remainder(lhs, rhs, mask, *, round_mode, dtype):
+    quotient = pto.vdiv(lhs, rhs, mask)
+    if str(dtype) in {"f16", "bf16", "f32"}:
+        quotient = pto.vtrc(quotient, mask, rnd=round_mode)
+    product = pto.vmul(quotient, rhs, mask)
+    result = pto.vsub(lhs, product, mask)
+    if str(dtype) == "f32":
+        sign_diff_mask = pto.vcmps(
+            pto.vmul(rhs, result, mask), pto.f32(0.0), mask, pto.CmpMode.LT
+        )
+        corrected = pto.vadd(result, rhs, sign_diff_mask)
+        result = pto.vsel(corrected, result, sign_diff_mask)
+    return result
+
+
+def _scalar_remainder(lhs, scalar, mask, *, round_mode, dtype):
+    scalar_vec = pto.vbr(scalar)
+    quotient = pto.vdiv(lhs, scalar_vec, mask)
+    if str(dtype) in {"f16", "bf16", "f32"}:
+        quotient = pto.vtrc(quotient, mask, rnd=round_mode)
+    product = pto.vmuls(quotient, scalar, mask)
+    return pto.vsub(lhs, product, mask)
+
+
+def register_binary_remainder(*, op, name, dtypes, round_mode, has_tmp=False):
+    constraints = ub_row_major_constraints("src0", "src1", "dst")
+    if has_tmp:
+        constraints = ub_row_major_constraints("src0", "src1", "tmp", "dst")
+
+        @tilelib.tile_template(
+            op=op,
+            target="a5",
+            name=name,
+            dtypes=dtypes,
+            iteration_axis="none",
+            op_engine="vector",
+            op_class="elementwise",
+            constraints=constraints,
+            id=0,
+            loop_depth=2,
+            is_post_update=False,
+            tags=("elementwise", "remainder"),
+        )
+        def template(src0: pto.Tile, src1: pto.Tile, tmp: pto.Tile, dst: pto.Tile):
+            _ = tmp
+            _emit_binary(src0, src1, dst, round_mode)
+
+        return template
+
+    @tilelib.tile_template(
+        op=op,
+        target="a5",
+        name=name,
+        dtypes=dtypes,
+        iteration_axis="none",
+        op_engine="vector",
+        op_class="elementwise",
+        constraints=constraints,
+        id=0,
+        loop_depth=2,
+        is_post_update=False,
+        tags=("elementwise", "remainder"),
+    )
+    def template(src0: pto.Tile, src1: pto.Tile, dst: pto.Tile):
+        _emit_binary(src0, src1, dst, round_mode)
+
+    return template
+
+
+def _emit_binary(src0, src1, dst, round_mode):
+    dtype = dst.dtype
+    valid_rows, valid_cols = dst.valid_shape
+    lanes = pto.elements_per_vreg(dtype)
+    with pto.for_(0, valid_rows, step=1) as row:
+        col_loop = pto.for_(0, valid_cols, step=lanes).carry(remained=valid_cols)
+        with col_loop:
+            col = col_loop.iv
+            mask, remained = pto.make_mask(dtype, col_loop.remained)
+            lhs = pto.vlds(src0[row, col:])
+            rhs = pto.vlds(src1[row, col:])
+            result = _remainder(lhs, rhs, mask, round_mode=round_mode, dtype=dtype)
+            pto.vsts(result, dst[row, col:], mask)
+            col_loop.update(remained=remained)
+
+
+def register_scalar_remainder(*, op, name, dtypes, round_mode, has_tmp=False):
+    constraints = ub_row_major_constraints("src", "dst")
+    if has_tmp:
+        constraints = ub_row_major_constraints("src", "tmp", "dst")
+
+        @tilelib.tile_template(
+            op=op,
+            target="a5",
+            name=name,
+            dtypes=dtypes,
+            iteration_axis="none",
+            op_engine="vector",
+            op_class="elementwise",
+            constraints=constraints,
+            id=0,
+            loop_depth=2,
+            is_post_update=False,
+            tags=("elementwise", "scalar", "remainder"),
+        )
+        def template(src: pto.Tile, scalar, tmp: pto.Tile, dst: pto.Tile):
+            _ = tmp
+            _emit_scalar(src, scalar, dst, round_mode)
+
+        return template
+
+    @tilelib.tile_template(
+        op=op,
+        target="a5",
+        name=name,
+        dtypes=dtypes,
+        iteration_axis="none",
+        op_engine="vector",
+        op_class="elementwise",
+        constraints=constraints,
+        id=0,
+        loop_depth=2,
+        is_post_update=False,
+        tags=("elementwise", "scalar", "remainder"),
+    )
+    def template(src: pto.Tile, scalar, dst: pto.Tile):
+        _emit_scalar(src, scalar, dst, round_mode)
+
+    return template
+
+
+def _emit_scalar(src, scalar, dst, round_mode):
+    dtype = dst.dtype
+    valid_rows, valid_cols = dst.valid_shape
+    lanes = pto.elements_per_vreg(dtype)
+    with pto.for_(0, valid_rows, step=1) as row:
+        col_loop = pto.for_(0, valid_cols, step=lanes).carry(remained=valid_cols)
+        with col_loop:
+            col = col_loop.iv
+            mask, remained = pto.make_mask(dtype, col_loop.remained)
+            value = pto.vlds(src[row, col:])
+            result = _scalar_remainder(value, scalar, mask, round_mode=round_mode, dtype=dtype)
+            pto.vsts(result, dst[row, col:], mask)
+            col_loop.update(remained=remained)
+
+
+__all__ = [
+    "FMOD_DTYPES",
+    "FMODS_DTYPES",
+    "REM_DTYPES",
+    "REMS_DTYPES",
+    "register_binary_remainder",
+    "register_scalar_remainder",
+]
