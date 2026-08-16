@@ -9,7 +9,6 @@
 #ifndef PTO_TRANSFORMS_TILEFUSION_FUSIONOPSEMANTICS_H
 #define PTO_TRANSFORMS_TILEFUSION_FUSIONOPSEMANTICS_H
 
-#include "PTO/Support/CodeConstants.h"
 #include "PTO/IR/PTO.h"
 
 #include "mlir/Support/LLVM.h"
@@ -32,6 +31,8 @@ enum class FusionComputeFamily {
   RowBroadcastBinary,
   ReduceRow,
   ReduceCol,
+  ColBroadcastBinary,
+  Convert,
 };
 
 struct FusionOpSemantics {
@@ -39,12 +40,16 @@ struct FusionOpSemantics {
   FusionComputeFamily computeFamily = FusionComputeFamily::Unknown;
   Operation *op = nullptr;
   std::string opName;
-  SmallVector<Value, mlir::pto::kValue4> tileInputs;
-  SmallVector<Value, mlir::pto::kValue2> tileOutputs;
-  SmallVector<Value, mlir::pto::kValue2> scalarInputs;
+  SmallVector<Value, 4> tileInputs;
+  SmallVector<Value, 2> tileOutputs;
+  SmallVector<Value, 2> scalarInputs;
 };
 
 bool isSupportedPreFusionComputeOp(StringRef opName);
+/// Return true for structural operations that may live inside a loose fusion
+/// region without becoming VMI compute candidates themselves. These ops must
+/// not perform data movement or synchronization.
+bool isFusionTransparentScaffold(Operation *op);
 FailureOr<FusionOpSemantics> getFusionOpSemantics(Operation *op);
 
 } // namespace pto

@@ -285,6 +285,13 @@ struct LowerPTOToUBufOpsPass
             ctx, tbTy.getElementType(),
             pto::AddressSpaceAttr::get(ctx, pto::AddressSpace::VEC));
         auto pc = builder.create<pto::CastPtrOp>(op.getLoc(), ptrTy, addr);
+        // Attach the original tile shape so downstream passes (VmiMemoryLocation,
+        // PTOVmiLoopFusion) can recover the static storage size without the
+        // now-erased alloc_tile.  pointer_cast used to carry a MemRefType whose
+        // shape fed getStaticMemrefBytes; castptr -> PtrType lost it.
+        auto shapeArr = llvm::to_vector(tbTy.getShape());
+        pc->setAttr("pto.tile_shape",
+                    mlir::DenseI64ArrayAttr::get(ctx, shapeArr));
         tileShapes[pc.getResult()] = {
             SmallVector<int64_t, 2>(shape),
             SmallVector<int64_t, 2>(tbTy.getValidShape())};

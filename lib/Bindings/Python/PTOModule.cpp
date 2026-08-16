@@ -1553,3 +1553,12 @@ void mlir::pto::python::populatePTODialectBindings(pybind11::module_ &m) {
 
     populatePTODialectSubmodule(m);
 }
+
+// Standalone pybind11 module entry point for the `_pto` extension.
+// This allows the PTO dialect Python bindings to be loaded as
+// `mlir._mlir_libs._pto` without requiring the full PTOASCompiler shared
+// library, matching the layout expected by the pto.py dialect wrapper.
+PYBIND11_MODULE(_pto, m) {
+  m.doc() = "PTO dialect Python bindings";
+  mlir::pto::python::populatePTODialectBindings(m);
+}
