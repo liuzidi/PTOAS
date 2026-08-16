@@ -16,7 +16,7 @@ from .._kernel_signature import DeviceParameterSpec, RuntimeScalarParameterSpec
 from .._types import _resolve
 from .native_build import build_native_library
 
-from ptoas.mlir.ir import BF16Type, Context, F16Type, F32Type, IndexType, IntegerType
+from mlir.ir import BF16Type, Context, F16Type, F32Type, IndexType, IntegerType
 
 if TYPE_CHECKING:
     from .._kernel_compilation import CompiledKernelHandle

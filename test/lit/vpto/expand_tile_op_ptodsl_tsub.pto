@@ -6,10 +6,10 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Test that PTOAS can use the in-process PTODSL TileLib service to expand the
-// single-candidate pto.tsub template.
+// Test that the unified PTODSL backend expands a legal full-shape PIPE_V tsub
+// through the preferred VMI candidate, then lowers it to VPTO.
 //
-// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
+// RUN: ptoas --enable-vmi --enable-op-fusion --pto-arch=a5 --pto-backend=vpto --emit-vpto --tile-lib-backend=ptodsl %s -o - 2>/dev/null | FileCheck %s
 
 // CHECK: func.func @TSUB
 // CHECK-NOT: pto.tsub ins
@@ -18,6 +18,8 @@
 // CHECK: pto.vlds
 // CHECK: pto.vsub
 // CHECK: pto.vsts
+// CHECK: pto.tilelib.candidate = "vmi_tsub"
+// CHECK: pto.tilelib.impl = "vmi"
 
 module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @TSUB() {

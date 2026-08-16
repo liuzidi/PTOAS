@@ -9,7 +9,9 @@
 
 from enum import Enum
 
-from ptoas.mlir.dialects import pto as _pto
+from ._bootstrap import make_context  # noqa: F401
+
+from mlir.dialects import pto as _pto
 
 
 class _ConstExprHelper:

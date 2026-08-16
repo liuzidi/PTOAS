@@ -9,54 +9,6 @@
 
 from __future__ import annotations
 
-import warnings
-from functools import wraps
-from typing import Callable, ParamSpec, TypeVar
-
-
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-class PTODSLDeprecationWarning(UserWarning):
-    """Warning emitted when a deprecated PTODSL interface is called."""
-
-
-def deprecated(reason: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Mark a PTODSL callable as deprecated and warn when it is called.
-
-    ``reason`` should describe the replacement or migration path, for example::
-
-        @deprecated("use pto.vadd(vector, scalar, mask) instead")
-        def vadds(vector, scalar, mask):
-            ...
-
-    The wrapper preserves the decorated callable's metadata and exposes a
-    ``__deprecated__`` marker for tooling.  ``stacklevel=2`` points the warning
-    at the caller of the deprecated interface rather than at this wrapper.
-    """
-
-    if not isinstance(reason, str) or not reason.strip():
-        raise TypeError("deprecated() requires a non-empty string reason")
-
-    def decorate(function: Callable[P, R]) -> Callable[P, R]:
-        if not callable(function):
-            raise TypeError("deprecated() can only decorate a callable")
-
-        @wraps(function)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            warnings.warn(
-                f"{function.__qualname__} is deprecated; {reason}",
-                PTODSLDeprecationWarning,
-                stacklevel=2,
-            )
-            return function(*args, **kwargs)
-
-        wrapper.__deprecated__ = reason
-        return wrapper
-
-    return decorate
-
 
 class PTODSLTracingMisuseError(TypeError):
     """Raised when authored Python misuses PTODSL runtime values during tracing."""
@@ -124,15 +76,6 @@ def jit_illegal_formal_annotation_error(name: str, annotation: object) -> TypeEr
         "Legacy host tensor annotations such as pto.tensor_spec(...), and low-level PTODSL "
         "types such as Tile, PartitionTensorView, VReg, or non-entry pointer forms do not "
         "belong at the host/kernel entry."
-    )
-
-
-def jit_struct_annotation_error(name: str) -> TypeError:
-    """Return one diagnostic for an invalid stack-local struct ABI annotation."""
-    return TypeError(
-        f"@pto.jit parameter '{name}' cannot use pto.struct_type(...) as an ABI annotation. "
-        "Stack-local structs must be created inside the traced function with "
-        "pto.declare_struct(...)."
     )
 
 
@@ -421,16 +364,6 @@ def inline_subkernel_value_escape_error(role: str, type_text: str) -> RuntimeErr
     )
 
 
-def physical_section_value_escape_error(source_kind: str, type_text: str) -> RuntimeError:
-    """Return a diagnostic for a value escaping a physical section."""
-    return RuntimeError(
-        f"cannot use a value defined in pto.section.{source_kind} outside that physical section "
-        f"(got {type_text}). Physical sections have lexical SSA scope; pass shared data "
-        "through a GM/UB buffer with explicit synchronization, or recompute the value "
-        "from section-entry inputs."
-    )
-
-
 def simd_value_escape_error(type_text: str) -> RuntimeError:
     """Return one diagnostic for transient SIMD values escaping a simd subkernel boundary."""
     return RuntimeError(
@@ -554,6 +487,9 @@ def unsupported_public_surface_error(name: str) -> AttributeError:
             "Use pto.alloc_tile(shape=..., dtype=..., memory_space=..., valid_shape=..., addr=...) "
             "to author tiles, and keep explicit tile-type construction inside internal implementation code only."
         ),
+        "vecscope": (
+            "Use @pto.tileop for named single-core helpers, or inline compute code with `with pto.tileop():`."
+        ),
         "as_ptr": (
             "Use tile.as_ptr(), view.as_ptr(), or partition.as_ptr() on the authored object itself "
             "instead of the removed pto.as_ptr(...) helper."
@@ -588,21 +524,17 @@ def unsupported_public_surface_error(name: str) -> AttributeError:
 
 
 __all__ = [
-    "PTODSLDeprecationWarning",
     "PTODSLTracingMisuseError",
-    "deprecated",
     "explicit_mode_required_error",
     "explicit_mode_required_with_context_error",
     "host_tensor_metadata_error",
     "jit_illegal_formal_annotation_error",
-    "jit_struct_annotation_error",
     "jit_constexpr_missing_default_error",
     "jit_keyword_only_non_constexpr_error",
     "jit_legacy_tensor_spec_entry_error",
     "jit_missing_annotation_error",
     "jit_non_gm_ptr_entry_error",
     "inline_subkernel_value_escape_error",
-    "physical_section_value_escape_error",
     "make_tensor_view_missing_metadata_error",
     "illegal_inline_subkernel_placement_error",
     "illegal_subkernel_placement_error",

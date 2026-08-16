@@ -122,7 +122,7 @@ def _host_compile_flags() -> list[str]:
     ]
 
 
-def _kernel_compile_flags(kernel_kind: str | None, target_arch: str) -> list[str]:
+def _kernel_compile_flags(kernel_kind: str, target_arch: str) -> list[str]:
     arch = aicore_arch_for_kernel_kind(kernel_kind, target_arch)
     return common_include_flags() + [
         "-std=gnu++17",
@@ -152,7 +152,7 @@ def _compile_launch_cpp(
     launch_cpp: Path,
     launch_object: Path,
     *,
-    kernel_kind: str | None,
+    kernel_kind: str,
     target_arch: str,
     export_macro: str,
 ) -> None:
@@ -175,7 +175,7 @@ def _link_shared_library(
     kernel_object: Path,
     shared_library: Path,
     *,
-    kernel_kind: str | None,
+    kernel_kind: str,
 ) -> None:
     bisheng = resolve_bisheng()
     soname = shared_library.name

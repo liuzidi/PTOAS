@@ -22,10 +22,10 @@ from ._scalar_adaptation import coerce_runtime_index_value, normalize_runtime_bi
 from ._surface_types import PartitionTensorView, TensorView, Tile
 from ._types import _normalize_address_space, _resolve, ptr
 
-from ptoas.mlir.dialects import arith
-from ptoas.mlir.dialects import memref
-from ptoas.mlir.dialects import pto as _pto
-from ptoas.mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type, VectorType
+from mlir.dialects import arith
+from mlir.dialects import memref
+from mlir.dialects import pto as _pto
+from mlir.ir import IndexType, IntegerAttr, IntegerType, MemRefType, ShapedType, StridedLayoutAttr, Type, VectorType
 
 
 def _validate_surface_value_access(value):
@@ -387,7 +387,7 @@ class MaskResultValue(_SurfaceValue):
 
 
 class AddressValue(_SurfaceValue):
-    """Author-facing address view backed by a PTO ptr."""
+    """Author-facing address view backed by either a PTO ptr or a memref."""
 
     def __add__(self, offset):
         return AddressOffsetValue(self, offset)
@@ -462,7 +462,7 @@ class TileElementRef:
 
 
 class TileSliceValue(_SurfaceValue):
-    """Author-facing tile slice descriptor produced by `tile[row, col:]` indexing."""
+    """Author-facing memref view produced by `tile[row, col:]` style indexing."""
 
     def __init__(self, value, *, tile: "TileValue", offsets, shape):
         super().__init__(value)
@@ -520,40 +520,34 @@ class _TileValidShapeView:
 
     def __init__(self, tile: "TileValue"):
         self._tile = tile
+        self._cache: dict[int, object] = {}
 
     def __getitem__(self, index: int):
-        return self._tile._get_valid_shape_dim(index)
-
-
-class TileValue(_SurfaceValue, Tile):
-    """Author-facing tile handle with surface-style accessors."""
-
-    def _get_valid_shape_dim(self, index: int):
-        logical_rank = len(self.shape) if self.shape is not None else 2
+        logical_rank = len(self._tile.shape) if self._tile.shape is not None else 2
         allowed = {0} if logical_rank == 1 else {0, 1}
         if index not in allowed:
             if logical_rank == 1:
                 raise IndexError("PTODSL rank-1 tile.valid_shape currently supports only index 0")
             raise IndexError("PTODSL tile.valid_shape currently supports indices 0 and 1")
-        cached = self._valid_shape_cache.get(index)
+        cached = self._cache.get(index)
         if cached is not None:
             return cached
-        if self.static_valid_shape is not None:
-            dim = self.static_valid_shape[index]
+        if self._tile.static_valid_shape is not None:
+            dim = self._tile.static_valid_shape[index]
             if dim is not None:
                 value = _index_const(dim) if _is_python_index_literal(dim) else unwrap_surface_value(dim)
                 value = wrap_surface_value(value)
-                self._valid_shape_cache[index] = value
+                self._cache[index] = value
                 return value
         try:
             if logical_rank == 1:
-                value = wrap_surface_value(_pto.TileValidColsOp(self.value).result)
+                value = wrap_surface_value(_pto.TileValidColsOp(self._tile.value).result)
             elif index == 0:
-                value = wrap_surface_value(_pto.TileValidRowsOp(self.value).result)
+                value = wrap_surface_value(_pto.TileValidRowsOp(self._tile.value).result)
             else:
-                value = wrap_surface_value(_pto.TileValidColsOp(self.value).result)
+                value = wrap_surface_value(_pto.TileValidColsOp(self._tile.value).result)
         except Exception:
-            static_dim = _fallback_static_valid_dim(self.type, index)
+            static_dim = _fallback_static_valid_dim(self._tile.type, index)
             if static_dim is None:
                 raise RuntimeError(
                     "tile.valid_shape could not be lowered because the current "
@@ -561,8 +555,12 @@ class TileValue(_SurfaceValue, Tile):
                     "the tile type does not carry a recoverable static bound"
                 ) from None
             value = wrap_surface_value(_index_const(static_dim))
-        self._valid_shape_cache[index] = value
+        self._cache[index] = value
         return value
+
+
+class TileValue(_SurfaceValue, Tile):
+    """Author-facing tile handle with surface-style accessors."""
 
     def __init__(
         self,
@@ -593,11 +591,11 @@ class TileValue(_SurfaceValue, Tile):
         self.static_valid_shape = tuple(valid_shape) if valid_shape is not None else (
             parsed["valid_dims"] if parsed is not None else None
         )
-        self._valid_shape_cache: dict[int, object] = {}
+        self._valid_shape = _TileValidShapeView(self)
 
     @property
     def valid_shape(self):
-        return _TileValidShapeView(self)
+        return self._valid_shape
 
     @valid_shape.setter
     def valid_shape(self, dims):
@@ -605,7 +603,7 @@ class TileValue(_SurfaceValue, Tile):
 
         set_tile_valid_shape(self, dims)
         self.static_valid_shape = tuple(dims)
-        self._valid_shape_cache.clear()
+        self._valid_shape._cache.clear()
 
     @property
     def surface_metadata(self):
@@ -1006,13 +1004,112 @@ def _materialize_tile_slice(tile: TileValue, key):
 
 
 def _build_tile_slice_view(tile: TileValue, *, raw_offsets, shape):
-    return TileSliceValue(tile.value, tile=tile, offsets=tuple(raw_offsets), shape=shape)
+    base_memref = _emit_tile_memref(tile)
+    base_type = MemRefType(base_memref.type)
+    rank = len(base_type.shape)
+    offset_operands, static_offsets = _split_dynamic_index_operands(raw_offsets)
+    shape_operands, static_shape = _split_dynamic_index_operands(shape)
+    base_strides, base_offset = base_type.get_strides_and_offset()
+    if rank == 1:
+        slice_type = _make_strided_memref_type(
+            [_static_extent_if_known(shape[0])],
+            base_type.element_type,
+            [base_strides[0]],
+            base_type.memory_space,
+            offset=_compose_static_subview_offset(base_offset, base_strides, raw_offsets),
+        )
+        slice_value = memref.SubViewOp(
+            slice_type,
+            base_memref,
+            offset_operands,
+            shape_operands,
+            [],
+            static_offsets,
+            static_shape,
+            [1],
+        ).result
+        return TileSliceValue(slice_value, tile=tile, offsets=tuple(raw_offsets), shape=shape)
+
+    slice_type = _make_strided_memref_type(
+        [_static_extent_if_known(shape[0])],
+        base_type.element_type,
+        [base_strides[1]],
+        base_type.memory_space,
+        offset=_compose_static_subview_offset(base_offset, base_strides, raw_offsets),
+    )
+    slice_value = memref.SubViewOp(
+        slice_type,
+        base_memref,
+        offset_operands,
+        shape_operands,
+        [],
+        static_offsets,
+        [1, static_shape[0]],
+        [1, 1],
+    ).result
+    return TileSliceValue(slice_value, tile=tile, offsets=tuple(raw_offsets), shape=shape)
+
+
+def _emit_tile_memref(tile: TileValue):
+    memref_type = infer_memref_type_from_surface_value(tile)
+    return _pto.TileBufAddrOp(memref_type, tile.value).result
 
 
 def _dynamic_extent(static_dim, start):
     if _is_python_index_literal(start):
         return static_dim - start
     return arith.SubIOp(_index_const(static_dim), _coerce_index_value(start)).result
+
+
+def _static_extent_if_known(extent):
+    return extent if _is_python_index_literal(extent) else ShapedType.get_dynamic_size()
+
+
+def _static_index_attr(value):
+    return value if _is_python_index_literal(value) else ShapedType.get_dynamic_size()
+
+
+def _split_dynamic_index_operands(values):
+    operands = []
+    static_attrs = []
+    for value in values:
+        if _is_python_index_literal(value):
+            static_attrs.append(value)
+        else:
+            operands.append(_coerce_index_value(value))
+            static_attrs.append(ShapedType.get_dynamic_size())
+    return operands, static_attrs
+
+
+def _make_strided_memref_type_with_offset(shape, element_type, strides, memory_space, *, offset):
+    return MemRefType.get(
+        list(shape),
+        element_type,
+        StridedLayoutAttr.get(offset, list(strides)),
+        memory_space,
+    )
+
+
+def _make_strided_memref_type(shape, element_type, strides, memory_space, *, offset=ShapedType.get_dynamic_size()):
+    return _make_strided_memref_type_with_offset(
+        shape,
+        element_type,
+        strides,
+        memory_space,
+        offset=offset,
+    )
+
+
+def _compose_static_subview_offset(base_offset, base_strides, raw_offsets):
+    if base_offset == ShapedType.get_dynamic_size():
+        return ShapedType.get_dynamic_size()
+
+    linear_offset = base_offset
+    for stride, authored_offset in zip(base_strides, raw_offsets):
+        if not _is_python_index_literal(authored_offset):
+            return ShapedType.get_dynamic_size()
+        linear_offset += stride * authored_offset
+    return linear_offset
 
 
 def _mul_index(lhs, rhs):

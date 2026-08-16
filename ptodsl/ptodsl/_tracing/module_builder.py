@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from ptoas.mlir.dialects import func
-from ptoas.mlir.ir import Attribute, InsertionPoint, Module, Operation, StringAttr, UnitAttr
+from mlir.dialects import func
+from mlir.ir import Attribute, InsertionPoint, Module, Operation, StringAttr, UnitAttr
 
 
 class ModuleStyle(str, Enum):
@@ -30,7 +30,7 @@ class KernelModuleSpec:
 
     function_name: str
     target_arch: str
-    kernel_kind: str | None
+    kernel_kind: str
     kernel_kind_explicit: bool = False
     backend: str = "vpto"
     entry: bool = True

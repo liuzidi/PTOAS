@@ -17,8 +17,8 @@ from ._types import (
     _strip_integer_signedness,
 )
 
-from ptoas.mlir.dialects import arith
-from ptoas.mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType, VectorType
+from mlir.dialects import arith
+from mlir.ir import BF16Type, F16Type, F32Type, FloatAttr, IndexType, IntegerType, VectorType
 
 
 def classify_runtime_scalar_type(type_obj):
@@ -121,26 +121,6 @@ def coerce_runtime_integer_value(value, target_type, *, context: str):
     return coerce_integer_like(value, target_type)
 
 
-def coerce_runtime_integer_to_i1(value, *, context: str):
-    """Convert one runtime integer-like value to ``i1`` using nonzero truthiness."""
-    if not hasattr(value, "type"):
-        raise TypeError(f"{context} expects an integer-like runtime scalar, got {value!r}")
-
-    if IndexType.isinstance(value.type):
-        zero = arith.ConstantOp(IndexType.get(), 0).result
-        return arith.CmpIOp(arith.CmpIPredicate.ne, value, zero).result
-
-    if not IntegerType.isinstance(value.type):
-        raise TypeError(f"{context} expects an integer-like runtime scalar, got {value.type}")
-
-    signless_type = _signless_integer_type(value.type)
-    signless_value = _strip_integer_signedness(value)
-    if IntegerType(signless_type).width == 1:
-        return signless_value
-    zero = arith.ConstantOp(signless_type, 0).result
-    return arith.CmpIOp(arith.CmpIPredicate.ne, signless_value, zero).result
-
-
 def coerce_runtime_i1_value(value, *, context: str):
     """Normalize one authored bool/integer-like value/literal to signless i1."""
     i1_type = IntegerType.get_signless(1)
@@ -156,7 +136,7 @@ def coerce_runtime_i1_value(value, *, context: str):
     kind = classify_runtime_scalar_type(value.type)
     if kind == "float":
         raise TypeError(f"{context} expects a bool or integer-like scalar, got {value.type}")
-    return coerce_runtime_integer_to_i1(value, context=context)
+    return coerce_integer_like(value, i1_type)
 
 
 def normalize_runtime_binary_operands(lhs, rhs):
@@ -218,8 +198,7 @@ def coerce_integer_like(value, target_type):
 
     if source_width < target_width:
         source_signedness = _integer_signedness(source_type)
-        # i1 carries boolean truth values; widening must preserve 0/1 storage.
-        if source_width == 1 or source_signedness == "unsigned":
+        if source_signedness == "unsigned":
             widened = arith.ExtUIOp(signless_target, signless_source).result
         else:
             widened = arith.ExtSIOp(signless_target, signless_source).result
@@ -253,14 +232,6 @@ def _coerce_float_like(value, target_type):
     if value.type == target_type:
         return value
 
-    source_shape = _float_shape(value.type)
-    target_shape = _float_shape(target_type)
-    if source_shape != target_shape:
-        raise TypeError(
-            "cannot coerce floating-point values with different shapes: "
-            f"{value.type} and {target_type}"
-        )
-
     source_width = _float_bytewidth(value.type)
     target_width = _float_bytewidth(target_type)
     if source_width < target_width:
@@ -273,15 +244,7 @@ def _coerce_float_like(value, target_type):
     )
 
 
-def _float_shape(type_obj):
-    if VectorType.isinstance(type_obj):
-        return tuple(VectorType(type_obj).shape)
-    return ()
-
-
 def _float_bytewidth(type_obj):
-    if VectorType.isinstance(type_obj):
-        return _float_bytewidth(VectorType(type_obj).element_type)
     if BF16Type.isinstance(type_obj) or F16Type.isinstance(type_obj):
         return 2
     if F32Type.isinstance(type_obj):
@@ -293,7 +256,6 @@ __all__ = [
     "classify_runtime_scalar_type",
     "coerce_integer_like",
     "coerce_runtime_i1_value",
-    "coerce_runtime_integer_to_i1",
     "coerce_runtime_index_value",
     "coerce_runtime_integer_value",
     "coerce_scalar_value_to_type",

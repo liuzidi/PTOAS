@@ -17,8 +17,8 @@ from .. import pto
 from .._surface_values import unwrap_surface_value, wrap_surface_value
 from .._tracing import KernelModuleSpec, ModuleStyle, CallbackTracingRuntime
 from .._types import _resolve, mask_type, vreg_type
-from ptoas.mlir.dialects import func
-from ptoas.mlir.ir import InsertionPoint, Location, Module, StringAttr, Attribute, UnitAttr
+from mlir.dialects import func
+from mlir.ir import InsertionPoint, Location, Module, StringAttr, Attribute, UnitAttr
 
 
 class _SoftLibTraceRuntime(CallbackTracingRuntime):
@@ -26,7 +26,7 @@ class _SoftLibTraceRuntime(CallbackTracingRuntime):
         # A soft helper is a real vector function, unlike a launch entry.  The
         # callback returns the helper result and the return value is captured
         # while tracing below.
-        from ptoas.mlir.dialects import func
+        from mlir.dialects import func
         func.ReturnOp([self._result])
 
     def trace_entry(self, *args):

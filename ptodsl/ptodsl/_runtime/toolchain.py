@@ -27,12 +27,36 @@ def resolve_ptoas_binary() -> Path:
             f"PTOAS_BIN is set but does not resolve to an existing executable: {env_override}"
         )
 
+    for var in ("PTO_BUILD_DIR", "PTO_INSTALL_DIR"):
+        if var in os.environ:
+            cand = Path(os.environ[var]) / "tools" / "ptoas" / "ptoas"
+            if cand.is_file():
+                return cand
+            cand2 = Path(os.environ[var]) / "bin" / "ptoas"
+            if cand2.is_file():
+                return cand2
+
+    repo_root = Path(__file__).resolve().parents[4]
+    candidates = [
+        repo_root / "build" / "tools" / "ptoas" / "ptoas",
+        repo_root / "install" / "bin" / "ptoas",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    for start in [Path.cwd()] + list(Path.cwd().parents):
+        for pattern in [start / "build" / "tools" / "ptoas" / "ptoas",
+                        start / "install" / "bin" / "ptoas"]:
+            if pattern.is_file():
+                return pattern
+
     from_path = shutil.which("ptoas")
     if from_path:
         return Path(from_path)
 
     raise FileNotFoundError(
-        "unable to locate ptoas; install it, add it to PATH, or set PTOAS_BIN"
+        "unable to locate ptoas; build ptoas or add it to PATH after sourcing scripts/ptoas_env.sh"
     )
 
 
@@ -61,11 +85,7 @@ def ascend_driver_path() -> Path:
 
 
 def _append_include_flag(flags: list[str], path: Path) -> None:
-    try:
-        is_dir = path.is_dir()
-    except OSError:
-        return
-    if not is_dir:
+    if not path.is_dir():
         return
     flag = f"-I{path}"
     if flag not in flags:
@@ -150,10 +170,8 @@ def runtime_library_flags(*, sim_mode: bool = False) -> list[str]:
     return flags
 
 
-def aicore_arch_for_kernel_kind(kernel_kind: str | None, target_arch: str) -> str:
+def aicore_arch_for_kernel_kind(kernel_kind: str, target_arch: str) -> str:
     target = target_arch.lower()
-    if kernel_kind is None:
-        return "dav-c220" if target in {"a2", "a3"} else "dav-c310"
     if kernel_kind == "vector":
         if target in {"a2", "a3"}:
             return "dav-c220-vec"

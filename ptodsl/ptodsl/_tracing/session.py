@@ -12,19 +12,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
-import inspect
 
 from .._diagnostics import (
     inline_subkernel_value_escape_error,
     inline_tileop_capture_type_error,
-    physical_section_value_escape_error,
     subkernel_kernel_kind_mismatch_error,
 )
-from .._cache_signature import cache_signature_atom
-from .._scalar_coercion import coerce_scalar_to_type
 from .._kernel_signature import RuntimeScalarParameterSpec
 from .._ops import const
-from .._surface_types import const_expr as _const_expr_marker
 from .._surface_values import (
     AddressOffsetValue,
     AllocatedBufferValue,
@@ -32,19 +27,18 @@ from .._surface_values import (
     is_tile_ir_type,
     unwrap_surface_value,
     wrap_like_surface_value,
-    wrap_surface_value,
 )
 from .control_flow import (
     build_carry_loop_frame,
     finish_carry_loop_frame,
     yield_carry_loop_state,
 )
-from .._types import _resolve, _strip_integer_signedness, int1
+from .._types import _strip_integer_signedness
 from .module_builder import create_container_child_module
 
-from ptoas.mlir.dialects import arith, func
-from ptoas.mlir.dialects import pto as _pto
-from ptoas.mlir.ir import (
+from mlir.dialects import arith, func
+from mlir.dialects import pto as _pto
+from mlir.ir import (
     Attribute,
     FlatSymbolRefAttr,
     IndexType,
@@ -53,7 +47,6 @@ from ptoas.mlir.ir import (
     IntegerType,
     Operation,
     StringAttr,
-    Type,
     UnitAttr,
 )
 
@@ -66,7 +59,6 @@ class HelperFunctionSpec:
     arg_types: tuple
     result_types: tuple = ()
     attributes: tuple[tuple[str, object], ...] = ()
-    identity: tuple = ()
 
     def cache_key(self) -> tuple:
         """Return one stable ABI-sensitive cache key for this helper signature."""
@@ -77,15 +69,9 @@ class HelperFunctionSpec:
             tuple((attr_name, str(attr_value)) for attr_name, attr_value in self.attributes),
         )
 
-    def specialization_key(self) -> tuple:
-        """Return one stable semantic cache key for this helper specialization."""
-        if not self.identity:
-            return self.cache_key()
-        return (*self.cache_key(), self.identity)
-
     def specialized_symbol_name(self) -> str:
-        """Return one stable symbol name that is unique for this helper specialization."""
-        digest = hashlib.sha1(repr(self.specialization_key()).encode("utf-8")).hexdigest()[:10]
+        """Return one stable symbol name that is unique for this helper ABI."""
+        digest = hashlib.sha1(repr(self.cache_key()).encode("utf-8")).hexdigest()[:10]
         return f"{self.symbol_name}__ptodsl_{digest}"
 
 
@@ -178,12 +164,8 @@ class TraceSession:
         }
         self._subkernel_stack: list[SubkernelTraceFrame] = []
         self._carry_loop_stack = []
-        self._active_physical_sections: set[object] = set()
-        self._authored_physical_sections: dict[object, set[str]] = {}
         self._inline_subkernel_counter = 0
         self._escaped_inline_values: dict[object, tuple[str, str]] = {}
-        self._physical_section_stack: list[tuple[str, object]] = []
-        self._physical_section_values: dict[object, tuple[str, str]] = {}
 
     @property
     def current_function(self):
@@ -234,105 +216,8 @@ class TraceSession:
         """Record the root entry block for the active trace."""
         self.entry_block = entry_block
 
-    def _physical_section_function_key(self):
-        return self.current_function.operation
-
-    def _enclosing_physical_section(self):
-        owner = InsertionPoint.current.block.owner
-        while owner is not None:
-            if owner.operation.name in {"pto.section.cube", "pto.section.vector"}:
-                return owner
-            owner = owner.operation.parent
-        return None
-
-    def _existing_physical_section_kinds(self) -> set[str]:
-        kinds = set()
-        for op in self._walk_op_tree(self.current_function.body.blocks[0].operations):
-            if op.operation.name == "pto.section.cube":
-                kinds.add("cube")
-            elif op.operation.name == "pto.section.vector":
-                kinds.add("vector")
-        return kinds
-
-    def _reject_duplicate_physical_section(self, kind: str, *, source: str) -> None:
-        function_key = self._physical_section_function_key()
-        authored_kinds = self._authored_physical_sections.get(function_key, set())
-        if kind in authored_kinds or kind in self._existing_physical_section_kinds():
-            raise RuntimeError(
-                f"{source} would create a second {kind!r} physical section in "
-                f"function @{self.current_function_symbol_name}; each physical "
-                "section kind may appear at most once in a function"
-            )
-
-    @contextmanager
-    def enter_physical_section(self, kind: str):
-        """Create one explicit cube/vector section in the active function."""
-        module_spec = self.current_function_module_spec
-        if (
-            getattr(module_spec, "kernel_kind_explicit", False)
-            and getattr(module_spec, "kernel_kind", None) in {"cube", "vector"}
-        ):
-            raise RuntimeError(
-                "pto.section() cannot be combined with explicit "
-                "@pto.jit(kernel_kind=...); use exactly one physical-placement contract"
-            )
-
-        function_key = self._physical_section_function_key()
-        if self.current_subkernel is not None:
-            raise RuntimeError(
-                "pto.section() is not allowed inside a cube or simd subkernel body; "
-                "the subkernel already defines its physical placement"
-            )
-        if (
-            function_key in self._active_physical_sections
-            or self._enclosing_physical_section() is not None
-        ):
-            raise RuntimeError("nested pto.section() scopes are not allowed")
-
-        self._reject_duplicate_physical_section(
-            kind, source=f"pto.section({kind!r})"
-        )
-
-        section_op = _pto.SectionCubeOp() if kind == "cube" else _pto.SectionVectorOp()
-        section_block = section_op.body.blocks.append()
-        authored_kinds = self._authored_physical_sections.setdefault(function_key, set())
-        authored_kinds.add(kind)
-        self._active_physical_sections.add(function_key)
-        try:
-            with InsertionPoint(section_block):
-                self._physical_section_stack.append((kind, section_op))
-                try:
-                    yield section_op
-                finally:
-                    self._physical_section_stack.pop()
-                self._record_physical_section_values(section_op, kind)
-        except BaseException:
-            if section_op.operation.parent is not None:
-                section_op.operation.erase()
-            authored_kinds.remove(kind)
-            if not authored_kinds:
-                self._authored_physical_sections.pop(function_key, None)
-            raise
-        finally:
-            self._active_physical_sections.remove(function_key)
-
-    def _record_physical_section_values(self, section_op, kind: str) -> None:
-        """Record values defined by *section_op* for source-level escape checks."""
-        for op_view in self._walk_op_tree([section_op]):
-            for result in op_view.operation.results:
-                self._physical_section_values[result] = (kind, str(result.type))
-            for region in op_view.operation.regions:
-                for block in region.blocks:
-                    for argument in block.arguments:
-                        self._physical_section_values[argument] = (kind, str(argument.type))
-
     def validate_surface_value_access(self, value) -> None:
         """Reject inline-subkernel SSA values that escaped their outlined helper body."""
-        raw_value = getattr(value, "_value", value)
-        section_record = self._physical_section_values.get(raw_value)
-        if section_record is not None and not self._is_value_inside_active_section(raw_value):
-            kind, type_text = section_record
-            raise physical_section_value_escape_error(kind, type_text)
         try:
             record = self._escaped_inline_values.get(value)
         except TypeError:
@@ -344,20 +229,6 @@ class TraceSession:
             return
         role, type_text = record
         raise inline_subkernel_value_escape_error(role, type_text)
-
-    def _is_value_inside_active_section(self, value) -> bool:
-        """Return whether *value* belongs to the currently traced section."""
-        owner = getattr(value, "owner", None)
-        if owner is None:
-            return False
-        for _, section_op in reversed(self._physical_section_stack):
-            section_operation = getattr(section_op, "operation", section_op)
-            current = getattr(owner, "operation", owner)
-            while current is not None:
-                if current is section_operation:
-                    return True
-                current = getattr(current, "parent", None)
-        return False
 
     @contextmanager
     def enter_function(self, ir_fn, *, owner_symbol_name: str | None = None):
@@ -380,15 +251,10 @@ class TraceSession:
 
     def _create_subkernel_section_op(self, role: str):
         if role == "simd":
-            kind = "vector"
-        elif role == "cube":
-            kind = "cube"
-        else:
-            return None
-        self._reject_duplicate_physical_section(
-            kind, source=f"pto.{role} subkernel"
-        )
-        return _pto.SectionVectorOp() if kind == "vector" else _pto.SectionCubeOp()
+            return _pto.SectionVectorOp()
+        if role == "cube":
+            return _pto.SectionCubeOp()
+        return None
 
     def _create_inline_subkernel_wrapper(
         self,
@@ -698,98 +564,6 @@ class TraceSession:
         func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in arg_templates])
         return None
 
-    def lower_ptodsl_func_call(self, func_template, *args, **kwargs):
-        """Lower one ``@pto.func`` helper call in the active trace."""
-        bound = func_template.signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        runtime_arg_values = []
-        runtime_arg_templates = []
-        param_bindings = []
-        constexpr_bindings = []
-        type_hints = getattr(func_template, "type_hints", {})
-        for name, param in func_template.signature.parameters.items():
-            if param.kind not in {
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            }:
-                raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
-            original_value = bound.arguments[name]
-            annotation = type_hints.get(name, param.annotation)
-            if annotation is _const_expr_marker:
-                value = self._normalize_ptodsl_func_constexpr_argument(name, original_value)
-                param_bindings.append(("constexpr", name, param, value))
-                constexpr_bindings.append((name, cache_signature_atom(value)))
-                continue
-            value = self._normalize_ptodsl_func_argument(
-                name,
-                annotation,
-                original_value,
-            )
-            param_bindings.append(("runtime", name, param, original_value))
-            runtime_arg_values.append(value)
-            runtime_arg_templates.append(original_value)
-
-        runtime_arg_values = tuple(runtime_arg_values)
-        runtime_arg_templates = tuple(runtime_arg_templates)
-        identity = func_template.__ptodsl_cache_signature__()
-        if constexpr_bindings:
-            identity = (
-                identity,
-                ("constexprs", tuple(constexpr_bindings)),
-            )
-        owner_symbol_name = self.current_function_owner_symbol_name
-        helper_spec = HelperFunctionSpec(
-            symbol_name=func_template.spec.symbol_name,
-            arg_types=tuple(unwrap_surface_value(arg).type for arg in runtime_arg_values),
-            result_types=self._declared_ptodsl_func_result_types(func_template),
-            attributes=(("pto.ptodsl.callable_kind", StringAttr.get("func")),),
-            identity=identity,
-        )
-        helper_fn, created = self.get_or_create_helper_function(
-            helper_spec,
-            owner_symbol_name=owner_symbol_name,
-        )
-
-        if created:
-            entry_block = helper_fn.add_entry_block()
-            entry_args = tuple(entry_block.arguments)
-            wrapped_args = []
-            wrapped_kwargs = {}
-            entry_arg_index = 0
-            for binding_kind, name, param, value in param_bindings:
-                if binding_kind == "constexpr":
-                    wrapped_value = value
-                else:
-                    entry_arg = entry_args[entry_arg_index]
-                    arg_template = runtime_arg_templates[entry_arg_index]
-                    entry_arg_index += 1
-                    wrapped_value = wrap_like_surface_value(arg_template, entry_arg)
-                if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
-                    wrapped_args.append(wrapped_value)
-                elif param.kind == inspect.Parameter.KEYWORD_ONLY:
-                    wrapped_kwargs[name] = wrapped_value
-                else:
-                    raise TypeError("@pto.func helpers do not support var-positional or var-keyword parameters yet")
-            with (
-                self.enter_function(helper_fn, owner_symbol_name=owner_symbol_name),
-                self.suspend_subkernel_scope(),
-                InsertionPoint(entry_block),
-            ):
-                result = func_template.emit_body(*wrapped_args, **wrapped_kwargs)
-                return_values = self._normalize_ptodsl_func_return_values(
-                    result,
-                    func_template=func_template,
-                    result_types=helper_spec.result_types,
-                )
-                if return_values:
-                    func.ReturnOp([unwrap_surface_value(value) for value in return_values])
-                else:
-                    func.ReturnOp([])
-
-        call_op = func.CallOp(helper_fn, [unwrap_surface_value(arg) for arg in runtime_arg_values])
-        return self._wrap_ptodsl_func_call_results(call_op.results)
-
     def begin_carry_loop(self, start, stop, step, state_items):
         """Materialize one authored ``pto.for_(...).carry(...)`` loop body."""
         frame = build_carry_loop_frame(start, stop, step, state_items)
@@ -1010,113 +784,6 @@ class TraceSession:
                 return helper
         return None
 
-    def _normalize_ptodsl_func_argument(self, name: str, annotation, value):
-        raw_value = unwrap_surface_value(value)
-        target_type = None
-        if annotation is not inspect.Parameter.empty:
-            try:
-                target_type = _resolve(annotation)
-            except Exception:
-                target_type = annotation
-        if hasattr(raw_value, "type"):
-            if not isinstance(target_type, Type):
-                return raw_value
-            return coerce_scalar_to_type(
-                raw_value,
-                target_type,
-                context=f"@pto.func parameter {name!r}",
-            )
-        if target_type is not None:
-            try:
-                return coerce_scalar_to_type(
-                    raw_value,
-                    target_type,
-                    context=f"@pto.func parameter {name!r}",
-                )
-            except TypeError:
-                pass
-        if isinstance(raw_value, bool):
-            return const(int(raw_value), dtype=int1)
-        if isinstance(raw_value, int):
-            return const(raw_value)
-        raise TypeError(
-            f"@pto.func parameter {name!r} expects a traced runtime value or a supported literal, "
-            f"got {raw_value!r}"
-        )
-
-    def _normalize_ptodsl_func_constexpr_argument(self, name: str, value):
-        raw_value = unwrap_surface_value(value)
-        if hasattr(raw_value, "type"):
-            raise TypeError(
-                f"@pto.func const_expr parameter {name!r} expects a compile-time Python value, "
-                f"got traced runtime value of type {raw_value.type}"
-            )
-        return raw_value
-
-    def _declared_ptodsl_func_result_types(self, func_template):
-        declared_returns = func_template.declared_returns
-        if declared_returns is None or declared_returns is type(None):
-            return ()
-        if isinstance(declared_returns, (tuple, list)):
-            return tuple(_resolve(return_type) for return_type in declared_returns)
-        return (_resolve(declared_returns),)
-
-    def _normalize_ptodsl_func_return_values(self, result, *, func_template, result_types):
-        if result is None:
-            if result_types:
-                raise TypeError(
-                    f"@pto.func {func_template.spec.symbol_name!r} must return "
-                    f"{len(result_types)} value(s) matching its declared return type"
-                )
-            return ()
-        if isinstance(result, tuple):
-            values = result
-        elif isinstance(result, list):
-            values = tuple(result)
-        else:
-            values = (result,)
-
-        if len(values) != len(result_types):
-            raise TypeError(
-                f"@pto.func {func_template.spec.symbol_name!r} returned {len(values)} value(s), "
-                f"but its declared return type expects {len(result_types)}"
-            )
-
-        normalized = []
-        for index, (value, target_type) in enumerate(zip(values, result_types)):
-            raw_value = unwrap_surface_value(value)
-            if hasattr(raw_value, "type"):
-                if str(raw_value.type) != str(target_type):
-                    raise TypeError(
-                        f"@pto.func return value {index} has type {raw_value.type}, "
-                        f"but the declared return type is {target_type}"
-                    )
-                normalized.append(raw_value)
-                continue
-            try:
-                normalized.append(
-                    coerce_scalar_to_type(
-                        raw_value,
-                        target_type,
-                        context=f"@pto.func return value {index}",
-                    )
-                )
-                continue
-            except TypeError:
-                pass
-            raise TypeError(
-                f"@pto.func return value {index} must match declared type {target_type}, got {raw_value!r}"
-            )
-        return tuple(normalized)
-
-    def _wrap_ptodsl_func_call_results(self, results):
-        if not results:
-            return None
-        wrapped = tuple(wrap_surface_value(result) for result in results)
-        if len(wrapped) == 1:
-            return wrapped[0]
-        return wrapped
-
     def _attach_ptodsl_logical_name_attr(self, func_op, logical_name: str) -> None:
         """Mark one ABI-specialized PTODSL symbol with its authored logical name."""
         func_op.attributes["pto.ptodsl.logical_name"] = StringAttr.get(logical_name)
@@ -1131,7 +798,7 @@ class TraceSession:
         owner_symbol_name = (
             self.current_function_owner_symbol_name if owner_symbol_name is None else owner_symbol_name
         )
-        cache_key = (owner_symbol_name, spec.specialization_key())
+        cache_key = (owner_symbol_name, spec.cache_key())
         helper = self._helpers.get(cache_key)
         if helper is not None:
             return helper, False
@@ -1154,7 +821,7 @@ class TraceSession:
 
     def get_or_create_kernel_module_primary_function(self, spec: HelperFunctionSpec, module_spec):
         """Look up or create the primary definition for one kernel-module callee."""
-        cache_key = spec.specialization_key()
+        cache_key = spec.cache_key()
         helper = self._kernel_module_primary_functions.get(cache_key)
         if helper is not None:
             return helper, False

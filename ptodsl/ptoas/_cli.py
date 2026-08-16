@@ -1,75 +1,52 @@
-# Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-# CANN Open Software License Agreement Version 2.0 (the "License").
-# Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-# See LICENSE in the root of the software repository for the full text of the License.
-
-"""Standard Python console entry point for PTOAS."""
-
+"""Build-tree ptoas CLI entry point."""
 from __future__ import annotations
-
-import os
-import sys
 from pathlib import Path
 from typing import Sequence
+import sys
+import os
+import ctypes
 
-
-def _resolve_wrapper_path(argv0: str | None = None) -> Path:
-    candidate = argv0 if argv0 is not None else sys.argv[0]
-    wrapper = Path(candidate)
-    if wrapper.exists():
-        return wrapper.resolve()
-
-    raise SystemExit(f"unable to locate the active ptoas entry point: {candidate}")
-
-
-def _load_native_module():
-    from ptoas import _core
-
-    return _core
-
-
-def _resolve_tileops_dir(native_module) -> Path:
-    module_file = getattr(native_module, "__file__", None)
-    if not module_file:
-        raise SystemExit("ptoas._core does not expose a module file")
-
-    package_root = Path(module_file).resolve().parent
-    runtime_root = package_root / "_runtime"
-    tileops_dir = runtime_root / "share" / "ptoas" / "TileOps"
-    if not tileops_dir.is_dir():
-        raise SystemExit(
-            "unable to locate packaged PTOAS TileOps resources: expected "
-            f"{tileops_dir}"
-        )
-    return tileops_dir.resolve()
-
-
-def launch(user_args: Sequence[str], *, wrapper: Path | None = None) -> int:
-    native_module = _load_native_module()
-    tileops_dir = _resolve_tileops_dir(native_module)
-    wrapper = wrapper.resolve() if wrapper is not None else _resolve_wrapper_path()
-
-    os.environ["PTOAS_BIN"] = str(wrapper)
-    argv = [str(wrapper)]
-    argv.extend(user_args)
-
-    tileops_python_root = str(tileops_dir.parent)
-    inserted_tileops_root = tileops_python_root not in sys.path
-    if inserted_tileops_root:
-        sys.path.insert(0, tileops_python_root)
-    try:
-        return int(native_module.main(argv))
-    finally:
-        if inserted_tileops_root:
-            sys.path.remove(tileops_python_root)
-
-
-def main() -> int:
-    return launch(sys.argv[1:])
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def launch(argv: Sequence[str], *, wrapper: Path) -> int:
+    build_root = Path("/data/liuzidi/PTOAS/build")
+    source_root = Path("/data/liuzidi/PTOAS")
+    python_root = build_root / "python"
+    mlir_core = Path("/data/liuzidi/llvm-workspace/llvm-project/build-shared/tools/mlir/python_packages/mlir_core")
+    # ptoas_pkg = build/python/ptoas (only the ptoas package, NOT mlir)
+    
+    env = os.environ
+    env["PTOAS_HOME"] = str(build_root)
+    env["PTOAS_BIN"] = str(wrapper)
+    env["PTOAS_TILEOPS_DIR"] = str(source_root / "lib/TileOps")
+    env["PTOAS_PYTHON_EXE"] = sys.executable
+    env["PTO_PYTHON_ROOT"] = str(mlir_core)
+    
+    # Order: mlir_core (provides 'mlir') > build/python/ptoas (provides 'ptoas') > source ptodsl
+    # NOTE: build/python has 'mlir' dir that shadows mlir_core - avoid it!
+    # Instead use mlir_core for 'mlir' and only ptoas package from build
+    ptoas_only = str(python_root)  # has ptoas/ and ptoas_wheel_bootstrap.py
+    paths = [str(mlir_core), str(source_root / "ptodsl")]
+    if 'PYTHONPATH' in env:
+        paths.append(env['PYTHONPATH'])
+    env['PYTHONPATH'] = ':'.join(paths)
+    
+    # Also add ptoas package to sys.path for the main process
+    # The ptoas.mlir redirect files handle the rest
+    sys.path.insert(0, str(python_root))
+    
+    full_argv = [str(wrapper)]
+    if not any('--tilelang-path' in a for a in argv):
+        full_argv.extend(["--tilelang-path", str(source_root / "lib/TileOps")])
+    if not any('--tilelang-pkg-path' in a for a in argv):
+        full_argv.extend(["--tilelang-pkg-path", str(python_root)])
+    if not any('--ptodsl-pkg-path' in a for a in argv):
+        full_argv.extend(["--ptodsl-pkg-path", str(source_root / "ptodsl")])
+    full_argv.extend(argv)
+    
+    so_path = python_root / "ptoas" / "mlir" / "_mlir_libs" / "libPTOASCompiler.so"
+    lib = ctypes.CDLL(str(so_path), mode=0)
+    entry = lib.ptoas_entrypoint
+    entry.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+    entry.restype = ctypes.c_int
+    argv_bytes = [os.fsencode(a) for a in full_argv]
+    c_argv = (ctypes.c_char_p * len(argv_bytes))(*argv_bytes)
+    return int(entry(len(argv_bytes), c_argv))

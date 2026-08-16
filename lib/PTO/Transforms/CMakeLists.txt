@@ -81,24 +81,39 @@ add_mlir_dialect_library(PTOTransforms
   PTOMaterializeSIMTPersistentFragment.cpp
   PTOOutlineSIMTSections.cpp
   PTOInferVPTOVecScope.cpp
+  TileShapeStateAnalysis.cpp
+  VmiMemoryLocation.cpp
+
+  VecScopeMemBar/VecScopeMemoryFootprint.cpp
+  VecScopeMemBar/VecScopeMemBarIR.cpp
+  VecScopeMemBar/VecScopeMemBarAnalysis.cpp
+  VecScopeMemBar/VecScopeMemBarPlacement.cpp
+  VecScopeMemBar/VecScopeMemBarCodegen.cpp
+  VecScopeMemBar/PTOInsertVecScopeMemBarPass.cpp
+  VecScopeMemBar/PTOInsertVecScopeMemBarAllPass.cpp
 
   InsertSync/PTOInsertSync.cpp
   PTOInjectBarrierAllSync.cpp
   InsertSync/InsertSyncDebug.cpp
+  PTOViewToMemref.cpp
   PTOMaterializeImplicitTmp.cpp
   PTORematerializeFixpipeVectorQuant.cpp
   PTOValidateIntToPtrUses.cpp
   TileLibService.cpp
   SoftLibService.cpp
   InsertTemplateAttributes.cpp
+  SelectTemplateCandidate.cpp
   ExpandTileOp.cpp
   FoldTileBufIntrinsics.cpp
   LowerPTOToUBufOps.cpp
   PTOLowerToOpLibCalls.cpp
   PTOInstantiateAndInlineOpLib.cpp
+  PTOVmiLoopFusion.cpp
+  PTOVmiLoadStoreElision.cpp
   PTOToEmitC.cpp
   CppPostprocess.cpp
   Utils.cpp
+  VMIStubs.cpp
   OptMemPlanForPipeline.cpp
   InferPTOMemScope.cpp
   PTOPlanMemory.cpp
@@ -108,6 +123,7 @@ add_mlir_dialect_library(PTOTransforms
   PTOA5NormalizeTMovPass.cpp
   PTORemoveIdentityTMov.cpp
   PTOCanonicalizeIR.cpp
+  PTOMaterializeTileHandles.cpp
   BufferizableOpInterfaceImpl.cpp
   ConvertToPTOOp.cpp
   PTOAssignDefaultFrontendPipeIdPass.cpp

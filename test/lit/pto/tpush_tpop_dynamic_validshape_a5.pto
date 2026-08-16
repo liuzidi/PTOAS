@@ -48,12 +48,20 @@ module {
 
 // A5-LABEL: AICORE void cube_kernel(
 // A5: auto {{[_A-Za-z][_A-Za-z0-9]*}} = TPipe<0, Direction::DIR_BOTH, 1024, 4, 2, false>(
+// A5: Tile<TileType::Mat, float, 16, 64, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null, CompactMode::Null> [[CUBE_STORAGE:[_A-Za-z][_A-Za-z0-9]*]] = Tile<TileType::Mat, float, 16, 64, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null, CompactMode::Null>({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // A5: Tile<TileType::Mat, float, 16, 64, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null, CompactMode::Null> [[CUBE_TILE:[_A-Za-z][_A-Za-z0-9]*]] = Tile<TileType::Mat, float, 16, 64, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null, CompactMode::Null>({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
+// A5: __cbuf__ float* [[CUBE_PTR:[_A-Za-z][_A-Za-z0-9]*]] = [[CUBE_STORAGE]].data();
+// A5: uint64_t [[CUBE_ADDR:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<uint64_t>([[CUBE_PTR]]);
+// A5: TASSIGN([[CUBE_TILE]], [[CUBE_ADDR]]);
 // A5: [[CUBE_TILE]].SetValidShape({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // A5: TPOP<TPipe<0, Direction::DIR_BOTH, 1024, 4, 2, false>, Tile<TileType::Mat, float, 16, 64, BLayout::ColMajor, -1, -1, SLayout::RowMajor, 512, PadValue::Null, CompactMode::Null>, TileSplitAxis::TILE_LEFT_RIGHT>({{[_A-Za-z][_A-Za-z0-9]*}}, [[CUBE_TILE]]);
 
 // A5-LABEL: AICORE void vector_kernel(
 // A5: auto {{[_A-Za-z][_A-Za-z0-9]*}} = TPipe<0, Direction::DIR_BOTH, 1024, 4, 2, false>(
+// A5: Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[VEC_STORAGE:[_A-Za-z][_A-Za-z0-9]*]] = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // A5: Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null> [[VEC_TILE:[_A-Za-z][_A-Za-z0-9]*]] = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
+// A5: __ubuf__ float* [[VEC_PTR:[_A-Za-z][_A-Za-z0-9]*]] = [[VEC_STORAGE]].data();
+// A5: uint64_t [[VEC_ADDR:[_A-Za-z][_A-Za-z0-9]*]] = reinterpret_cast<uint64_t>([[VEC_PTR]]);
+// A5: TASSIGN([[VEC_TILE]], [[VEC_ADDR]]);
 // A5: [[VEC_TILE]].SetValidShape({{[_A-Za-z][_A-Za-z0-9]*}}, {{[_A-Za-z][_A-Za-z0-9]*}});
 // A5: TPOP<TPipe<0, Direction::DIR_BOTH, 1024, 4, 2, false>, Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null, CompactMode::Null>, TileSplitAxis::TILE_LEFT_RIGHT>({{[_A-Za-z][_A-Za-z0-9]*}}, [[VEC_TILE]]);

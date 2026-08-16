@@ -81,9 +81,9 @@ class _TileNamespace:
         return _ops.tload(part, tile)
 
     @staticmethod
-    def store(tile, dst, *, offsets=None, sizes=None, fp=None):
+    def store(tile, dst, *, offsets=None, sizes=None):
         if offsets is None and sizes is None and _ops._is_partition_tensor_view(dst):
-            return _ops.tstore(tile, dst, fp=fp)
+            return _ops.tstore(tile, dst)
         part = _ops._tile_transfer_partition(
             dst,
             tile,
@@ -91,7 +91,7 @@ class _TileNamespace:
             sizes=sizes,
             context="tile.store(...)",
         )
-        return _ops.tstore(tile, part, fp=fp)
+        return _ops.tstore(tile, part)
 
     add = staticmethod(_ops.tadd)
     addrelu = staticmethod(_ops.taddrelu)
@@ -116,7 +116,6 @@ class _TileNamespace:
     abs = staticmethod(_ops.tabs)
     neg = staticmethod(_ops.tneg)
     dequant = staticmethod(_ops.tdequant)
-    print = staticmethod(_ops.tprint)
 
     relu = staticmethod(_ops.trelu)
     lrelu = staticmethod(_ops.tlrelu)
@@ -180,7 +179,6 @@ class _TileNamespace:
     mrgsort = staticmethod(_ops.tmrgsort)
     gather = staticmethod(_ops.tgather)
     gatherb = staticmethod(_ops.tgatherb)
-    scatter = staticmethod(_ops.tscatter)
 
     tri = staticmethod(_ops.ttri)
     histogram = staticmethod(_ops.tthistogram)
@@ -208,6 +206,8 @@ class _TileNamespace:
     partmin = staticmethod(_ops.tpartmin)
 
     fillpad = staticmethod(_ops.tfillpad)
+    fillpad_expand = staticmethod(_ops.tfillpad_expand)
+    fillpad_inplace = staticmethod(_ops.tfillpad_inplace)
 
 
 tile = _TileNamespace()

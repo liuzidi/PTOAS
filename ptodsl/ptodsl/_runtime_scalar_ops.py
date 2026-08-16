@@ -19,8 +19,8 @@ from ._types import (
     _strip_integer_signedness,
 )
 
-from ptoas.mlir.dialects import arith, math
-from ptoas.mlir.ir import IndexType, IntegerType
+from mlir.dialects import arith, math
+from mlir.ir import IndexType, IntegerType
 
 
 _FLOAT_BINARY_OPS = {

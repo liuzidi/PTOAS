@@ -20,24 +20,8 @@ class PTODSLAstRewriteError(SyntaxError):
     """Raised when AST rewrite sees unsupported Python control flow."""
 
 
-def rewrite_jit_function(
-    fn,
-    *,
-    static_bindings=None,
-    rewrite_control_flow=True,
-    reject_bare_returns: bool = False,
-):
-    """Return a function with PTODSL lexical sections lowered safely.
-
-    ``pto.section`` is a physical SSA region, not a Python ``with`` hint.  The
-    section body therefore gets a small source-level lexical rewrite even when
-    the optional control-flow rewrite is disabled.  This keeps Python's
-    function-local assignment rules from leaking a section-local SSA value into
-    a sibling physical section.
-    ``reject_bare_returns`` controls whether ``return`` inside rewritten
-    control flow is rejected. ``@pto.jit`` keeps the historical behavior, while
-    ``@pto.func`` enables this because helper bodies must keep one helper ABI.
-    """
+def rewrite_jit_function(fn):
+    """Return a function whose Python if/for control flow lowers to PTODSL APIs."""
     try:
         source = inspect.getsource(fn)
     except (OSError, TypeError) as exc:
@@ -58,20 +42,11 @@ def rewrite_jit_function(
     closure_vars = inspect.getclosurevars(fn)
     static_env = dict(fn.__globals__)
     static_env.update(closure_vars.nonlocals)
-    static_env.update(static_bindings or {})
     _inject_closure_defaults(function_def, closure_vars.nonlocals)
     _sanitize_signature_for_exec(function_def)
     function_def = _ConditionalExpressionNormalizer().visit(function_def)
-    section_rewriter = _SectionLexicalRewriter()
-    function_def = section_rewriter.visit(function_def)
-    if rewrite_control_flow:
-        rewriter = _ControlFlowRewriter(
-            static_env,
-            section_entry_bindings=section_rewriter.section_entry_bindings,
-            section_uninitialized_aliases=section_rewriter.section_uninitialized_aliases,
-            reject_bare_returns=reject_bare_returns,
-        )
-        function_def.body = rewriter.rewrite_block(function_def.body, live_after=set())
+    rewriter = _ControlFlowRewriter(static_env)
+    function_def.body = rewriter.rewrite_block(function_def.body, live_after=set())
     tree = ast.Module(body=[function_def], type_ignores=[])
     ast.fix_missing_locations(tree)
 
@@ -99,160 +74,6 @@ def rewrite_jit_function(
     rewritten.__module__ = fn.__module__
     rewritten.__qualname__ = fn.__qualname__
     return rewritten
-
-
-class _SectionLexicalRewriter(ast.NodeTransformer):
-    """Give ``with pto.section(...)`` a lexical, closure-like name scope."""
-
-    def __init__(self):
-        super().__init__()
-        self._counter = 0
-        self._env = {}
-        self._local_names = set()
-        self._known_bindings = set()
-        self._section_outer_bindings = None
-        self.section_entry_bindings = {}
-        self.section_uninitialized_aliases = set()
-
-    @staticmethod
-    def _is_section_with(node):
-        return isinstance(node, ast.With) and any(
-            _is_pto_attr_call(item.context_expr, "section") for item in node.items
-        )
-
-    def _fresh_alias(self, name):
-        alias = f"__pto_section_{self._counter}_{name}"
-        self._counter += 1
-        return alias
-
-    def _target_names(self, target):
-        return _target_stores(target)
-
-    def _activate_targets(self, targets):
-        for name in targets & self._local_names:
-            if name not in self._env:
-                self._env[name] = self._fresh_alias(name)
-            alias = self._env[name]
-            if self._section_outer_bindings is not None and name in self._section_outer_bindings:
-                self.section_entry_bindings.setdefault(alias, name)
-
-    def _visit_block(self, stmts, env=None):
-        old_env = self._env
-        if env is not None:
-            self._env = dict(env)
-        try:
-            result = [self.visit(stmt) for stmt in stmts]
-            return result, dict(self._env)
-        finally:
-            self._env = old_env
-
-    def _visit_section_body(self, stmts):
-        old_env = self._env
-        old_names = self._local_names
-        old_outer_bindings = self._section_outer_bindings
-        entry_binding_count = len(self.section_entry_bindings)
-        self._env = {}
-        self._local_names = _name_info(stmts).stores
-        self._section_outer_bindings = set(self._known_bindings)
-        try:
-            body = [self.visit(stmt) for stmt in stmts]
-            # Materialize outer values under their section-local aliases before
-            # any runtime control flow. Subsequent branch merges can then read
-            # the alias at the current program point instead of always falling
-            # back to the section entry value.
-            entry_bindings = list(self.section_entry_bindings.items())[entry_binding_count:]
-            initializers = [
-                ast.Assign(
-                    targets=[_name(alias, ast.Store())],
-                    value=_name(outer_name),
-                )
-                for alias, outer_name in entry_bindings
-            ]
-            return initializers + body
-        finally:
-            self._env = old_env
-            self._local_names = old_names
-            self._section_outer_bindings = old_outer_bindings
-
-    def visit_With(self, node):
-        if not self._is_section_with(node):
-            return self.generic_visit(node)
-        node.items = [self.visit(item) for item in node.items]
-        node.body = self._visit_section_body(node.body)
-        return node
-
-    def visit_Assign(self, node):
-        node.value = self.visit(node.value)
-        targets = set()
-        for target in node.targets:
-            targets |= self._target_names(target)
-        self._activate_targets(targets)
-        node.targets = [self.visit(target) for target in node.targets]
-        if self._section_outer_bindings is None:
-            self._known_bindings.update(targets)
-        return node
-
-    def visit_AnnAssign(self, node):
-        if node.value is not None:
-            node.value = self.visit(node.value)
-        self._activate_targets(self._target_names(node.target))
-        node.target = self.visit(node.target)
-        if self._section_outer_bindings is None:
-            self._known_bindings.update(self._target_names(node.target))
-        return node
-
-    def visit_AugAssign(self, node):
-        if isinstance(node.target, ast.Name) and node.target.id in self._local_names:
-            name = node.target.id
-            if name in self._env:
-                node.target.id = self._env[name]
-            node.value = self.visit(node.value)
-            self._activate_targets({name})
-            node.target.id = self._env[name]
-            if self._section_outer_bindings is None:
-                self._known_bindings.add(name)
-            return node
-        return self.generic_visit(node)
-
-    def visit_For(self, node):
-        node.iter = self.visit(node.iter)
-        self._activate_targets(self._target_names(node.target))
-        node.target = self.visit(node.target)
-        if self._section_outer_bindings is None:
-            self._known_bindings.update(self._target_names(node.target))
-        node.body, body_env = self._visit_block(node.body, self._env)
-        self._env.update(body_env)
-        node.orelse, else_env = self._visit_block(node.orelse, self._env)
-        self._env.update(else_env)
-        return node
-
-    def visit_If(self, node):
-        node.test = self.visit(node.test)
-        # Both branches of a runtime conditional share one authored binding.
-        # Any future env-forking visitor must apply the same invariant: reserve
-        # common targets before visiting either branch. For section-local
-        # bindings this prevents the branch merge from creating two aliases.
-        common_targets = _name_info(node.body).stores & _name_info(node.orelse).stores
-        self._activate_targets(common_targets)
-        entry_env = dict(self._env)
-        node.body, body_env = self._visit_block(node.body, entry_env)
-        node.orelse, else_env = self._visit_block(node.orelse, entry_env)
-        entry_aliases = set(entry_env.values())
-        branch_only_aliases = set(body_env.values()) ^ set(else_env.values())
-        self.section_uninitialized_aliases.update(
-            alias
-            for alias in branch_only_aliases - entry_aliases
-            if alias not in self.section_entry_bindings
-        )
-        self._env.update(body_env)
-        self._env.update(else_env)
-        return node
-
-    def visit_Name(self, node):
-        alias = self._env.get(node.id)
-        if alias is not None:
-            node.id = alias
-        return node
 
 
 def _find_function_def(tree, name: str):
@@ -403,21 +224,6 @@ class _NameInfoVisitor(ast.NodeVisitor):
         self.visit(node.value)
         self.visit(node.target)
 
-    def visit_For(self, node):
-        self.visit(node.iter)
-        bound = _target_stores(node.target)
-        body_info = _name_info(node.body)
-        orelse_info = _name_info(node.orelse)
-        self.loads.update((body_info.loads | orelse_info.loads) - bound)
-        self.stores.update((body_info.stores | orelse_info.stores) - bound)
-
-    def visit_While(self, node):
-        self.visit(node.test)
-        body_info = _name_info(node.body)
-        orelse_info = _name_info(node.orelse)
-        self.loads.update(body_info.loads | orelse_info.loads)
-        self.stores.update(body_info.stores | orelse_info.stores)
-
     def _visit_augassign_target_load(self, node):
         if isinstance(node, ast.Name):
             self.loads.add(node.id)
@@ -506,10 +312,10 @@ class _SlotInfoVisitor(ast.NodeVisitor):
 
     def visit_Subscript(self, node):
         if isinstance(node.ctx, ast.Load):
-            self.loads.update(_resolve_subscript_slots(node, self._static_env, self._static_iters, require_static=False))
+            self.loads.update(_resolve_subscript_slots(node, self._static_iters, require_static=False))
             return
         if isinstance(node.ctx, (ast.Store, ast.Del)):
-            slots = _resolve_subscript_slots(node, self._static_env, self._static_iters, require_static=True)
+            slots = _resolve_subscript_slots(node, self._static_iters, require_static=True)
             if slots:
                 self.stores.update(slots)
             else:
@@ -519,7 +325,7 @@ class _SlotInfoVisitor(ast.NodeVisitor):
 
     def visit_AugAssign(self, node):
         if isinstance(node.target, ast.Subscript):
-            slots = _resolve_subscript_slots(node.target, self._static_env, self._static_iters, require_static=True)
+            slots = _resolve_subscript_slots(node.target, self._static_iters, require_static=True)
             if slots:
                 self.loads.update(slots)
                 self.stores.update(slots)
@@ -531,7 +337,7 @@ class _SlotInfoVisitor(ast.NodeVisitor):
 
     def visit_For(self, node):
         if _is_pto_attr_call(node.iter, "static_range") and isinstance(node.target, ast.Name):
-            values = _try_eval_static_range(node.iter, self._static_env, self._static_iters)
+            values = _try_eval_static_range(node.iter, self._static_env)
             if values is None:
                 for stmt in node.body:
                     self.visit(stmt)
@@ -593,7 +399,7 @@ def _slot_live_before_stmt(stmt, live_after, static_env, static_iters) -> set[_S
         )
     if isinstance(stmt, ast.For):
         if _is_pto_attr_call(stmt.iter, "static_range") and isinstance(stmt.target, ast.Name):
-            values = _try_eval_static_range(stmt.iter, static_env, static_iters)
+            values = _try_eval_static_range(stmt.iter, static_env)
             if values is not None:
                 next_static_iters = dict(static_iters)
                 next_static_iters[stmt.target.id] = values
@@ -661,10 +467,10 @@ def _simple_name_targets(target) -> set[str]:
     return set()
 
 
-def _resolve_subscript_slots(node, static_env, static_iters, *, require_static) -> set[_SubscriptSlot]:
+def _resolve_subscript_slots(node, static_iters, *, require_static) -> set[_SubscriptSlot]:
     if not isinstance(node.value, ast.Name):
         return set()
-    index_values = _static_index_values(node.slice, static_env, static_iters)
+    index_values = _static_index_values(node.slice, static_iters)
     if index_values is None:
         return set()
     return {
@@ -673,11 +479,16 @@ def _resolve_subscript_slots(node, static_env, static_iters, *, require_static) 
     }
 
 
-def _static_index_values(node, static_env, static_iters):
-    try:
-        return _eval_static_int_values(node, static_env, static_iters)
-    except PTODSLAstRewriteError:
-        return None
+def _static_index_values(node, static_iters):
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return (node.value,)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        values = _static_index_values(node.operand, static_iters)
+        if values is not None and len(values) == 1:
+            return (-values[0],)
+    if isinstance(node, ast.Name) and node.id in static_iters:
+        return tuple(static_iters[node.id])
+    return None
 
 
 def _unsupported_subscript_store_message(node) -> str:
@@ -691,11 +502,11 @@ def _unsupported_subscript_store_message(node) -> str:
     )
 
 
-def _try_eval_static_range(call, static_env, static_iters=None):
+def _try_eval_static_range(call, static_env):
     if not _is_pto_attr_call(call, "static_range") or call.keywords:
         return None
     try:
-        values = [_eval_static_int(arg, static_env, static_iters) for arg in call.args]
+        values = [_eval_static_int(arg, static_env) for arg in call.args]
     except PTODSLAstRewriteError:
         return None
     if len(values) == 1:
@@ -707,50 +518,31 @@ def _try_eval_static_range(call, static_env, static_iters=None):
     return None
 
 
-def _eval_static_int(node, static_env, static_iters=None) -> int:
-    values = _eval_static_int_values(node, static_env, static_iters or {})
-    if len(values) != 1:
-        raise PTODSLAstRewriteError("static integer expression must resolve to one value")
-    return values[0]
-
-
-def _eval_static_int_values(node, static_env, static_iters) -> tuple[int, ...]:
+def _eval_static_int(node, static_env) -> int:
     if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
-        return (node.value,)
+        return node.value
     if isinstance(node, ast.Name):
-        if node.id in static_iters:
-            return tuple(static_iters[node.id])
         value = static_env.get(node.id, _MISSING_GLOBAL)
         if isinstance(value, int) and not isinstance(value, bool):
-            return (value,)
+            return value
         raise PTODSLAstRewriteError("static value is not an integer")
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.UAdd):
-        return tuple(+value for value in _eval_static_int_values(node.operand, static_env, static_iters))
+        return +_eval_static_int(node.operand, static_env)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        return tuple(-value for value in _eval_static_int_values(node.operand, static_env, static_iters))
+        return -_eval_static_int(node.operand, static_env)
     if isinstance(node, ast.BinOp):
-        lhs_values = _eval_static_int_values(node.left, static_env, static_iters)
-        rhs_values = _eval_static_int_values(node.right, static_env, static_iters)
-        values = []
-        seen = set()
-        for lhs in lhs_values:
-            for rhs in rhs_values:
-                if isinstance(node.op, ast.Add):
-                    value = lhs + rhs
-                elif isinstance(node.op, ast.Sub):
-                    value = lhs - rhs
-                elif isinstance(node.op, ast.Mult):
-                    value = lhs * rhs
-                elif isinstance(node.op, ast.FloorDiv):
-                    value = lhs // rhs
-                elif isinstance(node.op, ast.Mod):
-                    value = lhs % rhs
-                else:
-                    raise PTODSLAstRewriteError("unsupported static integer expression")
-                if value not in seen:
-                    seen.add(value)
-                    values.append(value)
-        return tuple(values)
+        lhs = _eval_static_int(node.left, static_env)
+        rhs = _eval_static_int(node.right, static_env)
+        if isinstance(node.op, ast.Add):
+            return lhs + rhs
+        if isinstance(node.op, ast.Sub):
+            return lhs - rhs
+        if isinstance(node.op, ast.Mult):
+            return lhs * rhs
+        if isinstance(node.op, ast.FloorDiv):
+            return lhs // rhs
+        if isinstance(node.op, ast.Mod):
+            return lhs % rhs
     raise PTODSLAstRewriteError("unsupported static integer expression")
 
 
@@ -861,14 +653,6 @@ def _live_before_block(stmts, live_after) -> set[str]:
 
 
 def _live_before_stmt(stmt, live_after) -> set[str]:
-    if isinstance(stmt, (ast.With, ast.AsyncWith)):
-        context_loads = set()
-        bound = set()
-        for item in stmt.items:
-            context_loads |= _name_info(item.context_expr).loads
-            if item.optional_vars is not None:
-                bound |= _target_stores(item.optional_vars)
-        return context_loads | (_live_before_block(stmt.body, live_after) - bound)
     if isinstance(stmt, ast.If):
         test_info = _name_info(stmt.test)
         return (
@@ -887,18 +671,6 @@ def _live_before_stmt(stmt, live_after) -> set[str]:
             | set(iter_info.loads)
             | (_live_before_block(stmt.body, set()) - target_stores)
             | _live_before_block(stmt.orelse, set())
-        )
-    if isinstance(stmt, ast.While):
-        test_info = _name_info(stmt.test)
-        body_info = _name_info(stmt.body)
-        else_info = _name_info(stmt.orelse)
-        assigned = body_info.stores | else_info.stores
-        loop_live = set(live_after) | set(test_info.loads) | set(body_info.loads)
-        return (
-            (set(live_after) - assigned)
-            | set(test_info.loads)
-            | (_live_before_block(stmt.body, loop_live) - assigned)
-            | _live_before_block(stmt.orelse, set(live_after))
         )
     info = _name_info(stmt)
     return (set(live_after) - info.stores) | info.loads
@@ -941,64 +713,6 @@ def _pto_attr(name: str, ctx=ast.Load()):
     return ast.Attribute(value=ast.Name(id="pto", ctx=ast.Load()), attr=name, ctx=ctx)
 
 
-def _loop_control_flags(stmts):
-    """Return break/continue presence for the current loop only.
-
-    ``ast.walk`` is deliberately not used here: a control transfer in a
-    nested loop belongs to that nested loop, not to the enclosing loop.
-    """
-    result = {"break": False, "continue": False}
-
-    class Visitor(ast.NodeVisitor):
-        def visit_For(self, node):
-            return
-
-        def visit_While(self, node):
-            return
-
-        def visit_Break(self, node):
-            result["break"] = True
-
-        def visit_Continue(self, node):
-            result["continue"] = True
-
-    visitor = Visitor()
-    for stmt in stmts:
-        visitor.visit(stmt)
-    return result
-
-
-def _loop_has_return(stmts):
-    """Check returns in the current loop body, excluding nested functions."""
-    class Visitor(ast.NodeVisitor):
-        found = False
-
-        def visit_FunctionDef(self, node):
-            return
-
-        def visit_AsyncFunctionDef(self, node):
-            return
-
-        def visit_Lambda(self, node):
-            return
-
-        def visit_Return(self, node):
-            self.found = True
-
-    visitor = Visitor()
-    for stmt in stmts:
-        visitor.visit(stmt)
-    return visitor.found
-
-
-def _flag_const(value):
-    return ast.Call(
-        func=_pto_attr("const"),
-        args=[ast.Constant(1 if value else 0)],
-        keywords=[ast.keyword(arg="dtype", value=_pto_attr("i1"))],
-    )
-
-
 def _name(name: str, ctx=ast.Load()):
     return ast.Name(id=name, ctx=ctx)
 
@@ -1027,7 +741,7 @@ class _SlotCarryRewriter(ast.NodeTransformer):
 
     def visit_For(self, node):
         if _is_pto_attr_call(node.iter, "static_range") and isinstance(node.target, ast.Name):
-            values = _try_eval_static_range(node.iter, self._static_env, self._static_iters)
+            values = _try_eval_static_range(node.iter, self._static_env)
             old = self._static_iters.get(node.target.id)
             if values is not None:
                 self._static_iters[node.target.id] = values
@@ -1044,7 +758,7 @@ class _SlotCarryRewriter(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Subscript(self, node):
-        slots = _resolve_subscript_slots(node, self._static_env, self._static_iters, require_static=False)
+        slots = _resolve_subscript_slots(node, self._static_iters, require_static=False)
         if slots and len({slot.base for slot in slots}) == 1:
             base = next(iter(slots)).base
             if base in self._slot_maps and slots <= set(self._slot_maps[base]["slots"]):
@@ -1059,110 +773,15 @@ class _SlotCarryRewriter(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
-class _SlotValueRewriter(ast.NodeTransformer):
-    """Replace selected static list slots with scalar branch state names."""
-
-    def __init__(self, slot_values, static_env, static_iters=None):
-        self._slot_values = dict(slot_values)
-        self._static_env = static_env
-        self._static_iters = dict(static_iters or {})
-
-    def visit_For(self, node):
-        if _is_pto_attr_call(node.iter, "static_range") and isinstance(node.target, ast.Name):
-            values = _try_eval_static_range(node.iter, self._static_env, self._static_iters)
-            old = self._static_iters.get(node.target.id)
-            if values is not None:
-                self._static_iters[node.target.id] = values
-            try:
-                node.body = [self.visit(stmt) for stmt in node.body]
-            finally:
-                if values is not None:
-                    if old is None:
-                        self._static_iters.pop(node.target.id, None)
-                    else:
-                        self._static_iters[node.target.id] = old
-            node.orelse = [self.visit(stmt) for stmt in node.orelse]
-            return node
-        return self.generic_visit(node)
-
-    def visit_Subscript(self, node):
-        slots = _resolve_subscript_slots(node, self._static_env, self._static_iters, require_static=False)
-        if len(slots) == 1:
-            slot = next(iter(slots))
-            value_name = self._slot_values.get(slot)
-            if value_name is not None:
-                return ast.copy_location(_name(value_name, node.ctx), node)
-        return self.generic_visit(node)
-
-class _ControlFlowExitVisitor(ast.NodeVisitor):
-    def __init__(self, *, reject_bare_returns: bool):
-        self.exit_node = None
-        self._reject_bare_returns = reject_bare_returns
-
-    def visit_Return(self, node):
-        if self._reject_bare_returns:
-            self.exit_node = node
-
-    def visit_Yield(self, node):
-        self.exit_node = node
-
-    def visit_YieldFrom(self, node):
-        self.exit_node = node
-
-    def visit_FunctionDef(self, node):
-        return
-
-    def visit_AsyncFunctionDef(self, node):
-        return
-
-    def visit_Lambda(self, node):
-        return
-
-    def visit_ClassDef(self, node):
-        return
-
-
-def _reject_control_flow_exits(stmts, context: str, *, reject_bare_returns: bool):
-    visitor = _ControlFlowExitVisitor(reject_bare_returns=reject_bare_returns)
-    for stmt in stmts:
-        visitor.visit(stmt)
-        if visitor.exit_node is not None:
-            raise PTODSLAstRewriteError(
-                f"ast_rewrite=True does not support return/yield inside rewritten {context}; "
-                "assign values to locals and return after the rewritten control flow"
-            )
-
-
 class _ControlFlowRewriter:
-    def __init__(
-        self,
-        static_env=None,
-        *,
-        section_entry_bindings=None,
-        section_uninitialized_aliases=None,
-        reject_bare_returns: bool = False,
-    ):
+    def __init__(self, static_env=None):
         self._static_env = dict(static_env or {})
-        self._section_entry_bindings = dict(section_entry_bindings or {})
-        self._section_uninitialized_aliases = set(section_uninitialized_aliases or ())
         self._counter = 0
-        # Each entry names the SSA flags used to emulate Python loop control
-        # for the corresponding innermost runtime loop.
-        self._loop_control_stack = []
-        self._reject_bare_returns = reject_bare_returns
 
     def _fresh(self, prefix: str) -> str:
         value = f"__pto_ast_{prefix}_{self._counter}"
         self._counter += 1
         return value
-
-    def _current_value(self, name):
-        if name in self._section_uninitialized_aliases:
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime if reads a section-local value before it is initialized; "
-                f"initialize {name!r} before the conditional"
-            )
-        return _name(name)
 
     def rewrite_block(self, stmts, *, live_after, live_after_slots=None, allow_loop_control=False, static_iters=None):
         rewritten_reversed = []
@@ -1187,40 +806,6 @@ class _ControlFlowRewriter:
             live_slots = live_before_slots
         return rewritten_reversed
 
-    def _rewrite_loop_body(self, stmts, *, live_after, live_after_slots=None, static_iters=None, control=None):
-        """Rewrite loop statements while keeping each authored statement atomic.
-
-        A rewritten dynamic ``if`` may contain several setup/branch/merge
-        operations.  They must live in one ``scf.if`` region when the loop has
-        been stopped by break/continue; wrapping each generated operation
-        separately would create sibling-region SSA dominance violations.
-        """
-        rewritten_reversed = []
-        live = set(live_after)
-        if control is not None:
-            live |= {control["active"], control["did_break"]}
-        live_slots = set(live_after_slots or ())
-        static_iters = dict(static_iters or {})
-        for stmt in reversed(stmts):
-            live_before = _live_before_stmt(stmt, live)
-            live_before_slots = _slot_live_before_stmt(stmt, live_slots, self._static_env, static_iters)
-            rewrite_live = live
-            if control is not None:
-                rewrite_live = set(rewrite_live) | {control["active"], control["did_break"]}
-            group = self.rewrite_stmt(
-                stmt,
-                live_after=rewrite_live,
-                live_after_slots=live_slots,
-                allow_loop_control=False,
-                static_iters=static_iters,
-            )
-            rewritten_reversed[:0] = group
-            live = set(live_before)
-            if control is not None:
-                live |= {control["active"], control["did_break"]}
-            live_slots = live_before_slots
-        return rewritten_reversed
-
     def rewrite_stmt(self, stmt, *, live_after, live_after_slots=None, allow_loop_control=False, static_iters=None):
         live_after_slots = set(live_after_slots or ())
         static_iters = dict(static_iters or {})
@@ -1240,28 +825,7 @@ class _ControlFlowRewriter:
                 allow_loop_control=allow_loop_control,
                 static_iters=static_iters,
             )
-        if isinstance(stmt, ast.While):
-            return self._rewrite_while(
-                stmt,
-                live_after=live_after,
-                live_after_slots=live_after_slots,
-                allow_loop_control=allow_loop_control,
-                static_iters=static_iters,
-            )
         if isinstance(stmt, (ast.Break, ast.Continue)):
-            if self._loop_control_stack:
-                control = self._loop_control_stack[-1]
-                assigns = []
-                if isinstance(stmt, ast.Break):
-                    assigns.append(ast.Assign(
-                        targets=[_name(control["did_break"], ast.Store())],
-                        value=_flag_const(True),
-                    ))
-                assigns.append(ast.Assign(
-                    targets=[_name(control["active"], ast.Store())],
-                    value=_flag_const(False),
-                ))
-                return [ast.copy_location(item, stmt) for item in assigns]
             if allow_loop_control:
                 return [stmt]
             raise PTODSLAstRewriteError("ast_rewrite=True does not support break/continue in rewritten control flow")
@@ -1342,36 +906,20 @@ class _ControlFlowRewriter:
             )
             return [stmt]
 
-        _reject_control_flow_exits(
-            stmt.body,
-            "if branches",
-            reject_bare_returns=self._reject_bare_returns,
-        )
-        _reject_control_flow_exits(
-            stmt.orelse,
-            "if branches",
-            reject_bare_returns=self._reject_bare_returns,
-        )
-
         cond_name = self._fresh("cond")
         then_info = _name_info(stmt.body)
         else_info = _name_info(stmt.orelse)
-        then_slot_info = _slot_info(stmt.body, self._static_env, static_iters)
-        else_slot_info = _slot_info(stmt.orelse, self._static_env, static_iters)
         assigned_slots = (
-            then_slot_info.stores
-            | else_slot_info.stores
+            _slot_info(stmt.body, self._static_env, static_iters).stores
+            | _slot_info(stmt.orelse, self._static_env, static_iters).stores
         )
-        merge_slots = tuple(sorted(live_after_slots & assigned_slots))
+        if live_after_slots & assigned_slots:
+            slots = ", ".join(slot.display for slot in sorted(live_after_slots & assigned_slots))
+            raise PTODSLAstRewriteError(
+                "ast_rewrite=True does not support automatic branch merges for static subscript slots yet; "
+                f"rewrite {slots} with explicit scalar temporaries"
+            )
         assigned_any = then_info.stores | else_info.stores
-        control_state = self._loop_control_stack[-1] if self._loop_control_stack else None
-        then_control = _loop_control_flags(stmt.body) if control_state else {"break": False, "continue": False}
-        else_control = _loop_control_flags(stmt.orelse) if control_state else {"break": False, "continue": False}
-        if control_state:
-            if then_control["break"] or then_control["continue"] or else_control["break"] or else_control["continue"]:
-                assigned_any.add(control_state["active"])
-            if then_control["break"] or else_control["break"]:
-                assigned_any.add(control_state["did_break"])
         merge_names = tuple(sorted(live_after & assigned_any))
         old_value_names = {
             name: self._fresh(f"old_{name}")
@@ -1380,18 +928,17 @@ class _ControlFlowRewriter:
         }
 
         branch_live_after = set(live_after) | set(merge_names)
-        branch_live_after_slots = set(live_after_slots) | set(merge_slots)
         then_body = self.rewrite_block(
             stmt.body,
             live_after=branch_live_after,
-            live_after_slots=branch_live_after_slots,
+            live_after_slots=live_after_slots,
             allow_loop_control=False,
             static_iters=static_iters,
         )
         else_body = self.rewrite_block(
             stmt.orelse,
             live_after=branch_live_after,
-            live_after_slots=branch_live_after_slots,
+            live_after_slots=live_after_slots,
             allow_loop_control=False,
             static_iters=static_iters,
         )
@@ -1402,56 +949,15 @@ class _ControlFlowRewriter:
         )
         branch_name = self._fresh("br")
 
-        slot_value_names = {
-            # BranchHandle deliberately rejects private attribute names. Keep
-            # the generated branch field public while retaining a unique
-            # compiler-generated local name for the rewritten slot value.
-            slot: (
-                f"pto_ast_slot_{slot.base}_"
-                f"{'neg' if slot.index < 0 else ''}{abs(slot.index)}_{self._counter}"
-            )
-            for slot in merge_slots
-        }
-        self._counter += len(slot_value_names)
-        old_slot_value_names = {
-            slot: self._fresh(
-                f"old_slot_{slot.base}_"
-                f"{'neg' if slot.index < 0 else ''}{abs(slot.index)}"
-            )
-            for slot in merge_slots
-        }
         dynamic_then_body = copy.deepcopy(then_body)
         dynamic_else_body = copy.deepcopy(else_body)
-        if slot_value_names:
-            dynamic_then_body = [
-                _SlotValueRewriter(slot_value_names, self._static_env, static_iters).visit(stmt)
-                for stmt in dynamic_then_body
-            ]
-            dynamic_else_body = [
-                _SlotValueRewriter(slot_value_names, self._static_env, static_iters).visit(stmt)
-                for stmt in dynamic_else_body
-            ]
-        if merge_names or slot_value_names:
-            then_assigned = set(then_info.stores)
-            else_assigned = set(else_info.stores)
-            if control_state:
-                if then_control["break"] or then_control["continue"]:
-                    then_assigned.add(control_state["active"])
-                if else_control["break"] or else_control["continue"]:
-                    else_assigned.add(control_state["active"])
-                if then_control["break"]:
-                    then_assigned.add(control_state["did_break"])
-                if else_control["break"]:
-                    else_assigned.add(control_state["did_break"])
+        if merge_names:
             dynamic_then_body.append(
                 self._branch_assign(
                     branch_name,
                     merge_names,
                     old_value_names=old_value_names,
-                    assigned_names=then_assigned,
-                    slot_value_names=slot_value_names,
-                    old_slot_value_names=old_slot_value_names,
-                    assigned_slots=then_slot_info.stores,
+                    assigned_names=then_info.stores,
                 )
             )
             dynamic_else_body.append(
@@ -1459,15 +965,9 @@ class _ControlFlowRewriter:
                     branch_name,
                     merge_names,
                     old_value_names=old_value_names,
-                    assigned_names=else_assigned,
-                    slot_value_names=slot_value_names,
-                    old_slot_value_names=old_slot_value_names,
-                    assigned_slots=else_slot_info.stores,
+                    assigned_names=else_info.stores,
                 )
             )
-        for node in dynamic_then_body + dynamic_else_body:
-            ast.fix_missing_locations(ast.copy_location(node, stmt))
-        ast.fix_missing_locations(trace_time_if)
 
         with_stmt = ast.With(
             items=[
@@ -1515,28 +1015,9 @@ class _ControlFlowRewriter:
         dynamic_body.extend(
             ast.Assign(
                 targets=[_name(name, ast.Store())],
-                value=ast.Call(
-                    func=ast.Attribute(
-                        value=_name(branch_name),
-                        attr="get",
-                        ctx=ast.Load(),
-                    ),
-                    args=[ast.Constant(value=name)],
-                    keywords=[],
-                ),
+                value=ast.Attribute(value=_name(branch_name), attr=name, ctx=ast.Load()),
             )
             for name in merge_names
-        )
-        dynamic_body.extend(
-            ast.Assign(
-                targets=[_slot_subscript(slot, ast.Store())],
-                value=ast.Attribute(
-                    value=_name(branch_name),
-                    attr=slot_value_names[slot],
-                    ctx=ast.Load(),
-                ),
-            )
-            for slot in merge_slots
         )
 
         result = [
@@ -1548,23 +1029,9 @@ class _ControlFlowRewriter:
         result.extend(
             ast.Assign(
                 targets=[_name(old_name, ast.Store())],
-                value=self._current_value(name),
+                value=_name(name),
             )
             for name, old_name in old_value_names.items()
-        )
-        result.extend(
-            ast.Assign(
-                targets=[_name(value_name, ast.Store())],
-                value=_slot_subscript(slot),
-            )
-            for slot, value_name in slot_value_names.items()
-        )
-        result.extend(
-            ast.Assign(
-                targets=[_name(old_value_name, ast.Store())],
-                value=_name(slot_value_names[slot]),
-            )
-            for slot, old_value_name in old_slot_value_names.items()
         )
         result.append(
             ast.copy_location(
@@ -1582,39 +1049,18 @@ class _ControlFlowRewriter:
         )
         return result
 
-    def _branch_assign(
-        self,
-        branch_name,
-        names,
-        *,
-        old_value_names,
-        assigned_names,
-        slot_value_names=None,
-        old_slot_value_names=None,
-        assigned_slots=None,
-    ):
-        slot_value_names = slot_value_names or {}
-        old_slot_value_names = old_slot_value_names or {}
-        assigned_slots = assigned_slots or set()
-        keywords = [
-            ast.keyword(
-                arg=name,
-                value=_name(name if name in assigned_names else old_value_names[name]),
-            )
-            for name in names
-        ]
-        keywords.extend(
-            ast.keyword(
-                arg=value_name,
-                value=_name(value_name if slot in assigned_slots else old_slot_value_names[slot]),
-            )
-            for slot, value_name in slot_value_names.items()
-        )
+    def _branch_assign(self, branch_name, names, *, old_value_names, assigned_names):
         return ast.Expr(
             value=ast.Call(
                 func=ast.Attribute(value=_name(branch_name), attr="assign", ctx=ast.Load()),
                 args=[],
-                keywords=keywords,
+                keywords=[
+                    ast.keyword(
+                        arg=name,
+                        value=_name(name if name in assigned_names else old_value_names[name]),
+                    )
+                    for name in names
+                ],
             )
         )
 
@@ -1624,45 +1070,29 @@ class _ControlFlowRewriter:
         if _is_pto_attr_call(stmt.iter, "static_range"):
             next_static_iters = dict(static_iters)
             if isinstance(stmt.target, ast.Name):
-                values = _try_eval_static_range(stmt.iter, self._static_env, static_iters)
+                values = _try_eval_static_range(stmt.iter, self._static_env)
                 if values is not None:
                     next_static_iters[stmt.target.id] = values
-            saved_control_stack = self._loop_control_stack
-            self._loop_control_stack = []
-            try:
-                stmt.body = self.rewrite_block(
-                    stmt.body,
-                    live_after=live_after,
-                    live_after_slots=live_after_slots,
-                    allow_loop_control=True,
-                    static_iters=next_static_iters,
-                )
-                stmt.orelse = self.rewrite_block(
-                    stmt.orelse,
-                    live_after=live_after,
-                    live_after_slots=live_after_slots,
-                    allow_loop_control=True,
-                    static_iters=static_iters,
-                )
-            finally:
-                self._loop_control_stack = saved_control_stack
-            return [stmt]
-
-        control = _loop_control_flags(stmt.body)
-        if stmt.orelse or control["break"] or control["continue"]:
-            return self._rewrite_controlled_for(
-                stmt,
+            stmt.body = self.rewrite_block(
+                stmt.body,
                 live_after=live_after,
                 live_after_slots=live_after_slots,
+                allow_loop_control=True,
+                static_iters=next_static_iters,
+            )
+            stmt.orelse = self.rewrite_block(
+                stmt.orelse,
+                live_after=live_after,
+                live_after_slots=live_after_slots,
+                allow_loop_control=allow_loop_control,
                 static_iters=static_iters,
             )
+            return [stmt]
+
+        if stmt.orelse:
+            raise PTODSLAstRewriteError("ast_rewrite=True does not support for-else on runtime loops")
         if not isinstance(stmt.target, ast.Name):
             raise PTODSLAstRewriteError("ast_rewrite=True runtime for-loops require a simple name target")
-        _reject_control_flow_exits(
-            stmt.body,
-            "for-loop bodies",
-            reject_bare_returns=self._reject_bare_returns,
-        )
         if stmt.target.id in live_after:
             raise PTODSLAstRewriteError(
                 "ast_rewrite=True runtime for-loops cannot expose the loop induction variable outside the loop yet; "
@@ -1737,10 +1167,7 @@ class _ControlFlowRewriter:
                     ),
                     args=[],
                     keywords=[
-                        ast.keyword(
-                            arg=name,
-                            value=self._current_value(name),
-                        )
+                        ast.keyword(arg=name, value=_name(name))
                         for name in loop_carried
                     ] + [
                         ast.keyword(arg=slot_carry_names[slot], value=_name(slot_carry_names[slot]))
@@ -1851,376 +1278,6 @@ class _ControlFlowRewriter:
             type_comment=None,
         )
         return [ast.copy_location(with_stmt, stmt)]
-
-    def _guard_block(self, condition, body, *, merge_names=(), assigned_names=()):
-        """Guard lowered statements and merge values needed after the guard."""
-        branch_name = self._fresh("condition_guard")
-        merge_names = tuple(merge_names)
-        assigned_names = set(assigned_names)
-        old_names = {name: self._fresh(f"guard_old_{name}") for name in merge_names}
-        prefix = [ast.Assign(
-            targets=[_name(old_names[name], ast.Store())], value=_name(name))
-            for name in merge_names]
-        then_body = list(body) + [self._branch_assign(
-            branch_name, merge_names, old_value_names=old_names,
-            assigned_names=assigned_names)] if merge_names else list(body)
-        else_body = [self._branch_assign(
-            branch_name, merge_names, old_value_names=old_names,
-            assigned_names=set())] if merge_names else [ast.Pass()]
-        result = prefix + [ast.With(
-            items=[ast.withitem(
-                context_expr=ast.Call(func=_pto_attr("if_"), args=[condition], keywords=[]),
-                optional_vars=_name(branch_name, ast.Store()),
-            )],
-            body=[ast.With(
-                items=[ast.withitem(
-                    context_expr=ast.Attribute(value=_name(branch_name), attr="then_", ctx=ast.Load()),
-                    optional_vars=None,
-                )],
-                body=then_body or [ast.Pass()],
-                type_comment=None,
-            )],
-            type_comment=None,
-        )]
-        if merge_names:
-            result[-1].body.append(ast.With(
-                items=[ast.withitem(
-                    context_expr=ast.Attribute(value=_name(branch_name), attr="else_", ctx=ast.Load()),
-                    optional_vars=None,
-                )],
-                body=else_body,
-                type_comment=None,
-            ))
-            result.extend(ast.Assign(
-                targets=[_name(name, ast.Store())],
-                value=ast.Call(func=ast.Attribute(value=_name(branch_name), attr="get", ctx=ast.Load()),
-                               args=[ast.Constant(name)], keywords=[]),
-            ) for name in merge_names)
-        return result
-
-    def _rewrite_controlled_for(self, stmt, *, live_after, live_after_slots=None, static_iters=None):
-        """Lower range-for with transfers or else clauses through scf.while."""
-        if not isinstance(stmt.target, ast.Name):
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime for-loops with break/continue require a simple name target"
-            )
-        if _loop_has_return(stmt.body):
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True does not support dynamic return inside runtime for"
-            )
-        start, stop, step = _range_triplet(stmt.iter)
-        body_info = _name_info(stmt.body)
-        body_slot_info = _slot_info(stmt.body, self._static_env, static_iters)
-        if body_slot_info.invalid_stores:
-            raise PTODSLAstRewriteError(body_slot_info.invalid_stores[0])
-        if body_slot_info.stores:
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime for break/continue does not support static subscript carries yet"
-            )
-        reads_before = _read_before_assignment_names(stmt.body)
-        loop_carried = set(body_info.stores & reads_before)
-        loop_carried |= set(body_info.stores & set(live_after))
-        loop_carried.discard(stmt.target.id)
-        unsupported_last = sorted((body_info.stores & set(live_after)) - loop_carried)
-        if unsupported_last:
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime for-loops cannot expose last-iteration-only values yet; "
-                f"use explicit pto.for_(...).carry(...) for {unsupported_last}"
-            )
-
-        iv_name = stmt.target.id
-        skip_name = self._fresh("loop_active")
-        did_break_name = self._fresh("loop_did_break")
-        loop_name = self._fresh("loop")
-        state_names = (iv_name,) + tuple(sorted(loop_carried)) + (skip_name, did_break_name)
-        state_name = self._fresh("for_state")
-
-        class _StateRewriter(ast.NodeTransformer):
-            def visit_Name(inner, node):
-                if node.id in state_names and isinstance(node.ctx, ast.Load):
-                    return ast.copy_location(ast.Attribute(
-                        value=_name(state_name), attr=node.id, ctx=ast.Load()), node)
-                return node
-
-        # Python range has direction-dependent bounds.  The sign-aware form
-        # also handles a runtime step; a zero step is rejected by the runtime
-        # range semantics before entering useful code in normal callers.
-        iv_lt = ast.Compare(left=_name(iv_name), ops=[ast.Lt()], comparators=[copy.deepcopy(stop)])
-        iv_gt = ast.Compare(left=_name(iv_name), ops=[ast.Gt()], comparators=[copy.deepcopy(stop)])
-        if isinstance(step, ast.Constant) and isinstance(step.value, int):
-            if step.value > 0:
-                range_cond = iv_lt
-            elif step.value < 0:
-                range_cond = iv_gt
-            else:
-                raise PTODSLAstRewriteError(
-                    "ast_rewrite=True runtime range loops do not support a zero step"
-                )
-        else:
-            step_positive = ast.Compare(left=copy.deepcopy(step), ops=[ast.Gt()], comparators=[ast.Constant(0)])
-            step_negative = ast.Compare(left=copy.deepcopy(step), ops=[ast.Lt()], comparators=[ast.Constant(0)])
-            range_cond = ast.BinOp(
-                left=ast.BinOp(left=step_positive, op=ast.BitAnd(), right=iv_lt),
-                op=ast.BitOr(),
-                right=ast.BinOp(left=step_negative, op=ast.BitAnd(), right=iv_gt),
-            )
-        condition = ast.BinOp(
-            left=range_cond,
-            op=ast.BitAnd(),
-            right=ast.Compare(left=_name(did_break_name), ops=[ast.Eq()], comparators=[_flag_const(False)]),
-        )
-        condition = _StateRewriter().visit(condition)
-        ast.fix_missing_locations(condition)
-        condition_fn = ast.Lambda(
-            args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=state_name)], vararg=None,
-                               kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-            body=condition,
-        )
-        initial_values = [
-            copy.deepcopy(start),
-            *[_name(self._section_entry_bindings.get(name, name)) for name in sorted(loop_carried)],
-            _flag_const(True),
-            _flag_const(False),
-        ]
-        setup = ast.Assign(
-            targets=[_name(loop_name, ast.Store())],
-            value=ast.Call(func=_pto_attr("_while"), args=[condition_fn], keywords=[
-                ast.keyword(arg=name, value=value)
-                for name, value in zip(state_names, initial_values)
-            ]),
-        )
-
-        self._loop_control_stack.append({"active": skip_name, "did_break": did_break_name})
-        try:
-            body = self._rewrite_loop_body(
-                stmt.body,
-                live_after=(set(live_after) | loop_carried | {iv_name} |
-                            {skip_name, did_break_name}),
-                live_after_slots=set(),
-                control={"active": skip_name, "did_break": did_break_name},
-                static_iters=static_iters,
-            )
-        finally:
-            self._loop_control_stack.pop()
-        prologue = [
-            ast.Assign(targets=[_name(name, ast.Store())],
-                       value=ast.Attribute(value=_name(loop_name), attr=name, ctx=ast.Load()))
-            for name in state_names
-        ]
-        # active is per-iteration execution state; did_break remains sticky.
-        prologue.append(ast.Assign(targets=[_name(skip_name, ast.Store())], value=_flag_const(True)))
-        guarded_body = self._guard_block(
-            _name(skip_name), body,
-            merge_names=state_names,
-            assigned_names=state_names,
-        )
-        updates = [
-            ast.keyword(arg=iv_name, value=ast.BinOp(left=_name(iv_name), op=ast.Add(), right=copy.deepcopy(step))),
-            *[ast.keyword(arg=name, value=_name(name)) for name in sorted(loop_carried)],
-            ast.keyword(arg=skip_name, value=_name(skip_name)),
-            ast.keyword(arg=did_break_name, value=_name(did_break_name)),
-        ]
-        guarded_body.append(ast.Expr(value=ast.Call(
-            func=ast.Attribute(value=_name(loop_name), attr="update", ctx=ast.Load()),
-            args=[], keywords=updates)))
-        with_stmt = ast.With(
-            items=[ast.withitem(context_expr=_name(loop_name), optional_vars=None)],
-            body=prologue + guarded_body,
-            type_comment=None,
-        )
-        result = [ast.copy_location(setup, stmt), ast.copy_location(with_stmt, stmt)]
-        result.extend(ast.Assign(
-            targets=[_name(name, ast.Store())],
-            value=ast.Call(func=ast.Attribute(value=_name(loop_name), attr="final", ctx=ast.Load()),
-                           args=[ast.Constant(name)], keywords=[]),
-        ) for name in state_names if name in live_after or name in {skip_name, did_break_name})
-        if stmt.orelse:
-            else_body = self.rewrite_block(
-                stmt.orelse,
-                live_after=live_after,
-                live_after_slots=live_after_slots,
-                allow_loop_control=False,
-                static_iters=static_iters,
-            )
-            else_info = _name_info(stmt.orelse)
-            else_merge_names = tuple(sorted(else_info.stores & set(live_after)))
-            result.extend(self._guard_block(
-                ast.Compare(left=_name(did_break_name), ops=[ast.Eq()], comparators=[_flag_const(False)]),
-                else_body,
-                merge_names=else_merge_names,
-                assigned_names=else_info.stores,
-            ))
-        return result
-
-    def _rewrite_while(self, stmt, *, live_after, live_after_slots=None,
-                       allow_loop_control=False, static_iters=None):
-        """Lower runtime ``while`` using named state and explicit control flags."""
-        if _loop_has_return(stmt.body):
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True does not support dynamic return inside runtime while"
-            )
-
-        body_info = _name_info(stmt.body)
-        body_slot_info = _slot_info(stmt.body, self._static_env, static_iters)
-        else_slot_info = _slot_info(stmt.orelse, self._static_env, static_iters)
-        if body_slot_info.invalid_stores or else_slot_info.invalid_stores:
-            raise PTODSLAstRewriteError(
-                (body_slot_info.invalid_stores or else_slot_info.invalid_stores)[0]
-            )
-        if body_slot_info.stores or else_slot_info.stores:
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime while does not support static subscript carries yet"
-            )
-        test_info = _name_info(stmt.test)
-        control = _loop_control_flags(stmt.body)
-        if (control["break"] or control["continue"] or stmt.orelse) and not (
-            body_info.stores & (test_info.loads | body_info.loads | set(live_after))
-        ):
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime while break/continue requires explicit control-state lowering"
-            )
-        carry_names = tuple(sorted(
-            body_info.stores & (test_info.loads | body_info.loads | set(live_after))
-        ))
-        if not carry_names:
-            raise PTODSLAstRewriteError(
-                "ast_rewrite=True runtime while requires at least one loop-carried value"
-            )
-
-        active_name = self._fresh("while_active")
-        did_break_name = self._fresh("while_did_break")
-        controlled = bool(stmt.orelse or control["break"] or control["continue"])
-        state_names = carry_names + ((active_name, did_break_name) if controlled else ())
-        loop_name = self._fresh("while")
-        state_name = self._fresh("while_state")
-
-        class _ConditionStateRewriter(ast.NodeTransformer):
-            def visit_Name(inner, node):
-                if node.id in state_names and isinstance(node.ctx, ast.Load):
-                    return ast.copy_location(
-                        ast.Attribute(value=_name(state_name), attr=node.id,
-                                      ctx=ast.Load()), node)
-                return node
-
-        condition = _ConditionStateRewriter().visit(copy.deepcopy(stmt.test))
-        if controlled:
-            condition = ast.BinOp(
-                left=condition,
-                op=ast.BitAnd(),
-                right=ast.Compare(
-                    left=_name(did_break_name), ops=[ast.Eq()],
-                    comparators=[_flag_const(False)],
-                ),
-            )
-            condition = _ConditionStateRewriter().visit(condition)
-        ast.fix_missing_locations(condition)
-        condition_fn = ast.Lambda(
-            args=ast.arguments(
-                posonlyargs=[], args=[ast.arg(arg=state_name)], vararg=None,
-                kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
-            body=condition,
-        )
-        setup = ast.Assign(
-            targets=[_name(loop_name, ast.Store())],
-            value=ast.Call(
-                func=_pto_attr("_while"), args=[condition_fn], keywords=[
-                    ast.keyword(
-                        arg=name,
-                        value=(_flag_const(True) if name == active_name else
-                               _flag_const(False) if name == did_break_name else
-                               _name(self._section_entry_bindings.get(name, name))),
-                    ) for name in state_names
-                ],
-            ),
-        )
-
-        if controlled:
-            self._loop_control_stack.append({"active": active_name, "did_break": did_break_name})
-        try:
-            body = self._rewrite_loop_body(
-                stmt.body,
-                live_after=(set(live_after) | set(carry_names) |
-                            ({active_name, did_break_name} if controlled else set())),
-                live_after_slots=set(live_after_slots or ()),
-                control=(
-                    {"active": active_name, "did_break": did_break_name}
-                    if controlled else None
-                ),
-                static_iters=static_iters,
-            )
-        finally:
-            if controlled:
-                self._loop_control_stack.pop()
-        prologue = [
-            ast.Assign(
-                targets=[_name(name, ast.Store())],
-                value=ast.Attribute(value=_name(loop_name), attr=name,
-                                    ctx=ast.Load()),
-            ) for name in state_names
-        ]
-        if controlled:
-            # ``active`` is an iteration-local execution flag.  A continue
-            # clears it for the remainder of this body, then the next body
-            # entry re-enables it.  ``did_break`` is sticky across iterations.
-            prologue.append(ast.Assign(
-                targets=[_name(active_name, ast.Store())], value=_flag_const(True)))
-            body = self._guard_block(
-                _name(active_name), body,
-                merge_names=state_names,
-                assigned_names=state_names,
-            )
-        update = ast.Expr(
-            value=ast.Call(
-                func=ast.Attribute(value=_name(loop_name), attr="update",
-                                   ctx=ast.Load()),
-                args=[], keywords=[
-                    ast.keyword(arg=name, value=_name(name))
-                    for name in state_names
-                ],
-            )
-        )
-        with_stmt = ast.With(
-            items=[ast.withitem(context_expr=_name(loop_name), optional_vars=None)],
-            body=prologue + body + [update], type_comment=None,
-        )
-        result = [ast.copy_location(setup, stmt),
-                  ast.copy_location(with_stmt, stmt)]
-        result.extend(
-            ast.Assign(
-                targets=[_name(name, ast.Store())],
-                value=ast.Call(
-                    func=ast.Attribute(value=_name(loop_name), attr="final",
-                                       ctx=ast.Load()),
-                    args=[ast.Constant(name)], keywords=[],
-                ),
-            ) for name in carry_names if name in live_after
-        )
-        if controlled:
-            result.extend(
-                ast.Assign(
-                    targets=[_name(name, ast.Store())],
-                    value=ast.Call(
-                        func=ast.Attribute(value=_name(loop_name), attr="final", ctx=ast.Load()),
-                        args=[ast.Constant(name)], keywords=[]),
-                ) for name in (active_name, did_break_name)
-            )
-        if stmt.orelse:
-            else_body = self.rewrite_block(
-                stmt.orelse,
-                live_after=live_after,
-                live_after_slots=live_after_slots,
-                allow_loop_control=False,
-                static_iters=static_iters,
-            )
-            else_info = _name_info(stmt.orelse)
-            else_merge_names = tuple(sorted(else_info.stores & set(live_after)))
-            result.extend(self._guard_block(
-                ast.Compare(left=_name(did_break_name), ops=[ast.Eq()], comparators=[_flag_const(False)]),
-                else_body,
-                merge_names=else_merge_names,
-                assigned_names=else_info.stores,
-            ))
-        return result
 
 
 __all__ = [

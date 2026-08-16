@@ -27,7 +27,7 @@ class ModuleArtifact:
         self._build_metadata = {}
 
     def build(self):
-        """Return the cached ``ptoas.mlir.ir.Module``."""
+        """Return the cached ``mlir.ir.Module``."""
         if self._cached_module is None:
             if self._module_factory is None:
                 raise RuntimeError(f"{self._py_name} has no module factory")
@@ -43,7 +43,7 @@ class ModuleArtifact:
         return self._cached_module
 
     def mlir_module(self):
-        """Return the cached ``ptoas.mlir.ir.Module``."""
+        """Return the cached ``mlir.ir.Module``."""
         return self.build()
 
     def mlir_text(self) -> str:

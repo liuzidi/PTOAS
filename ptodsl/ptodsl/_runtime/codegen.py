@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-from .._context import make_context
-from ptoas.mlir.ir import BF16Type, F16Type, F32Type, IndexType, IntegerType
+from .._bootstrap import make_context
+from mlir.ir import BF16Type, F16Type, F32Type, IndexType, IntegerType
 
 from .._kernel_signature import DeviceParameterSpec, RuntimeScalarParameterSpec
 from .._types import _PtrDescriptor, _resolve

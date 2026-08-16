@@ -18,7 +18,6 @@ from ._diagnostics import (
     jit_helper_missing_annotation_error,
     jit_helper_standalone_type_inference_error,
     jit_illegal_formal_annotation_error,
-    jit_struct_annotation_error,
     jit_keyword_only_non_constexpr_error,
     jit_legacy_tensor_spec_entry_error,
     jit_legacy_tensor_spec_helper_error,
@@ -37,7 +36,6 @@ from ._types import (
     _DType,
     _MaskDescriptor,
     _PtrDescriptor,
-    _StructDescriptor,
     _VRegDescriptor,
     _resolve,
 )
@@ -129,7 +127,7 @@ def _hashable_signature_atom(value):
 def _is_supported_runtime_scalar_annotation(annotation) -> bool:
     return (
         isinstance(annotation, _DType)
-        and not isinstance(annotation, (_PtrDescriptor, _StructDescriptor, _VRegDescriptor, _MaskDescriptor))
+        and not isinstance(annotation, (_PtrDescriptor, _VRegDescriptor, _MaskDescriptor))
     )
 
 
@@ -211,8 +209,6 @@ def _parse_entry_jit_kernel_signature(py_fn) -> KernelSignature:
                 raise jit_missing_annotation_error(param.name)
             if isinstance(param.annotation, TensorSpec):
                 raise jit_legacy_tensor_spec_entry_error(param.name, param.annotation)
-            if isinstance(param.annotation, _StructDescriptor):
-                raise jit_struct_annotation_error(param.name)
             if isinstance(param.annotation, _PtrDescriptor):
                 if not _is_explicit_gm_ptr_annotation(param.annotation):
                     raise jit_non_gm_ptr_entry_error(param.name, param.annotation)
@@ -271,8 +267,6 @@ def _parse_helper_jit_kernel_signature(py_fn) -> KernelSignature:
             raise jit_helper_missing_annotation_error(param.name)
         if isinstance(param.annotation, TensorSpec):
             raise jit_legacy_tensor_spec_helper_error(param.name, param.annotation)
-        if isinstance(param.annotation, _StructDescriptor):
-            raise jit_struct_annotation_error(param.name)
         if isinstance(param.annotation, _PtrDescriptor):
             positional_parameters.append(DeviceParameterSpec(param.name, param.annotation))
             continue

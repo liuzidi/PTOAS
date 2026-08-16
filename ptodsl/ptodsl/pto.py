@@ -17,24 +17,23 @@ or as the sub-namespace ``pto`` from the ptodsl package::
     from ptodsl import pto
 
 All user-facing symbols live here.  Low-level MLIR bindings are accessed
-internally as ``_pto`` (``from ptoas.mlir.dialects import pto as _pto``).
+internally as ``_pto`` (``from mlir.dialects import pto as _pto``).
 """
 
-from ._diagnostics import deprecated, unsupported_public_surface_error
+from ._diagnostics import unsupported_public_surface_error
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 from ._types import (           # noqa: F401
     float32, float16, bf16,
-    f8e4m3, f8e5m2, f8e8m0, hif8, f4e1m2x2, f4e2m1x2,
+    f8e4m3, f8e5m2, hif8, f4e1m2x2, f4e2m1x2,
     f16x2, bf16x2, f32x2,
-    f8e4m3x2, f8e4m3x4, f8e4m3x8,
-    f8e5m2x2, f8e5m2x4, f8e5m2x8, hif8x2,
+    f8e4m3x2, f8e5m2x2, hif8x2,
     i8x2, i16x2, i32x2,
     int1, int8, int16, int32, int64,
     si8, si16, si32, si64,
     ui8, ui16, ui32, ui64,
     index,
-    ptr, vreg_type, vec_type, mask_type, struct_type,
+    ptr, vreg_type, vec_type, mask_type,
     _resolve,
 )
 from ._builtin_vector import Vec  # noqa: F401
@@ -84,7 +83,6 @@ from ._vmi_namespace import vmi  # noqa: F401
 # ── Operations ────────────────────────────────────────────────────────────────
 from ._ops import (             # noqa: F401
     const,
-    declare_struct, struct_get, struct_set,
     get_op_attr,
     castptr, addptr,
     vlds, vldas, vldus, vldsx2, vsts, vstsx2,
@@ -108,25 +106,21 @@ from ._ops import (             # noqa: F401
     vadd, vsub, vmul, vdiv, vmax, vmin,
     vand, vor, vxor, vshl, vshr, vshls, vshrs,
     vcmax, vcadd, vcmin, vdup, vexpdif,
-    vexp, vln, vsqrt, vabs, vneg, vrec, vrsqrt, vrelu, vnot, vsqz,
+    vexp, vln, vsqrt, vabs, vneg, vrec, vrsqrt, vrelu, vnot,
     vcgmax, vcgadd, vcgmin, vcpadd,
     vtrc, vprelu, vintlv, vdintlv, vselr,
     chistv2,
     vci, vaddc, vaddcs, vmull, vbitsort, vmrgsort4,
-    load_scalar, store_scalar, print,
+    load_scalar, store_scalar,
     vadds, vsubs, vmuls, vmaxs, vmins, vlrelu, vands, vors, vxors,
     vaxpy, vaddrelu, vsubrelu,
     vmula, vmadd,
     vsel,
     make_tensor_view, partition_view,
     alloc_buffer, alloc_tile,
-    tsort32, tmrgsort, tgather, tscatter, tprint,
+    tsort32, tmrgsort, tgather,
     mte_load, mte_store, mte_gm_ub, mte_ub_gm, mte_ub_ub, mte_ub_l1,
     mte_gm_l1, mte_l1_ub, mte_gm_l1_frac, mte_l1_bt, mte_l1_fb, mem_bar,
-    set_store_atomic_cfg,
-    set_atomic_add, set_atomic_max, set_atomic_min, set_atomic_none,
-    set_atomic_f32, set_atomic_f16, set_atomic_bf16,
-    set_atomic_s32, set_atomic_s16, set_atomic_s8,
     mte_l1_l0a, mte_l1_l0b, mte_l1_l0a_mx, mte_l1_l0b_mx,
     mte_l0c_l1, mte_l0c_gm, mte_l0c_ub,
     mad, mad_acc, mad_bias, mad_mx, mad_mx_acc, mad_mx_bias,
@@ -146,9 +140,9 @@ from ._ops import (             # noqa: F401
     atomic_exch, atomic_add, atomic_sub, atomic_min, atomic_max,
     atomic_and, atomic_or, atomic_xor, atomic_cas,
     prmt, mulhi, mul_i32toi64,
-    absf, sqrt, exp, log, sin, cos, pow, ceil, floor, rint, round,
+    absf, sqrt, exp, log, pow, ceil, floor, rint, round,
     fmin, fmax, fma, convert,
-    syncthreads, threadfence, threadfence_block, trap, keep, resume,
+    syncthreads, threadfence, threadfence_block, keep, resume,
     pipe_barrier,
     get_buf, rls_buf,
     set_cross_flag, wait_cross_flag, set_intra_flag, wait_intra_flag,
@@ -158,8 +152,7 @@ from ._ops import (             # noqa: F401
 
 # ── Control flow ──────────────────────────────────────────────────────────────
 from ._control_flow import (    # noqa: F401
-    section, vecscope,
-    for_, while_, _while, if_, yield_,
+    for_, if_, yield_,
     static_range,
     LoopHandle, BranchHandle,
 )
@@ -169,7 +162,6 @@ from ._allreduce import simt_allreduce_max, simt_allreduce_min, simt_allreduce_s
 
 # ── Decorator ─────────────────────────────────────────────────────────────────
 from ._jit import jit, KernelHandle, merge_jit_modules      # noqa: F401
-from ._func import func  # noqa: F401
 from ._subkernels import cube, simd, simt, tileop     # noqa: F401
 from ._pipe_namespace import pipe  # noqa: F401
 
@@ -192,6 +184,6 @@ PAT = MaskPattern
 
 
 def __getattr__(name):
-    if name in {"ukernel", "tile_buf_type", "as_ptr", "vbrc_load", "vsts_1pt", "constexpr", "copy_ubuf_to_ubuf", "tensor_spec", "TensorSpec"}:
+    if name in {"ukernel", "tile_buf_type", "vecscope", "as_ptr", "vbrc_load", "vsts_1pt", "constexpr", "copy_ubuf_to_ubuf", "tensor_spec", "TensorSpec"}:
         raise unsupported_public_surface_error(name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

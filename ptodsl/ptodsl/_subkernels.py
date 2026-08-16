@@ -37,7 +37,6 @@ from ._types import (
     _DType,
     _MaskDescriptor,
     _PtrDescriptor,
-    _StructDescriptor,
     _VecDescriptor,
     _VRegDescriptor,
     bf16,
@@ -136,14 +135,6 @@ class SubkernelTemplate:
             for param in self.signature.parameters.values():
                 if isinstance(param.annotation, TensorSpec):
                     raise subkernel_signature_boundary_error(self.spec.role.value, param.name)
-                annotation = _normalize_subkernel_annotation(param.annotation)
-                if isinstance(annotation, _StructDescriptor):
-                    raise subkernel_illegal_annotation_error(
-                        self.spec.role.value,
-                        param.name,
-                        param.annotation,
-                        _expected_subkernel_annotation_summary(self.spec.role),
-                    )
             return
 
         for param in self.signature.parameters.values():
@@ -275,7 +266,7 @@ def _find_transient_simd_escape(value):
 def _is_supported_runtime_scalar_annotation(annotation) -> bool:
     return (
         isinstance(annotation, _DType)
-        and not isinstance(annotation, (_PtrDescriptor, _StructDescriptor, _VecDescriptor, _VRegDescriptor, _MaskDescriptor))
+        and not isinstance(annotation, (_PtrDescriptor, _VecDescriptor, _VRegDescriptor, _MaskDescriptor))
     )
 
 

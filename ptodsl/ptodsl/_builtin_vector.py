@@ -7,13 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """Builtin MLIR vector helpers for PTODSL scalar-contiguous access."""
 
+from ._bootstrap import make_context  # ensure MLIR is on sys.path  # noqa: F401
 from ._scalar_coercion import coerce_scalar_to_type
 from ._surface_values import VecValue, unwrap_surface_value
 from ._types import _resolve, _validate_vec_size, vec_type
 
-from ptoas.mlir.dialects import arith
-from ptoas.mlir.dialects import llvm
-from ptoas.mlir.ir import IntegerType, VectorType
+from mlir.dialects import arith
+from mlir.dialects import llvm
+from mlir.ir import IntegerType, VectorType
 
 
 def Vec(dtype, size: int, *, init=None):
