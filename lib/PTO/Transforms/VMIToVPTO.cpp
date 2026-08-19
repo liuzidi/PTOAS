@@ -8499,10 +8499,16 @@ struct OneToNVMIStrideStoreOpPattern
                      .create<AddPtrOp>(op.getLoc(), (*destination).getType(),
                                        *destination, *offset)
                      .getResult();
-    rewriter.create<VsstbOp>(op.getLoc(), /*updated_base=*/Type{},
-                             valueParts.front(), base, *blockStride,
-                             *repeatStride, maskParts.front());
-    rewriter.eraseOp(op);
+    Type updatedBaseType =
+        op.getUpdatedBase() ? op.getUpdatedBase().getType() : Type{};
+    auto vsstb = rewriter.create<VsstbOp>(op->getLoc(), updatedBaseType,
+                                          valueParts.front(), base,
+                                          *blockStride, *repeatStride,
+                                          maskParts.front());
+    if (op.getUpdatedBase())
+      rewriter.replaceOp(op, vsstb.getUpdatedBase());
+    else
+      rewriter.eraseOp(op);
     return success();
   }
 };
