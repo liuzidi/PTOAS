@@ -44,9 +44,11 @@ bool DaemonManager::start(const std::string &socketPath,
     return false;
   }
 
-  llvm::SmallVector<llvm::StringRef, 8> args = {
-      *pythonPath, "-m", daemonModule, "--socket", socketPath,
-  };
+  llvm::SmallVector<llvm::StringRef, 8> args = {*pythonPath};
+  if (daemonModule == "ptodsl.tilelib.serving.daemon") {
+    args.push_back("-S");
+  }
+  args.append({"-m", daemonModule, "--socket", socketPath});
   if (!templateDir.empty()) {
     args.push_back("--template-dir");
     args.push_back(templateDir);
@@ -65,11 +67,17 @@ bool DaemonManager::start(const std::string &socketPath,
     }
     for (char **e = environ; *e; ++e) {
       llvm::StringRef entry(*e);
-      if (entry.starts_with("PYTHONPATH="))
+      bool skipEntry = entry.starts_with("PYTHONPATH=") || entry.starts_with("SKBUILD_EDITABLE_SKIP=");
+      if (skipEntry) {
         continue;
+      }
       envStorage.push_back(std::string(entry));
     }
     envStorage.push_back(pythonPathEnv);
+    // The configured build-tree package must win over an editable wheel's
+    // meta-path redirect.  Otherwise the daemon can load stale MLIR bindings
+    // from site-packages even though PYTHONPATH names this checkout first.
+    envStorage.push_back("SKBUILD_EDITABLE_SKIP=1");
     for (auto &s : envStorage)
       envp.push_back(s);
   }

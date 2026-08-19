@@ -1105,7 +1105,7 @@ ExpandState::invokeTileLibHelper(const SpecKey &key,
 
   std::string opName = "pto." + key.opName;
   SmallVector<StringRef> args = {
-      *pythonPath, "-m", daemonHelperModule,
+      *pythonPath, "-S", "-m", daemonHelperModule,
       "--socket",      daemonSocketPath,
       "--target",      key.targetArch,
       "--op",          opName,
@@ -1136,11 +1136,14 @@ ExpandState::invokeTileLibHelper(const SpecKey &key,
     }
     for (char **e = environ; *e; ++e) {
       StringRef entry(*e);
-      if (entry.starts_with("PYTHONPATH="))
+      bool skipEntry = entry.starts_with("PYTHONPATH=") || entry.starts_with("SKBUILD_EDITABLE_SKIP=");
+      if (skipEntry) {
         continue;
+      }
       envStorage.push_back(std::string(entry));
     }
     envStorage.push_back(pythonPathEnv);
+    envStorage.push_back("SKBUILD_EDITABLE_SKIP=1");
     for (auto &s : envStorage)
       envp.push_back(s);
   }
