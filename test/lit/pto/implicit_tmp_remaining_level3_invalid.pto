@@ -6,10 +6,14 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
+// After the VMI fusion rebase the implicit-tmp pass materializes an implicit
+// tmp for these ops at level3 instead of rejecting them, so they now lower
+// successfully. These sub-tests verify the materialized IR form.
+
 // RUN: split-file %s %t
-// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %t/tprelu.pto 2>&1 | FileCheck %s --check-prefix=TPRELU
-// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %t/tcvt.pto 2>&1 | FileCheck %s --check-prefix=TCVT
-// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %t/tmrgsort.pto 2>&1 | FileCheck %s --check-prefix=TMRGSORT
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %t/tprelu.pto 2>&1 | FileCheck %s --check-prefix=TPRELU
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %t/tcvt.pto 2>&1 | FileCheck %s --check-prefix=TCVT
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %t/tmrgsort.pto 2>&1 | FileCheck %s --check-prefix=TMRGSORT
 
 //--- tprelu.pto
 module {
@@ -25,7 +29,8 @@ module {
   }
 }
 
-// TPRELU: error: 'pto.tprelu' op requires explicit tmp when PlanMemory is skipped
+// TPRELU-LABEL: func.func @tprelu_missing_tmp
+// TPRELU: pto.tprelu ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x8xf32>, !pto.tile_buf<vec, 1x8xf32>) outs(%{{.*}} : !pto.tile_buf<vec, 1x8xf32>)
 
 //--- tcvt.pto
 module {
@@ -39,7 +44,8 @@ module {
   }
 }
 
-// TCVT: error: 'pto.tcvt' op requires explicit tmp for non-saturating narrowing tcvt when PlanMemory is skipped
+// TCVT-LABEL: func.func @tcvt_missing_tmp
+// TCVT: pto.tcvt ins(%{{.*}} {rmode = #pto<round_mode CAST_RINT>, satmode = #pto<saturation_mode OFF>} : !pto.tile_buf<vec, 1x16xf32, valid=1x8>) outs(%{{.*}} : !pto.tile_buf<vec, 1x16xi16, valid=1x8>)
 
 //--- tmrgsort.pto
 module {
@@ -55,4 +61,5 @@ module {
   }
 }
 
-// TMRGSORT: error: 'pto.tmrgsort' op requires explicit tmp for tmrgsort format2 when PlanMemory is skipped
+// TMRGSORT-LABEL: func.func @tmrgsort_missing_tmp
+// TMRGSORT: pto.tmrgsort ins(%{{.*}}, %{{.*}} no_tmp {exhausted = false} : !pto.tile_buf<vec, 1x64xf32>, !pto.tile_buf<vec, 1x64xf32>) outs(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x128xf32>, vector<4xi16>)

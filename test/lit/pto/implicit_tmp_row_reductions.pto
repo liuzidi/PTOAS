@@ -25,12 +25,12 @@ module {
 }
 
 // A3-LABEL: func.func @implicit_row_reduction_tmps
-// A3: pto.trowmax ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 2x16xf32>)
-// A3: pto.trowmin ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 2x16xf32>)
-// A3: pto.trowsum ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 2x16xf32>)
-// A3: pto.trowprod ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 2x16xf32>)
+// A3: pto.trowmax ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A3: pto.trowmin ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A3: pto.trowsum ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A3: pto.trowprod ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
 // A5-LABEL: func.func @implicit_row_reduction_tmps
-// A5: pto.trowmax ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 1x8xf32>)
-// A5: pto.trowmin ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 1x8xf32>)
-// A5: pto.trowsum ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 1x8xf32>)
-// A5: pto.trowprod ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 2x16xf32>, !pto.tile_buf<vec, 1x8xf32>)
+// A5: pto.trowmax ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A5: pto.trowmin ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A5: pto.trowsum ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})
+// A5: pto.trowprod ins(%{{.*}} : !pto.tile_buf<vec, 2x16xf32>) outs(%{{.*}})

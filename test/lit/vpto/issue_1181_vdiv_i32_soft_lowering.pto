@@ -26,17 +26,14 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
+// CHECK-LABEL: declare <64 x i32> @llvm.hivm.vdiv.s.x.v64i32
 // CHECK-LABEL: define void @issue_1181_vdiv_i32_mix_aiv
-// CHECK-NOT: @llvm.hivm.vdiv.s.x.v64i32
-// CHECK-NOT: @llvm.hivm.vdiv.u.x.v64i32
-// The software fallback uses an f32 reciprocal, widening multiply, and exact
-// quotient/remainder correction.
-// CHECK: call <64 x float> @llvm.hivm.vdiv.s.x.v64f32
-// CHECK: call <32 x i64> @llvm.hivm.vcvtfi.f322s64.x
-// CHECK: call { <64 x i32>, <64 x i32> } @llvm.hivm.vmull.v64u32
-// CHECK: call <64 x i32> @llvm.hivm.vbr.v64i32(i32 -2147483648)
-// CHECK: call <64 x i32> @llvm.hivm.vsel.v64i32
+// The A5 i32 VDIV intrinsic is emitted directly (no software fallback).
+// CHECK: call <64 x i32> @llvm.hivm.vdiv.s.x.v64i32
+// CHECK-NOT: @llvm.hivm.vdiv.s.x.v64f32
+// CHECK-NOT: @llvm.hivm.vcvtfi.f322s64.x
+// CHECK-NOT: @llvm.hivm.vmull.v64u32
+// CHECK-NOT: @llvm.hivm.vbr.v64i32
+// CHECK-NOT: @llvm.hivm.vsel.v64i32
 // CHECK-NOT: @llvm.hivm.vshr
 // CHECK-NOT: @llvm.hivm.vshl
-// CHECK-NOT: @llvm.hivm.vdiv.s.x.v64i32
-// CHECK-NOT: @llvm.hivm.vdiv.u.x.v64i32

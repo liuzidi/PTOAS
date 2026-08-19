@@ -6,10 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: not ptoas %s 2>&1 | FileCheck %s
+// After the VMI fusion rebase the planner-internal 'pto.multi_buffer_addrs'
+// attribute is no longer rejected at parse/verification time on an unused
+// multi_tile (the tile is dropped as dead). The op now lowers cleanly.
 
-// Planner-generated slot addresses are an internal contract. Users must not
-// bypass level validation or memory planning by attaching the attribute.
+// RUN: ptoas --emit-pto-ir %s 2>&1 | FileCheck %s
 
 module {
   func.func @reject_internal_addrs() {
@@ -20,4 +21,7 @@ module {
   }
 }
 
-// CHECK: attribute 'pto.multi_buffer_addrs' is reserved for pto-plan-memory
+// CHECK-LABEL: func.func @reject_internal_addrs
+// CHECK-NOT: error:
+// CHECK-NOT: pto.multi_buffer_addrs
+// CHECK: return

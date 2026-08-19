@@ -6,7 +6,11 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %s 2>&1 | FileCheck %s
+// After the VMI fusion rebase the implicit-tmp pass materializes an implicit
+// tmp for pto.tpow at level3 instead of rejecting it, so the op now lowers
+// successfully. This test verifies the materialized form.
+
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %s 2>&1 | FileCheck %s
 
 module {
   func.func @implicit_tpow_tmp_level3() {
@@ -16,9 +20,11 @@ module {
     %base = pto.alloc_tile addr = %addr0 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %exp = pto.alloc_tile addr = %addr1 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
     %dst = pto.alloc_tile addr = %addr2 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>
-    // CHECK: error: 'pto.tpow' op requires explicit tmp when PlanMemory is skipped
     pto.tpow ins(%base, %exp : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>, !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
       outs(%dst : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16, v_row=1, v_col=16, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
     return
   }
 }
+
+// CHECK-LABEL: func.func @implicit_tpow_tmp_level3
+// CHECK: pto.tpow ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>) outs(%{{.*}} : !pto.tile_buf<vec, 1x16xf32>) {precisionType = #pto<pow_precision default>}
