@@ -223,6 +223,13 @@ static bool isSCFTileCarrier(Value value) {
          isa_and_nonnull<scf::ForOp>(blockArg.getOwner()->getParentOp());
 }
 
+static bool isRuntimeTileCarrier(Value value) {
+  if (isSCFTileCarrier(value)) {
+    return true;
+  }
+  return value.getDefiningOp<pto::DeclareTileOp>() != nullptr;
+}
+
 static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
                                                        Operation *user) {
   // A tile_buf anchor may be a fusion_region result (possibly wrapped in
@@ -821,7 +828,7 @@ struct FoldTileBufIntrinsicsPass
         // Keep tile_buf_addr attached to that handle; VPTO pointer
         // normalization converts it directly without choosing one branch's
         // allocation address here.
-        if (isSCFTileCarrier(addrOp.getSrc())) {
+        if (isRuntimeTileCarrier(addrOp.getSrc())) {
           continue;
         }
 

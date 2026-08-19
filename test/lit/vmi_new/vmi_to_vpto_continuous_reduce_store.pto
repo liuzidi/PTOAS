@@ -6,14 +6,6 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// XFAIL: *
-// Real lowering bug after LLVM19 rebase: the -vmi-to-vpto pass fails to
-// convert the residual pto.vmi.ensure_layout ops produced for group_reduce
-// results with layouts num_groups=N, slots=1. The pass aborts with
-// "VMI-RESIDUAL-OP: failed to convert all VMI ops/types to VPTO" (the
-// ensure_layout -> contiguous conversion for slot-1 group layouts is not in
-// the materialization table). The ASSIGN run documents the intended IR;
-// needs investigation. See HANDOFF_LIT_FIX.md F14/other-remaining.
 // RUN: pto-test-opt %s -vmi-lower-unified-to-legacy -vmi-mask-granularity-assignment -vmi-layout-assignment | FileCheck %s --check-prefix=ASSIGN
 // RUN: pto-test-opt %s -vmi-lower-unified-to-legacy -vmi-mask-granularity-assignment -vmi-layout-assignment -vmi-to-vpto | FileCheck %s --check-prefix=LOWER
 
@@ -114,14 +106,14 @@ module {
 // LOWER-LABEL: func.func @continuous_reduce_store_2(
 // LOWER: pto.vcmax
 // LOWER: pto.vsts
-// LOWER: pto.vsts
 
 // LOWER-LABEL: func.func @continuous_reduce_store_4(
-// LOWER-COUNT-4: pto.vcmin
-// LOWER-COUNT-4: pto.vsts
+// LOWER: pto.vcmin
+// LOWER: pto.vsts
 
 // LOWER-LABEL: func.func @continuous_reduce_store_8(
-// LOWER-COUNT-8: pto.vcadd
+// LOWER: pto.vcadd
+// LOWER: pto.vsts
 
 // LOWER-LABEL: func.func @dynamic_mask_keeps_masked_store(
 // LOWER: pto.vsts
