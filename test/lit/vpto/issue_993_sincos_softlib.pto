@@ -9,7 +9,7 @@
 // Guards late A5 PTODSL SoftLib materialization for SIMT sin/cos.
 // The operations are intentionally f32 scalar hooks, not native vector ops.
 
-// RUN: ( ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 || true ) | FileCheck %s
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto-llvm-ir %s -o - 2>&1 | FileCheck %s
 
 module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
   func.func @issue_993_sincos(%x: f32, %dst: !pto.ptr<f32, ub>) attributes {pto.simt_entry} {
@@ -22,5 +22,6 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
   }
 }
 
-// CHECK: error: cannot be converted to LLVM IR: missing `LLVMTranslationDialectInterface` registration for dialect for op: pto.sin
-// CHECK: VPTO LLVM emission failed: LLVM IR export failed for vector module
+// CHECK-LABEL: define linkonce_odr simt_entry void @issue_993_sincos
+// CHECK-COUNT-2: call float @llvm.hivm.round.f
+// CHECK-COUNT-12: call float @llvm.hivm.ffma.f32.rrr

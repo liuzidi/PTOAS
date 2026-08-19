@@ -32,8 +32,7 @@ module attributes {pto.target_arch = "a5"} {
 
 // CHECK-LABEL: func.func @auto_vecscope_infer_shared_pintlv
 // CHECK: pto.vecscope {
-// CHECK: pto.pintlv_b32
+// CHECK: pto.pge_b32
 // CHECK: pto.barrier
 // CHECK: pto.vecscope {
-// CHECK: pto.pintlv_b32
 // CHECK: scf.for
