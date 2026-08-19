@@ -47,20 +47,20 @@ module {
 }
 
 // CHECK-LABEL: func.func @implicit_tcolsum_tmp
-// CHECK: pto.alloc_tile addr = {{.*}} : !pto.tile_buf<vec, 4x8xf32>
-// CHECK: pto.tcolsum ins(%{{.*}} : {{.*}}) outs(%{{.*}} : !pto.tile_buf<vec, 1x8xf32>)
+// CHECK: pto.alloc_tile addr = {{.*}} : !pto.tile_buf<vec, 2x8xf32>
+// CHECK: pto.tcolsum ins(%{{.*}}, %{{.*}} {{.*}}isBinary = true
 
 // CHECK-LABEL: func.func @implicit_tquant_tmp
-// CHECK: pto.tquant ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 8x8xf32>, !pto.tile_buf<vec, 8x1xf32, blayout=col_major>) outs(%{{.*}} : !pto.tile_buf<vec, 8x32xi8, valid=8x8>)
+// CHECK: pto.tquant ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 8x8xf32>, !pto.tile_buf<vec, 8x1xf32, blayout=col_major>) outs(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 8x32xi8, valid=8x8>, !pto.tile_buf<vec, 8x8xf32>)
 
 // CHECK-LABEL: func.func @implicit_tpows_tmp
-// CHECK: pto.tpows ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, f32) outs(%{{.*}})
+// CHECK: pto.tpows ins(%{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, f32, !pto.tile_buf<vec, 1x16xf32>)
 
 // CHECK-LABEL: func.func @implicit_tsort32_tmp
-// CHECK: pto.tsort32 ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=1x33>, !pto.tile_buf<vec, 1x40xui32, valid=1x33>) outs(%{{.*}})
+// CHECK: pto.tsort32 ins(%{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=1x33>, !pto.tile_buf<vec, 1x40xui32, valid=1x33>, !pto.tile_buf<vec, 1x48xf16, valid=1x33>)
 
 // A5-LABEL: func.func @implicit_tquant_tmp
 // A5: pto.tquant ins(%{{.*}}, %{{.*}} : {{.*}}) outs(%{{.*}} :
 // A5-NOT: pto.tquant ins({{.*}}) outs(%{{.*}}, %{{.*}}
 // A5-LABEL: func.func @implicit_tpows_tmp
-// A5: pto.tpows ins(%{{.*}}, %{{.*}} : {{.*}}) outs(%{{.*}})
+// A5: pto.tpows ins(%{{.*}}, %{{.*}}, %{{.*}} :

@@ -20,4 +20,4 @@ module {
   }
 }
 
-// CHECK: error: 'pto.reserve_buffer' op expects 'base' to be resolved before address materialization
+// CHECK: error: pto.reserve_buffer requires 'auto = false' and explicit 'base' when --pto-level=level3

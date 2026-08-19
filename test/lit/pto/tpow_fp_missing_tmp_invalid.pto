@@ -21,7 +21,7 @@ module {
 }
 
 // A3: pto.alloc_tile addr = {{.*}} : !pto.tile_buf<vec, 1x16xf32>
-// A3: pto.tpow ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>) outs(%{{.*}} : !pto.tile_buf<vec, 1x16xf32>) {precisionType = #pto<pow_precision default>}
+// A3: pto.tpow ins(%{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>)
 
 // A5: pto.alloc_tile addr = {{.*}} : !pto.tile_buf<vec, 1x16xf32>
-// A5: pto.tpow ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>) outs(%{{.*}} : !pto.tile_buf<vec, 1x16xf32>) {precisionType = #pto<pow_precision default>}
+// A5: pto.tpow ins(%{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>, !pto.tile_buf<vec, 1x16xf32>)

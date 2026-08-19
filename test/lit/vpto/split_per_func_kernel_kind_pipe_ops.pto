@@ -21,7 +21,7 @@ module attributes {pto.target_arch = "a5"} {
       name = "v2c_fifo",
       size = 4096,
       location = #pto.address_space<mat>,
-      auto = true,
+      auto = false,
       base = 0
     } -> i32
     %c2v_import = pto.import_reserved_buffer {
@@ -47,7 +47,7 @@ module attributes {pto.target_arch = "a5"} {
       name = "c2v_fifo",
       size = 4096,
       location = #pto.address_space<vec>,
-      auto = true,
+      auto = false,
       base = 0
     } -> i32
     %v2c_import = pto.import_reserved_buffer {

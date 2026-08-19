@@ -6,10 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// After the VMI fusion rebase a stack-local struct is permitted as a function
-// argument, so the verifier no longer rejects this pattern.
-
-// RUN: ptoas --emit-pto-ir %s -o - 2>&1 | FileCheck %s
+// RUN: not ptoas --emit-pto-ir %s -o - 2>&1 | FileCheck %s
 
 // Struct storage is local to its declaring function. A function parameter could
 // hide an arbitrary caller-owned slot, so verifier provenance only permits a
@@ -22,6 +19,5 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func private @helper
-// CHECK: %{{.*}}: !pto.struct<f32, i8>, %{{.*}}: f32)
-// CHECK: pto.struct_set %{{.*}} [0], %{{.*}} : !pto.struct<f32, i8>, f32
+// CHECK: 'func.func' op argument 0 has type {{.*}}!pto.struct<f32, i8>{{.*}}but a stack-local struct must not be a function argument
+// CHECK-SAME: structs must originate from 'pto.declare_struct' in the same function

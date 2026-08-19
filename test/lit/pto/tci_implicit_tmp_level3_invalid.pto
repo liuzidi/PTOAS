@@ -1,8 +1,4 @@
-// After the VMI fusion rebase the implicit-tmp pass materializes an implicit
-// tmp for pto.tci at level3 instead of rejecting it, so the op now lowers
-// successfully. This test verifies the materialized IR form.
-
-// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %s 2>&1 | FileCheck %s
+// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %s 2>&1 | FileCheck %s
 
 module {
   func.func @tci_implicit_tmp_level3() {
@@ -15,5 +11,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @tci_implicit_tmp_level3
-// CHECK: pto.tci ins(%{{.*}} : i32) outs(%{{.*}} : !pto.tile_buf<vec, 1x32xi32>) {descending = false}
+// CHECK: error: 'pto.tci' op requires explicit tmp when PlanMemory is skipped

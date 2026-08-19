@@ -26,13 +26,11 @@ module {
   }
 }
 
-// IR: pto.declare_tile -> !pto.tile_buf<vec, 1x32xi32>
-// IR: pto.tci ins(%{{.*}} : i32) outs(%{{.*}} : !pto.tile_buf<vec, 1x32xi32>) {descending = false}
-// IR-NOT: pto.alloc_tile
-// IR-NOT: !pto.tile_buf<vec, 1x192xf32>
+// IR: pto.alloc_tile addr = {{.*}} : !pto.tile_buf<vec, 1x192xf32>
+// IR: pto.tci ins(%{{.*}}, %{{.*}} : i32, !pto.tile_buf<vec, 1x192xf32>)
 // IR-NOT: memref.alloc
 
-// CPP: TCI<Tile<{{.*}}int32_t{{.*}}, int32_t, 0>({{.*}}, {{.*}})
+// CPP: TCI<{{.*}}, {{.*}}, int32_t, 0>({{.*}}, {{.*}}, {{.*}})
 
 // A5IR: pto.tci ins(%{{.*}} : i32) outs(
 // A5IR-NOT: !pto.tile_buf<vec, 1x192xf32>

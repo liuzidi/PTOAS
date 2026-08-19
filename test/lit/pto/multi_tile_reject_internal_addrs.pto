@@ -6,11 +6,7 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// After the VMI fusion rebase the planner-internal 'pto.multi_buffer_addrs'
-// attribute is no longer rejected at parse/verification time on an unused
-// multi_tile (the tile is dropped as dead). The op now lowers cleanly.
-
-// RUN: ptoas --emit-pto-ir %s 2>&1 | FileCheck %s
+// RUN: not ptoas %s 2>&1 | FileCheck %s
 
 module {
   func.func @reject_internal_addrs() {
@@ -21,7 +17,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @reject_internal_addrs
-// CHECK-NOT: error:
-// CHECK-NOT: pto.multi_buffer_addrs
-// CHECK: return
+// CHECK: attribute 'pto.multi_buffer_addrs' is reserved for pto-plan-memory

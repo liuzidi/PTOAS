@@ -6,11 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// After the VMI fusion rebase a TQUANT with a dynamic-valid-shape src and no
-// explicit tmp is no longer rejected: the op now lowers without materializing
-// an implicit tmp. This test verifies the lowered IR form.
-
-// RUN: ptoas --pto-arch=a3 %s -emit-pto-ir 2>&1 | FileCheck %s
+// TQUANT with a dynamic-valid-shape src cannot materialize an implicit tmp.
+// RUN: not ptoas --pto-arch=a3 %s -emit-pto-ir 2>&1 | FileCheck %s
 
 module {
   func.func @tquant_no_implicit_tmp_a3(%valid_row: index, %valid_col: index)
@@ -27,6 +24,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @tquant_no_implicit_tmp_a3
-// CHECK: pto.tquant ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 32x32xf32, valid=?x?>, !pto.tile_buf<vec, 32x1xf32, blayout=col_major>) outs(%{{.*}} : !pto.tile_buf<vec, 32x32xi8, valid=?x?>) {quant_type = #pto<quant_type INT8_SYM>}
-// CHECK-NOT: error:
+// CHECK: 'pto.tquant' op requires static tile_buf src to materialize implicit tquant tmp

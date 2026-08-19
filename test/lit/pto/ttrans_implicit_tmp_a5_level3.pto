@@ -27,4 +27,4 @@ module {
 }
 
 // A5-LABEL: func.func @a5_ttrans_implicit_tmp
-// A5: pto.ttrans ins(%{{.*}} : !pto.tile_buf<vec, 32x16xf16>) outs(%{{.*}})
+// A5: pto.ttrans ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 32x16xf16>, !pto.tile_buf<vec, 1x16xf16>)

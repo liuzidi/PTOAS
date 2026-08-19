@@ -12,7 +12,7 @@
 // emitted in the 3-argument no-tmp form.
 
 // RUN: sed -E 's/ addr = %[A-Za-z0-9_]+//g' %s > %t.l2.pto && ptoas --pto-arch=a3 --pto-level=level2 --emit-pto-ir %t.l2.pto 2>&1 | FileCheck %s --check-prefix=L2
-// RUN: ptoas --pto-arch=a3 --pto-level=level3 --emit-pto-ir %s 2>&1 | FileCheck %s --check-prefix=L3
+// RUN: not ptoas --pto-arch=a3 --pto-level=level3 %s 2>&1 | FileCheck %s --check-prefix=L3
 
 module {
   func.func @tsort32_dynamic_width(%vr: index, %vc: index) {
@@ -29,7 +29,6 @@ module {
 }
 
 // L2-LABEL: func.func @tsort32_dynamic_width
-// L2: pto.tsort32 ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=?x?>, !pto.tile_buf<vec, 1x48xui32, valid=?x?>) outs(%{{.*}})
+// L2: pto.tsort32 ins(%{{.*}}, %{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=?x?>, !pto.tile_buf<vec, 1x48xui32, valid=?x?>, !pto.tile_buf<vec, 1x48xf16>)
 
-// L3-LABEL: func.func @tsort32_dynamic_width
-// L3: pto.tsort32 ins(%{{.*}}, %{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=?x?>, !pto.tile_buf<vec, 1x48xui32, valid=?x?>) outs(%{{.*}} : !pto.tile_buf<vec, 1x48xf16, valid=?x?>)
+// L3: error: 'pto.tsort32' op requires explicit tmp for tsort32 with dynamic or non-32-aligned width when PlanMemory is skipped
