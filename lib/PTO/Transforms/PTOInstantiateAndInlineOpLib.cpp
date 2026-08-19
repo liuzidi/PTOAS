@@ -79,6 +79,12 @@ static bool isTileOpProviderFunc(func::FuncOp fn) {
 }
 
 static bool isInlineableLibFunc(func::FuncOp fn) {
+  // Soft-library materialization uses a distinct marker so its generated
+  // helper bodies are still eligible for the common inliner.
+  bool isSoftLibInstance = fn->hasAttr("pto.softlib.instance") && fn.isPrivate();
+  if (isSoftLibInstance) {
+    return true;
+  }
   // Keep OP-Lib behavior unchanged while TileLang private template helpers are
   // still handled on the VPTO tile-op expansion path, together with
   // TileLang inline_proc helpers that only become meaningful after ExpandTileOp.

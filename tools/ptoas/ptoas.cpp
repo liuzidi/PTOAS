@@ -9,6 +9,7 @@
 #include "ptoas.h"
 #include "PTO/IR/PTO.h"
 #include "PTO/IR/VMIUtils.h"
+#include "PTO/IR/PTOMultiBuffer.h"
 #include "PTO/Transforms/VPTOLLVMEmitter.h"
 #include "PTO/Transforms/Passes.h"
 #include "PTO/Transforms/BufferizableOpInterfaceImpl.h"
@@ -497,6 +498,9 @@ static llvm::cl::opt<bool> enableTileOpExpand(
 #ifndef PTOAS_DEFAULT_PTODSL_PYTHON_EXE
 #define PTOAS_DEFAULT_PTODSL_PYTHON_EXE "python3"
 #endif
+#ifndef PTOAS_DEFAULT_TILEOPS_PKG_PATH
+#define PTOAS_DEFAULT_TILEOPS_PKG_PATH ""
+#endif
 
 static llvm::cl::opt<std::string> tilelangPath(
     "tilelang-path",
@@ -588,6 +592,16 @@ static pto::ExpandTileOpOptions resolveExpandTileOpOptions(int argc,
   }
 
   if (usePTODSLTileLib) {
+    // The Python TileLib process must use the MLIR bindings paired with this
+    // compiler. The wrapper derives this relocatably from the active _core.
+    if (const char *runtimeRoot = ::getenv("PTOAS_PYTHON_PACKAGE_ROOT");
+        runtimeRoot && runtimeRoot[0] != '\0')
+      resolvedPtodslPkgPath =
+          std::string(runtimeRoot) + ":" + resolvedPtodslPkgPath;
+    llvm::StringRef tileOpsRoot(PTOAS_DEFAULT_TILEOPS_PKG_PATH);
+    if (!tileOpsRoot.empty()) {
+      resolvedPtodslPkgPath += ":" + tileOpsRoot.str();
+    }
     // The PTODSL backend is package-based and must not depend on legacy
     // TileLang template or package paths.
     expandOpts.tilelangPath.clear();
@@ -804,6 +818,98 @@ enum class PTOBuildLevel {
 
 static PTOBuildLevel defaultBuildLevel() {
   return PTOBuildLevel::Level2;
+}
+
+struct ReserveBufferMemSpec {
+  uint64_t capacityBytes = 0;
+  uint64_t alignmentBytes = 1;
+};
+
+static ReserveBufferMemSpec getReserveBufferMemSpec(PTOArch arch,
+                                                    AddressSpace space) {
+  switch (space) {
+  case AddressSpace::VEC:
+    return {arch == PTOArch::A5 ? 253952uLL : 196608uLL, 256};
+  case AddressSpace::MAT:
+    return {524288uLL, 256};
+  case AddressSpace::LEFT:
+  case AddressSpace::RIGHT:
+  case AddressSpace::ACC:
+  case AddressSpace::BIAS:
+  case AddressSpace::SCALING:
+  case AddressSpace::GM:
+  case AddressSpace::Zero:
+    break;
+  }
+  return {};
+}
+
+static LogicalResult validateReserveBufferBase(pto::ReserveBufferOp op,
+                                               PTOArch arch) {
+  auto baseAttr = op.getBaseAttr();
+  if (!baseAttr) {
+    return op.emitError("expects explicit 'base'");
+  }
+  int64_t signedBase = baseAttr.getInt();
+  if (signedBase < 0) {
+    return op.emitError("expects 'base' to be non-negative when present");
+  }
+
+  ReserveBufferMemSpec spec =
+      getReserveBufferMemSpec(arch, op.getLocation().getAddressSpace());
+  uint64_t base = static_cast<uint64_t>(signedBase);
+  if (base % spec.alignmentBytes != 0) {
+    return op.emitError("expects 'base' to be aligned to ")
+           << spec.alignmentBytes << " bytes for "
+           << stringifyEnum(op.getLocation().getAddressSpace());
+  }
+
+  uint64_t size = static_cast<uint64_t>(op.getSize());
+  if (base > spec.capacityBytes || size > spec.capacityBytes - base) {
+    return op.emitError("reserved range exceeds ")
+           << stringifyEnum(op.getLocation().getAddressSpace())
+           << " capacity: base " << base << " + size " << size
+           << " > " << spec.capacityBytes << " bytes";
+  }
+  return success();
+}
+
+static bool validateReserveBufferLevelRules(ModuleOp module,
+                                            PTOBuildLevel level) {
+  bool failed = false;
+  PTOArch arch = getTargetArch(module);
+  module.walk([&](pto::ReserveBufferOp op) {
+    if (level != PTOBuildLevel::Level3) {
+      if (op.getAutoAlloc()) {
+        if (op.getBaseAttr()) {
+          op.emitError("unexpected 'base' on auto reserve_buffer: "
+                       "level1/level2 assign it in pto-plan-memory");
+          failed = true;
+        }
+        return;
+      }
+      if (op.getBaseAttr()) {
+        (void)validateReserveBufferBase(op, arch);
+      }
+      op.emitError("pto.reserve_buffer with explicit 'base' (auto = false) is "
+                   "not supported when --pto-level=level1 or level2; use "
+                   "--pto-level=level3 or set auto = true");
+      failed = true;
+      return;
+    }
+    const bool hasInvalidLevel3Reservation =
+        op.getAutoAlloc() || !op.getBaseAttr();
+    if (hasInvalidLevel3Reservation) {
+      op.emitError("pto.reserve_buffer requires 'auto = false' and explicit "
+                   "'base' when --pto-level=level3");
+      failed = true;
+      return;
+    }
+    if (mlir::failed(validateReserveBufferBase(op, arch))) {
+      failed = true;
+    }
+  });
+  return !failed;
 }
 
 static bool parseBuildLevel(llvm::StringRef levelStr, PTOBuildLevel &out) {
@@ -1296,6 +1402,61 @@ struct SerialFrontendPipeLoweringPass
   }
 };
 } // namespace
+
+static SmallVector<func::FuncOp> collectSharedPipelineFunctions(ModuleOp module) {
+  SmallVector<func::FuncOp> functions;
+  if (emitMlirIR) {
+    module.walk([&](func::FuncOp funcOp) { functions.push_back(funcOp); });
+  } else {
+    llvm::append_range(functions, module.getOps<func::FuncOp>());
+  }
+  return functions;
+}
+
+struct SerialAutoSyncPass
+    : public PassWrapper<SerialAutoSyncPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SerialAutoSyncPass)
+  enum class Mode { InsertSync, Bufid, BarrierAll, GraphSolver };
+
+  SerialAutoSyncPass(Mode mode, bool enableBufidDebug, int64_t graphEventIdMax)
+      : mode(mode), enableBufidDebug(enableBufidDebug),
+        graphEventIdMax(graphEventIdMax) {}
+
+  void runOnOperation() override {
+    OpPassManager functionPM(func::FuncOp::getOperationName());
+    switch (mode) {
+    case Mode::InsertSync:
+      functionPM.addPass(pto::createPTOInsertSyncPass());
+      break;
+    case Mode::Bufid: {
+      PTOBufidSyncOptions options;
+      options.enableBufidSyncDebug = enableBufidDebug;
+      functionPM.addPass(pto::createPTOBufidSyncPass(options));
+      break;
+    }
+    case Mode::BarrierAll:
+      functionPM.addPass(pto::createPTOInjectBarrierAllSyncPass());
+      break;
+    case Mode::GraphSolver: {
+      PTOGraphSyncSolverOptions options;
+      options.eventIdNumMax = graphEventIdMax;
+      functionPM.addPass(pto::createPTOGraphSyncSolverPass(options));
+      break;
+    }
+    }
+    for (func::FuncOp funcOp : collectSharedPipelineFunctions(getOperation())) {
+      if (failed(runPipeline(functionPM, funcOp))) {
+        signalPassFailure();
+        return;
+      }
+    }
+  }
+
+private:
+  Mode mode;
+  bool enableBufidDebug;
+  int64_t graphEventIdMax;
+};
 
 static std::unique_ptr<Pass> createSerialFrontendPipeLoweringPass() {
   return std::make_unique<SerialFrontendPipeLoweringPass>();
@@ -2931,6 +3092,13 @@ static void prepareVPTOForEmission(PassManager &pm) {
       pto::createPTOUnrollSIMTForPass());
   kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
+  // Expand software-library vector operations before inferring scopes so the
+  // generated pset/vsel sequence is enclosed by the same scope as the source
+  // operation.  The local pipeline infers scopes early for MemBar legality.
+  kernelModulePM.addPass(pto::createPTOExpandSoftLibPass());
+  kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
+  kernelModulePM.addPass(createCanonicalizerPass());
+  kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOInferVPTOVecScopePass());
   if (enableVecScopeMemBar)
@@ -2947,6 +3115,8 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOOutlineSIMTSectionsPass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
   kernelModulePM.addPass(pto::createVPTOPtrCastCleanupPass());
+  kernelModulePM.addPass(pto::createVPTOOptimizeVcvtPass());
+  kernelModulePM.addPass(pto::createVPTOMaskSimplifyPass());
   kernelModulePM.addPass(pto::createVPTONormalizeEquivalentVcvtPass());
   kernelModulePM.addPass(createReconcileUnrealizedCastsPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
@@ -3211,6 +3381,9 @@ int mlir::pto::compilePTOASModule(
     PTOBackend effectiveBackend, PTOASCompileResult &result,
     bool emitVPTOHostStub) {
   result.reset();
+  if (failed(pto::validateStructProvenance(*module))) {
+    return 1;
+  }
   std::string arch = resolveEffectiveTargetArch(*module, context.getArch());
   int argc = context.getArgc();
   char **argv = context.getArgv();
@@ -3306,6 +3479,20 @@ int mlir::pto::compilePTOASModule(
                     "requires --pto-arch=a5, --pto-level=level2 or level3, "
                     "and op fusion enabled.\n";
   }
+  if (enableVfSimCostmodelOptimization && enableA5EmitCFusionPath) {
+    llvm::errs() << "Warning: --enable-vfsim-costmodel-optimization may "
+                    "annotate costmodel attributes on the EmitC fusion path, "
+                    "but current VfSim unroll attributes are consumed only by "
+                    "the VPTO backend; use --pto-backend=vpto for unroll "
+                    "consumption.\n";
+  }
+  if (enableVfSimCostmodelOptimization && enableA5VPTOFusionPath &&
+      !enableUnrollAfterLoopFusion) {
+    llvm::errs() << "Warning: --enable-vfsim-costmodel-optimization may "
+                    "annotate pto.fusion.row/col_unroll_factor, but "
+                    "--enable-unroll-after-loop-fusion is not enabled; unroll "
+                    "attributes will not be consumed by the VPTO backend.\n";
+  }
 
   bool invalidAutoSyncTailHint = false;
   module->walk([&](mlir::func::FuncOp func) {
@@ -3369,6 +3556,19 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
 
+  bool hasUserPlannedMultiAddrs = false;
+  module->walk([&](pto::AllocMultiTileOp op) {
+    if (!op->hasAttr(pto::kPtoMultiBufferAddrsAttrName)) {
+      return;
+    }
+    op.emitError() << "attribute '" << pto::kPtoMultiBufferAddrsAttrName
+                   << "' is reserved for pto-plan-memory";
+    hasUserPlannedMultiAddrs = true;
+  });
+  if (hasUserPlannedMultiAddrs) {
+    return 1;
+  }
+
   if (effectiveLevel == PTOBuildLevel::Level3) {
     // In level3 the caller owns local memory and PTOPlanMemory is skipped, so
     // every allocation must carry an explicit physical address. For
@@ -3411,11 +3611,17 @@ int mlir::pto::compilePTOASModule(
       return 1;
   }
 
+  if (!validateReserveBufferLevelRules(*module, effectiveLevel)) {
+    return 1;
+  }
+
   {
     PassManager preBackendPM(module->getContext());
     preBackendPM.enableVerifier();
     preBackendPM.addPass(pto::createPTOMaterializeTileOpSectionsPass());
     preBackendPM.addPass(pto::createPTONormalizeUncoveredTileSectionsPass());
+    preBackendPM.addPass(
+        pto::createPTOValidatePhysicalSectionBoundariesPass());
     if (failed(preBackendPM.run(module.get()))) {
       llvm::errs() << "Error: failed to normalize uncovered PTO tile sections.\n";
       return 1;
@@ -3528,6 +3734,9 @@ int mlir::pto::compilePTOASModule(
 
   pm.addPass(pto::createPTOViewToMemrefPass());
   pm.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOMaterializeImplicitTmpPass(
+          effectiveLevel == PTOBuildLevel::Level3));
+  pm.addNestedPass<mlir::func::FuncOp>(
       pto::createPTORematerializeFixpipeVectorQuantPass());
 
   if (planMemoryImpl != "legacy" && planMemoryImpl != "modern") {
@@ -3562,21 +3771,43 @@ int mlir::pto::compilePTOASModule(
   // `pto.slot_marker` ops and can keep multi-buffer slot identity (const slot
   // K vs slot K' or dynamic slot) for the alias / event-id analysis.
   // solvers, while BufidSync is A5-only get_buf/rls_buf synchronization.
-  if (enableInsertSync)
-    pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertSyncPass());
+  if (enableInsertSync) {
+    if (emitMlirIR) {
+      pm.addPass(std::make_unique<SerialAutoSyncPass>(
+          SerialAutoSyncPass::Mode::InsertSync, false, 0));
+    } else {
+      pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOInsertSyncPass());
+    }
+  }
   else if (enableBufidSync) {
-    PTOBufidSyncOptions bufidOptions;
-    bufidOptions.enableBufidSyncDebug = enableBufidSyncDebug;
-    pm.addNestedPass<mlir::func::FuncOp>(
-        pto::createPTOBufidSyncPass(bufidOptions));
-  } else if (enableInjectBarrierAllSync)
-    pm.addNestedPass<mlir::func::FuncOp>(
-        pto::createPTOInjectBarrierAllSyncPass());
-  else if (enableGraphSyncSolver) {
-    PTOGraphSyncSolverOptions graphSyncOpts;
-    graphSyncOpts.eventIdNumMax = graphSyncSolverEventIdMax;
-    pm.addNestedPass<mlir::func::FuncOp>(
-        pto::createPTOGraphSyncSolverPass(graphSyncOpts));
+    if (emitMlirIR) {
+      pm.addPass(std::make_unique<SerialAutoSyncPass>(
+          SerialAutoSyncPass::Mode::Bufid, enableBufidSyncDebug, 0));
+    } else {
+      PTOBufidSyncOptions options;
+      options.enableBufidSyncDebug = enableBufidSyncDebug;
+      pm.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOBufidSyncPass(options));
+    }
+  } else if (enableInjectBarrierAllSync) {
+    if (emitMlirIR) {
+      pm.addPass(std::make_unique<SerialAutoSyncPass>(
+          SerialAutoSyncPass::Mode::BarrierAll, false, 0));
+    } else {
+      pm.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOInjectBarrierAllSyncPass());
+    }
+  } else if (enableGraphSyncSolver) {
+    if (emitMlirIR) {
+      pm.addPass(std::make_unique<SerialAutoSyncPass>(
+          SerialAutoSyncPass::Mode::GraphSolver, false,
+          graphSyncSolverEventIdMax));
+    } else {
+      PTOGraphSyncSolverOptions options;
+      options.eventIdNumMax = graphSyncSolverEventIdMax;
+      pm.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOGraphSyncSolverPass(options));
+    }
   }
 
   // Materialize per-slot single-address `pto.pointer_cast` (constant slot)
@@ -3669,7 +3900,6 @@ int mlir::pto::compilePTOASModule(
     emitcPM.addPass(pto::createEmitPTOManualPass(pto::PTOArch::A5));
   }
   emitcPM.addPass(std::make_unique<FormEmitCExpressionsCompatPass>());
-  emitcPM.addPass(emitc::createFormExpressionsPass());
   emitcPM.addPass(mlir::createCSEPass());
   if (failed(applyConfiguredPassManagerCLOptions(
           emitcPM, "EmitC backend pipeline")))
