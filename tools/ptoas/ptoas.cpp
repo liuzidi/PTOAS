@@ -3167,6 +3167,12 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
       pto::createFoldTileBufIntrinsicsPass("shape-only"));
   if (enableLegacyFusionLifecycle) {
     kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
+    // Establish vector-scope boundaries after structural loop fusion. The
+    // remaining fusion-local optimizations then operate inside those scopes,
+    // and generic canonicalization/CSE cannot reuse vector values across
+    // synchronization or MTE boundaries.
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOInferVPTOVecScopePass());
     kernelModulePM.addPass(mlir::createCanonicalizerPass());
     kernelModulePM.addPass(mlir::createCSEPass());
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
