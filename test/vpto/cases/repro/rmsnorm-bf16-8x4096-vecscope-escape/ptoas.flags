@@ -1,0 +1,1 @@
+--pto-arch=a5 --pto-backend=vpto --pto-level=level3 --enable-op-fusion=false --disable-bisheng-vf-fusion
