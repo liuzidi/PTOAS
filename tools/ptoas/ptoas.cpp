@@ -3099,6 +3099,8 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
+  // Complete inference for direct VPTO input and VPTO operations introduced
+  // after the early VMI inference. Existing pto.vecscope regions are skipped.
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOInferVPTOVecScopePass());
   if (enableVecScopeMemBar)
@@ -3165,6 +3167,12 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
       pto::createFoldTileBufIntrinsicsPass("shape-only"));
   if (enableLegacyFusionLifecycle) {
     kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
+    // Establish vector-scope boundaries after structural loop fusion. The
+    // remaining fusion-local optimizations then operate inside those scopes,
+    // and generic canonicalization/CSE cannot reuse vector values across
+    // synchronization or MTE boundaries.
+    kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+        pto::createPTOInferVPTOVecScopePass());
     kernelModulePM.addPass(mlir::createCanonicalizerPass());
     kernelModulePM.addPass(mlir::createCSEPass());
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
@@ -3315,16 +3323,15 @@ static void appendVMISemanticPipeline(OpPassManager &pm,
                                       bool enableFusionOptimizations,
                                       bool enableLoopFusion,
                                       bool enableLoadStoreElision) {
-  // Normalize signless integer element types on whitelisted ops to unsigned
-  // before any verifier, layout, or lowering pass sees them.
-  pm.addNestedPass<func::FuncOp>(
-      pto::createVMINormalizeSignlessIntToUnsignedPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
   if (enableFusionOptimizations) {
     // Optimize fusion regions while loads and stores are still unified VMI ops.
     if (enableLoopFusion) {
       pm.addPass(pto::createPTOVmiLoopFusionPass());
+      // Infer vector scopes immediately after VMI loop fusion so subsequent
+      // canonicalization and forwarding cannot merge values across the
+      // newly fused loop boundary.
+      pm.addNestedPass<func::FuncOp>(
+          pto::createPTOInferVPTOVecScopePass());
       pm.addPass(createCanonicalizerPass());
       pm.addPass(createCSEPass());
     }
@@ -3335,6 +3342,13 @@ static void appendVMISemanticPipeline(OpPassManager &pm,
       pm.addPass(createCSEPass());
     }
   }
+  // Normalize signless integer element types after the VMI fusion decisions
+  // have been made. Fusion operates on the surface VMI contract and should
+  // not depend on the later physical type normalization.
+  pm.addNestedPass<func::FuncOp>(
+      pto::createVMINormalizeSignlessIntToUnsignedPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
   // Expand unified VMI ops to legacy ops before layout assignment,
   // so downstream passes only see legacy ops.
   pm.addPass(pto::createVMILowerUnifiedToLegacyPass());
