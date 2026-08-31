@@ -274,7 +274,8 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef outObjPath,
                                llvm::StringRef ldLldPath,
                                llvm::StringRef stderrPath,
-                               llvm::raw_ostream &diagOS);
+                               llvm::raw_ostream &diagOS,
+                               bool fullLink = false);
 
 static llvm::StringRef
 getTargetCPU(mlir::pto::ObjectEmissionDeviceTarget target) {
@@ -347,8 +348,16 @@ public:
   }
 
   bool mergeDeviceObjects(const mlir::pto::CANNToolchain &toolchain,
-                          llvm::raw_ostream &diagOS) {
-    llvm::SmallVector<std::string, 2> deviceObjPaths;
+                          llvm::raw_ostream &diagOS,
+                          llvm::StringRef extraDeviceObj = "",
+                          bool fullLink = false) {
+    llvm::SmallVector<std::string, 4> deviceObjPaths;
+    // The simpler loader jumps to byte zero of the extracted .text.  Put the
+    // wrapper object first so kernel_entry remains at offset zero even when a
+    // cube body has weaker text alignment than the wrapper.
+    if (!extraDeviceObj.empty()) {
+      deviceObjPaths.push_back(extraDeviceObj.str());
+    }
     if (!cubeObjPath.empty())
       deviceObjPaths.push_back(cubeObjPath);
     if (!vectorObjPath.empty())
@@ -361,8 +370,13 @@ public:
                                 mergedDeviceObjPath, diagOS)))
       return false;
     return ::mergeDeviceObjects(deviceObjPaths, mergedDeviceObjPath,
-                                toolchain.ldLldPath, stderrPath, diagOS);
+                                toolchain.ldLldPath, stderrPath, diagOS,
+                                fullLink);
   }
+
+  // M1: accessors for the merged-device-only output path.
+  const std::string &getMergedDeviceObjPath() const { return mergedDeviceObjPath; }
+  llvm::StringRef getStderrPath() const { return stderrPath; }
 
   bool compileHostStub(const mlir::pto::CANNToolchain &toolchain,
                        llvm::StringRef moduleId,
@@ -731,7 +745,8 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                llvm::StringRef outObjPath,
                                llvm::StringRef ldLldPath,
                                llvm::StringRef stderrPath,
-                               llvm::raw_ostream &diagOS) {
+                               llvm::raw_ostream &diagOS,
+                               bool fullLink) {
   if (deviceObjPaths.empty())
     return false;
 
@@ -746,7 +761,15 @@ static bool mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
     args.push_back(path);
   args.push_back("-o");
   args.push_back(outObjPath.str());
-  args.push_back("-r");
+  // -r keeps the result relocatable (partial link). When the merge includes a
+  // device-side kernel_entry wrapper that calls the VPTO body, the call leaves
+  // a .rela.text relocation that -r does not resolve — simpler's
+  // extract_text_section rejects objects with unresolved .text relocations.
+  // fullLink=true drops -r so lld applies relocations and emits a .text with
+  // no outstanding .rela.text, which simpler can extract directly.
+  if (!fullLink) {
+    args.push_back("-r");
+  }
   args.push_back("--allow-multiple-definition");
   return runCommandWithStderr(ldLldPath, args, stderrPath, diagOS,
                               "device object merge");
@@ -1048,23 +1071,112 @@ mlir::LogicalResult mlir::pto::emitFatobjLLVM(
     llvm::StringRef stubSource, llvm::StringRef outputPath,
     llvm::StringRef moduleId, const CANNToolchain &toolchain,
     TempFileRegistry &tempFiles, llvm::raw_ostream &diagOS,
-    ObjectEmissionOptions options) {
+    ObjectEmissionOptions options, llvm::StringRef deviceWrapperSource,
+    bool mergedDeviceOnly) {
   if (!cubeModule && !vectorModule) {
     diagOS << "Error: VPTO fatobj emission requires at least one LLVM module.\n";
     return failure();
   }
 
   VPTOFatobjArtifacts artifacts(tempFiles);
-  if (!artifacts.emitStubSource(stubSource, diagOS))
+  if (!mergedDeviceOnly) {
+    if (!artifacts.emitStubSource(stubSource, diagOS)) {
+      return failure();
+    }
+  }
+  if (!artifacts.initCommandLogs(diagOS)) {
     return failure();
-  if (!artifacts.initCommandLogs(diagOS))
+  }
+  // In merged-device mode the generated C++ kernel_entry is the sole kernel
+  // entry point.  The VPTO LLVM functions are ordinary device callees.  If
+  // their original `kernel` annotations are retained, bisheng emits a second
+  // kernel ABI/prologue and calling that symbol from kernel_entry traps on
+  // device.  Keep the function bodies/linkage, but remove their entry-point
+  // annotations before compiling the body objects.
+  if (mergedDeviceOnly) {
+    auto stripKernelAnnotations = [](llvm::Module *module) {
+      if (!module)
+        return;
+      llvm::NamedMDNode *annotations =
+          module->getNamedMetadata("hivm.annotations");
+      if (!annotations)
+        return;
+      llvm::SmallVector<llvm::MDNode *, 8> retained;
+      for (llvm::MDNode *annotation : annotations->operands()) {
+        auto *kind = annotation->getNumOperands() > 1
+                         ? llvm::dyn_cast_or_null<llvm::MDString>(
+                               annotation->getOperand(1).get())
+                         : nullptr;
+        bool isKernelEntry =
+            kind && (kind->getString() == "kernel" ||
+                     kind->getString() == "kernel_with_simd" ||
+                     kind->getString() == "kernel_with_simt");
+        if (!isKernelEntry)
+          retained.push_back(annotation);
+      }
+      annotations->clearOperands();
+      for (llvm::MDNode *annotation : retained)
+        annotations->addOperand(annotation);
+    };
+    stripKernelAnnotations(cubeModule);
+    stripKernelAnnotations(vectorModule);
+  }
+  if (!artifacts.emitCubeObject(cubeModule, toolchain, diagOS)) {
     return failure();
-  if (!artifacts.emitCubeObject(cubeModule, toolchain, diagOS))
-    return failure();
+  }
   if (!artifacts.emitVectorObject(vectorModule, toolchain, diagOS, options))
     return failure();
-  if (!artifacts.mergeDeviceObjects(toolchain, diagOS))
+
+  // M1: compile the device-side kernel_entry wrapper cpp into a device .o and
+  // include it in the merge so the merged device ELF carries kernel_entry.
+  std::string wrapperObjPath;
+  if (mergedDeviceOnly && !deviceWrapperSource.empty()) {
+    std::string wrapperCppPath;
+    if (failed(tempFiles.create("ptoas-vpto-wrapper", ".cpp", wrapperCppPath,
+                                diagOS))) {
+      return failure();
+    }
+    if (!writeTextFile(wrapperCppPath, deviceWrapperSource, diagOS)) {
+      return failure();
+    }
+    if (failed(tempFiles.create("ptoas-vpto-wrapper", ".o", wrapperObjPath,
+                                diagOS))) {
+      return failure();
+    }
+    // Compile the sole kernel_entry for the same core type as its VPTO body.
+    // A cube child must not carry a vector entry prologue: simpler dispatches
+    // the image according to CoreCallable's AIC/AIV task kind.
+    std::string wrapperTargetCPU =
+        cubeModule && !vectorModule
+            ? resolveTargetCPU(*cubeModule, ObjectEmissionDeviceTarget::Cube)
+            : resolveTargetCPU(*vectorModule, ObjectEmissionDeviceTarget::Vector);
+    if (!compileCppDeviceSourceToObject(wrapperCppPath, wrapperObjPath,
+                                         wrapperTargetCPU, toolchain,
+                                         artifacts.getStderrPath(), diagOS)) {
+      return failure();
+    }
+  }
+
+  if (!artifacts.mergeDeviceObjects(toolchain, diagOS, wrapperObjPath,
+                                     /*fullLink=*/mergedDeviceOnly)) {
     return failure();
+  }
+
+  if (mergedDeviceOnly) {
+    // Skip the host-stub fatobj packaging: copy the merged device ELF (which
+    // now contains the VPTO body + the kernel_entry wrapper) to outputPath.
+    // simpler consumes it via extract_text_section + CoreCallable.build.
+    std::string merged = artifacts.getMergedDeviceObjPath();
+    std::error_code ec =
+        llvm::sys::fs::copy_file(merged, outputPath.str());
+    if (ec) {
+      diagOS << "Error: failed to copy merged device ELF to output path '"
+             << outputPath.str() << "' (from '" << merged
+             << "'): " << ec.message() << "\n";
+      return failure();
+    }
+    return success();
+  }
 
   constexpr llvm::StringLiteral targetCPU = "dav-c310";
   if (!artifacts.compileHostStubToFatobj(toolchain, moduleId, targetCPU,

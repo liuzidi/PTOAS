@@ -784,6 +784,14 @@ llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
     llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> mlir::pto::vptoEmitMergedDeviceOnly(
+    "vpto-emit-merged-device-only",
+    llvm::cl::desc("Emit the merged device ELF directly to -o (no fatobj "
+                   "outer packaging); a device-side kernel_entry wrapper is "
+                   "merged in so simpler can consume it via "
+                   "extract_text_section + CoreCallable.build"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
@@ -3291,6 +3299,19 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     }
   }
 
+  // M1: emit the device-side kernel_entry wrapper so simpler's scheduler can
+  // dispatch the VPTO body via the same kernel_entry(int64_t* args) ABI the
+  // EmitC route uses. Only needed for the merged-device-only output mode; the
+  // regular fatobj route keeps the <<<>>> launch ABI and does not use it.
+  std::string deviceWrapperSource;
+  if (vptoEmitMergedDeviceOnly) {
+    if (failed(pto::emitVPTODeviceWrapperSource(module, deviceWrapperSource,
+                                                llvm::errs()))) {
+      llvm::errs() << "Error: Failed to emit VPTO device wrapper source.\n";
+      return 1;
+    }
+  }
+
   if (failed(
           pto::lowerVPTOModuleToLLVMModules(module, options,
                                             result.vptoCubeModule,
@@ -3303,6 +3324,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   result.vptoStubSource = std::move(stubSource);
   result.objectEmissionOptions.disableBishengVFFusion =
       useVMIFusionPipeline || disableBishengVFFusion;
+  result.vptoDeviceWrapperSource = std::move(deviceWrapperSource);
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
