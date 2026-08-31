@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ptoas_internal.h"
+#include "TilelangDaemon.h"
 
 #include "ptoas.h"
 
@@ -750,7 +751,8 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
          llvm::any_of(module.getOps<emitc::FuncOp>(), hasMultiBlockFunc);
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm);
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionPipeline);
 
 static void prepareVPTOForEmission(PassManager &pm) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
@@ -845,6 +847,57 @@ static void appendA5VPTOPostLoweringFusionPipeline(OpPassManager &kernelModulePM
   kernelModulePM.addPass(mlir::createCSEPass());
 }
 
+static pto::ExpandTileOpOptions buildExpandTileOpOptions() {
+  pto::ExpandTileOpOptions options;
+  options.pythonExe = tileLibPythonExe;
+  options.daemonSocketPath = daemonSocketPath;
+  options.tileLibBackend = tileLibBackend;
+  options.tileLibPkgPath = tileLibPackagePath;
+  options.daemonHelperModule = tileLibBackend == "ptodsl"
+                                   ? "ptodsl.tilelib.serving.helper"
+                                   : "tilelang_dsl.daemon_helper";
+  return options;
+}
+
+static pto::InsertTemplateAttributesOptions
+buildInsertTemplateAttributesOptions() {
+  pto::InsertTemplateAttributesOptions options;
+  options.pythonExe = tileLibPythonExe;
+  options.daemonSocketPath = daemonSocketPath;
+  options.tileLibPkgPath = tileLibPackagePath;
+  options.daemonHelperModule = "ptodsl.tilelib.serving.helper";
+  return options;
+}
+
+static LogicalResult ensureTileLibDaemon(bool hasTileOpsToExpand) {
+  if (!hasTileOpsToExpand) {
+    return success();
+  }
+
+  std::string socketPath = daemonSocketPath;
+  if (socketPath.empty()) {
+    socketPath = ptoas::DaemonManager::generateSocketPath();
+  }
+  ptoas::registerDaemonCleanup();
+
+  const bool usePTODSL = tileLibBackend == "ptodsl";
+  const std::string daemonModule = usePTODSL
+                                       ? "ptodsl.tilelib.serving.daemon"
+                                       : "tilelang_dsl.daemon";
+  std::string packagePath = tileLibPackagePath;
+  if (usePTODSL) {
+    packagePath += ":" PTOAS_DEFAULT_TILEOPS_PKG_PATH;
+  }
+  if (!ptoas::DaemonManager::start(socketPath, daemonModule,
+                                   tileLibPythonExe, packagePath)) {
+    return failure();
+  }
+  daemonSocketPath = socketPath;
+  llvm::errs() << "Info: " << tileLibBackend
+               << " TileLib daemon started successfully\n";
+  return success();
+}
+
 static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   auto moduleArchAttr =
@@ -862,7 +915,7 @@ static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module) {
     return;
   }
 
-  kernelModulePM.addPass(pto::createExpandTileOpPass());
+  kernelModulePM.addPass(pto::createExpandTileOpPass(buildExpandTileOpOptions()));
 
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
@@ -960,7 +1013,7 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   // the pipeline can use MLIR's standard Func inliner implementation.
   kernelModulePM.addPass(std::make_unique<ApplySIMTEntryNoInlinePass>());
   kernelModulePM.addPass(createInlinerPass());
-  appendVMISemanticPipeline(kernelModulePM);
+  appendVMISemanticPipeline(kernelModulePM, enableVMI);
   prepareVPTOForEmission(pm);
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -972,7 +1025,14 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   return success();
 }
 
-static void appendVMISemanticPipeline(OpPassManager &pm) {
+static void appendVMISemanticPipeline(OpPassManager &pm,
+                                      bool enableFusionPipeline) {
+  if (enableFusionPipeline && enableVMILoopFusion) {
+    pm.addPass(pto::createPTOVmiLoopFusionPass());
+  }
+  if (enableFusionPipeline && enableVMILoadStoreElision) {
+    pm.addNestedPass<func::FuncOp>(pto::createPTOVmiLoadStoreElisionPass());
+  }
   // Materialize unsigned carriers for sign-sensitive VMI ops before any
   // verifier, layout, or lowering pass sees signless integer element types.
   pm.addNestedPass<func::FuncOp>(
@@ -1007,6 +1067,12 @@ static void appendVMISemanticPipeline(OpPassManager &pm) {
   pm.addPass(pto::createVMILegalizeArithSelectPass());
   pm.addPass(pto::createPTOValidateVMILayoutIRPass());
   pm.addPass(pto::createVMIToVPTOPass());
+  if (enableVecScopeMemBar) {
+    pm.addNestedPass<func::FuncOp>(pto::createPTOInsertVecScopeMemBarPass());
+  }
+  if (enableVecScopeMemBarAll) {
+    pm.addNestedPass<func::FuncOp>(pto::createPTOInsertVecScopeMemBarAllPass());
+  }
   pm.addPass(pto::createVPTOStatefulStreamFusionPass());
 }
 
@@ -1338,7 +1404,7 @@ static LogicalResult appendPlanMemoryPasses(PassManager &pm,
 
   if (effectiveLevel != PTOBuildLevel::Level3) {
     pto::PlanMemoryOptions planMemoryOptions;
-    planMemoryOptions.memMode = "local";
+    planMemoryOptions.memMode = pto::MemPlanMode::LOCAL_MEM_PLAN;
     bool effectivePlanMemoryOrderBySize = planMemoryOrderBySize;
     if (planMemoryImpl == "modern" &&
         planMemoryOrderBySize.getNumOccurrences() == 0) {
@@ -1436,7 +1502,9 @@ static LogicalResult runMainLoweringPipeline(
   // Fusion may later filter the ordered `candidates` array; ExpandTileOp
   // consumes the first candidate that remains.
   if (!isA2A3 && effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand) {
-    pm.addPass(pto::createInsertTemplateAttributesPass());
+    pm.addPass(pto::createInsertTemplateAttributesPass(
+        buildInsertTemplateAttributesOptions()));
+    pm.addPass(pto::createSelectTemplateCandidatePass());
   }
 
   if (failed(appendFusionFrontendPasses(pm, isA2A3, enableA5EmitCFusionPath,
@@ -1543,6 +1611,10 @@ int mlir::pto::compilePTOASModule(
     return 1;
   }
   state.hasTileOpsToExpand = hasUnexpandedTileOps(*module);
+  if (effectiveBackend == PTOBackend::VPTO &&
+      failed(ensureTileLibDaemon(state.hasTileOpsToExpand))) {
+    return 1;
+  }
 
   // The state is assembled and validated once above, so backend branches
   // cannot observe partially validated option combinations.

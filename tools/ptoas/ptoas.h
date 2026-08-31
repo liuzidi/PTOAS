@@ -123,7 +123,6 @@ struct PTOASCompileResult {
     vptoDeviceWrapperSource.clear();
     vptoCubeModule.reset();
     vptoVectorModule.reset();
-    objectEmissionOptions = {};
     kind = PTOASCompileResultKind::Text;
   }
 
@@ -135,7 +134,6 @@ struct PTOASCompileResult {
   std::string vptoDeviceWrapperSource;
   EmittedLLVMModule vptoCubeModule;
   EmittedLLVMModule vptoVectorModule;
-  ObjectEmissionOptions objectEmissionOptions;
 };
 
 int compilePTOASModule(OwningOpRef<ModuleOp> &module,
