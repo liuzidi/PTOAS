@@ -170,6 +170,31 @@ concentrated in:
 - vecscope barrier expectations;
 - Bisheng command-line argument tests.
 
+An origin check against `hw-native-sys/main` shows that 45 of the 57 failing
+test paths already exist on the target branch, while 12 were introduced by the
+rebased VMI/vecscope changes. This proves that the failure set is mixed, not
+that all 57 are new regressions. The 12 newly introduced paths are:
+
+```text
+pto/materialize_tile_handles_fusion_region_subview.pto
+vmi_new/vmi_to_vpto_vector_scalar_native.pto
+vpto/bisheng_vf_object_argv.pto
+vpto/ptodsl_vmi_local_elementwise_candidates.pto
+vpto/ptodsl_vmi_sinkhorn_grouped_candidates.pto
+vpto/ptodsl_vmi_sqrt_ops.pto
+vpto/vecscope_membar_min_rope_kv_cache.pto
+vpto/vecscope_membar_multi_kind.pto
+vpto/vecscope_membar_same_iteration_raw.pto
+vpto/vecscope_membar_same_iteration_waw.pto
+vpto/vlds_vsts_addptr_fallback.pto
+vpto/vmi_fusion_region_loop_elide.pto
+```
+
+The 45 existing paths still require a same-toolchain baseline run to decide
+whether they are inherited incompatibilities or regressions caused by changed
+semantics. The current evidence therefore supports “mixed and unresolved,”
+not “all caused by rebase incompatibility” or “all newly introduced.”
+
 The complete output is available locally at `/tmp/lit-final-v3.log` for this
 run. The branch is buildable and PythonDSL-clean, but the 57 lit failures are
 an explicit remaining rebase risk and must not be represented as a green
