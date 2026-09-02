@@ -78,6 +78,7 @@ extern llvm::cl::opt<bool> dumpVPTOIR;
 extern llvm::cl::opt<bool> enableVMI;
 extern llvm::cl::opt<bool> enableVMILoopFusion;
 extern llvm::cl::opt<bool> enableVMILoadStoreElision;
+extern llvm::cl::opt<bool> disableBishengVFFusion;
 extern llvm::cl::opt<bool> enableVecScopeMemBar;
 extern llvm::cl::opt<bool> enableVecScopeMemBarAll;
 extern llvm::cl::opt<std::string> tileLibBackend;

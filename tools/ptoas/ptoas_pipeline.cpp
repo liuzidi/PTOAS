@@ -769,20 +769,42 @@ static void prepareVPTOForEmission(PassManager &pm) {
   kernelModulePM.addPass(createSCCPPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
+  // Expand software-library vector operations before inferring scopes so the
+  // generated pset/vsel sequence is enclosed by the same scope as the source
+  // operation.
+  kernelModulePM.addPass(pto::createPTOExpandSoftLibPass());
+  kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
+  kernelModulePM.addPass(createCanonicalizerPass());
+  kernelModulePM.addPass(createCSEPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOAnalyzeSIMTPersistentFragmentPass());
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createPTOMaterializeSIMTPersistentFragmentPass());
   kernelModulePM.addPass(pto::createPTOOutlineSIMTSectionsPass());
+  // Infer vecscopes before pointer normalization so the debug pipeline and
+  // downstream analyses observe the canonical scope boundaries first.
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTOInferVPTOVecScopePass());
   kernelModulePM.addPass(pto::createVPTOPtrNormalizePass());
   kernelModulePM.addPass(pto::createVPTOPtrCastCleanupPass());
   kernelModulePM.addPass(pto::createVPTOOptimizeVcvtPass());
   kernelModulePM.addPass(pto::createVPTOMaskSimplifyPass());
+  kernelModulePM.addPass(pto::createVPTONormalizeEquivalentVcvtPass());
   kernelModulePM.addPass(createReconcileUnrealizedCastsPass());
+  // Vecscope memory hazards can only be analyzed after automatic vecscope
+  // inference has materialized the scopes around VPTO memory operations. Run
+  // this before wrapper expansion so composite operations such as uvld retain
+  // their complete memory footprint during hazard analysis.
+  if (enableVecScopeMemBar) {
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarPass());
+  }
+  if (enableVecScopeMemBarAll) {
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOInsertVecScopeMemBarAllPass());
+  }
   kernelModulePM.addNestedPass<func::FuncOp>(
       createVPTOExpandWrapperOpsPass());
-  kernelModulePM.addNestedPass<func::FuncOp>(
-      pto::createPTOInferVPTOVecScopePass());
   if (enableSoftPostUpdate) {
     kernelModulePM.addPass(pto::createVPTOSoftPostUpdatePass());
   }
@@ -820,6 +842,11 @@ static void appendA5VPTOPostLoweringFusionPipeline(OpPassManager &kernelModulePM
   kernelModulePM.addPass(pto::createPTOLowLevelLoopFusionPass());
   kernelModulePM.addPass(mlir::createCanonicalizerPass());
   kernelModulePM.addPass(mlir::createCSEPass());
+  // Scope the already-fused loop before predicate/load-store elision. Running
+  // scope inference before loop fusion would isolate candidate loops in
+  // separate regions and prevent the fusion itself.
+  kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+      pto::createPTOInferVPTOVecScopePass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createPTOFusionPredicateElisionPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
@@ -898,14 +925,12 @@ static LogicalResult ensureTileLibDaemon(bool hasTileOpsToExpand) {
   return success();
 }
 
-static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module) {
+static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
+                                  bool enableLegacyFusionLifecycle) {
   auto &kernelModulePM = pm.nest<ModuleOp>();
   auto moduleArchAttr =
       module->getAttrOfType<mlir::StringAttr>("pto.target_arch");
   const bool isA2A3 = moduleArchAttr && isA2A3Arch(moduleArchAttr.getValue());
-  const bool enableA5VPTOPostLoweringFusionLifecycle =
-      enableOpFusion && moduleArchAttr && moduleArchAttr.getValue() == "a5";
-
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createLowerPTOToUBufOpsPass());
   if (isA2A3) {
@@ -920,7 +945,7 @@ static void lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module) {
   kernelModulePM.addPass(pto::createPTOInlineLibCallPass());
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
       pto::createFoldTileBufIntrinsicsPass("shape-only"));
-  if (enableA5VPTOPostLoweringFusionLifecycle) {
+  if (enableLegacyFusionLifecycle) {
     appendA5VPTOPostLoweringFusionPipeline(kernelModulePM);
   }
   kernelModulePM.addNestedPass<mlir::func::FuncOp>(
@@ -946,7 +971,7 @@ buildVPTOEmissionOptions(const pto::CANNVersion &cannVersion,
 static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
                                  bool emitHostStub,
                                  const pto::CANNVersion &cannVersion) {
-  if (emitVPTO) {
+  if (emitMlirIR || emitVPTO) {
     result.kind = PTOASCompileResultKind::Text;
     llvm::raw_string_ostream os(result.textOutput);
     module.print(os);
@@ -989,12 +1014,16 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.objectEmissionOptions.disableBishengVFFusion =
+      enableVMI || disableBishengVFFusion;
   result.kind = PTOASCompileResultKind::VPTOObject;
   return 0;
 }
 
 static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
-                                            bool hasTileOpsToExpand) {
+                                            bool hasTileOpsToExpand,
+                                            bool useVMIFusionPipeline,
+                                            bool enableLegacyFusionLifecycle) {
   PassManager pm(module->getContext());
   pm.enableVerifier();
   if (!hasTileOpsToExpand) {
@@ -1003,7 +1032,7 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   pm.addPass(pto::createVPTOSplitCVModulePass());
   pm.addPass(pto::createVPTONormalizeContainerPass());
   if (hasTileOpsToExpand) {
-    lowerPTOToVPTOBackend(pm, module.get());
+    lowerPTOToVPTOBackend(pm, module.get(), enableLegacyFusionLifecycle);
   }
   auto &kernelModulePM = pm.nest<ModuleOp>();
   // Inline legal direct calls before VMI layout assignment so private helper
@@ -1014,7 +1043,9 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   kernelModulePM.addPass(std::make_unique<ApplySIMTEntryNoInlinePass>());
   kernelModulePM.addPass(createInlinerPass());
   appendVMISemanticPipeline(kernelModulePM, enableVMI);
-  prepareVPTOForEmission(pm);
+  if (!emitMlirIR) {
+    prepareVPTOForEmission(pm);
+  }
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
     return failure();
@@ -1066,13 +1097,13 @@ static void appendVMISemanticPipeline(OpPassManager &pm,
   pm.addPass(createCSEPass());
   pm.addPass(pto::createVMILegalizeArithSelectPass());
   pm.addPass(pto::createPTOValidateVMILayoutIRPass());
+  if (enableFusionPipeline) {
+    pm.addNestedPass<func::FuncOp>(
+        pto::createFoldTileBufIntrinsicsPass("addr-only"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+  }
   pm.addPass(pto::createVMIToVPTOPass());
-  if (enableVecScopeMemBar) {
-    pm.addNestedPass<func::FuncOp>(pto::createPTOInsertVecScopeMemBarPass());
-  }
-  if (enableVecScopeMemBarAll) {
-    pm.addNestedPass<func::FuncOp>(pto::createPTOInsertVecScopeMemBarAllPass());
-  }
   pm.addPass(pto::createVPTOStatefulStreamFusionPass());
 }
 
@@ -1372,7 +1403,7 @@ static void appendFusionFrontendPassesForBackend(
 
 static LogicalResult appendFusionFrontendPasses(
     PassManager &pm, bool isA2A3, bool enableA5EmitCFusionPath,
-    bool enableA5VPTOFusionPath) {
+    bool enableA5VPTOFusionPath, bool useVMIFusionPipeline) {
   if (isA2A3) {
     return success();
   }
@@ -1381,6 +1412,9 @@ static LogicalResult appendFusionFrontendPasses(
   fusionPlanOpts.enableVfSimCostmodelOptimization =
       enableVfSimCostmodelOptimization;
   fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
+  if (useVMIFusionPipeline) {
+    fusionPlanOpts.strategy = "vmi-ub-disjoint";
+  }
   if (enableA5EmitCFusionPath) {
     appendFusionFrontendPassesForBackend(pm, fusionPlanOpts);
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOMarkLastUsePass());
@@ -1463,6 +1497,9 @@ static LogicalResult runMainLoweringPipeline(
   exitCode = 0;
   const bool enableA5EmitCFusionPath = state.enableA5EmitCFusionPath;
   const bool enableA5VPTOFusionPath = state.enableA5VPTOFusionPath;
+  const bool useVMIFusionPipeline = enableVMI && enableA5VPTOFusionPath;
+  const bool enableLegacyVPTOFusionLifecycle =
+      enableA5VPTOFusionPath && !useVMIFusionPipeline;
   const bool isA2A3 = state.isA2A3;
   const bool hasTileOpsToExpand = state.hasTileOpsToExpand;
   const PTOBuildLevel effectiveLevel = state.level;
@@ -1492,6 +1529,7 @@ static LogicalResult runMainLoweringPipeline(
   // PTOViewToMemref is generic view lowering required by both backends; keep it
   // outside the local-memory planning gate so default A2/A3 EmitC still lowers
   // pto.make_tensor_view before backend legalization.
+  pm.addPass(pto::createPTOViewToMemrefPass());
   if (!isA2A3) {
     pm.addNestedPass<mlir::func::FuncOp>(pto::createPTOA5NormalizeTMovPass());
   }
@@ -1500,16 +1538,35 @@ static LogicalResult runMainLoweringPipeline(
 
   // PTODSL legality discovery happens on tile-native PTO IR before fusion.
   // Fusion may later filter the ordered `candidates` array; ExpandTileOp
-  // consumes the first candidate that remains.
-  if (!isA2A3 && effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand) {
+  // consumes the first candidate that remains.  TileLang has its own
+  // subprocess/daemon path and must not go through PTODSL metadata discovery.
+  if (!isA2A3 && effectiveBackend == PTOBackend::VPTO && hasTileOpsToExpand &&
+      tileLibBackend == "ptodsl") {
     pm.addPass(pto::createInsertTemplateAttributesPass(
         buildInsertTemplateAttributesOptions()));
-    pm.addPass(pto::createSelectTemplateCandidatePass());
+    // Candidate selection is a semantic backend choice and is independent of
+    // whether the optional VMI fusion lifecycle is enabled.  VMI compilation
+    // must prefer VMI candidates even when op fusion is disabled; ordinary
+    // PTODSL compilation selects only non-VMI candidates below.
+    if (enableVMI) {
+      pto::SelectTemplateCandidateOptions selectOptions;
+      selectOptions.selectionPolicy = "prefer-vmi";
+      pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
+    }
   }
 
   if (failed(appendFusionFrontendPasses(pm, isA2A3, enableA5EmitCFusionPath,
-                                         enableA5VPTOFusionPath))) {
+                                         enableA5VPTOFusionPath,
+                                         useVMIFusionPipeline))) {
     return failure();
+  }
+
+  if (!isA2A3 && effectiveBackend == PTOBackend::VPTO &&
+      hasTileOpsToExpand && tileLibBackend == "ptodsl" &&
+      !enableVMI) {
+    pto::SelectTemplateCandidateOptions selectOptions;
+    selectOptions.selectionPolicy = "ordinary-only";
+    pm.addPass(pto::createSelectTemplateCandidatePass(selectOptions));
   }
 
   pm.addNestedPass<mlir::func::FuncOp>(
@@ -1548,6 +1605,11 @@ static LogicalResult runMainLoweringPipeline(
   }
 
   pm.addPass(createCSEPass());
+  // Preserve the shared post-planning tile-handle materialization seam before
+  // backend helper inlining.  On configurations where the compatibility pass
+  // is a no-op, it still provides the documented pipeline stage and dump hook.
+  pm.addPass(pto::createPTOMaterializeTileHandlesPass());
+  pm.addPass(createCSEPass());
   // PTODSL backend helpers already use the tile-native ABI.
   pm.addPass(pto::createPTOInlineBackendHelpersPass());
   if (effectiveBackend == PTOBackend::EmitC) {
@@ -1576,7 +1638,9 @@ static LogicalResult runMainLoweringPipeline(
       return failure();
     }
 
-    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand))) {
+    if (failed(runVPTOBackendPipeline(module, hasTileOpsToExpand,
+                                      useVMIFusionPipeline,
+                                      enableLegacyVPTOFusionLifecycle))) {
       return failure();
     }
     handled = true;
@@ -1624,7 +1688,13 @@ int mlir::pto::compilePTOASModule(
                       "skipping the shared PTO-to-VPTO lowering pipeline.\n";
       return 1;
     }
-    if (failed(runVPTOBackendPipeline(module, state.hasTileOpsToExpand))) {
+    const bool useVMIFusionPipeline =
+        enableVMI && state.enableA5VPTOFusionPath;
+    const bool enableLegacyFusionLifecycle =
+        state.enableA5VPTOFusionPath && !useVMIFusionPipeline;
+    if (failed(runVPTOBackendPipeline(
+            module, state.hasTileOpsToExpand, useVMIFusionPipeline,
+            enableLegacyFusionLifecycle))) {
       return 1;
     }
     return emitVPTOBackendResult(*module, result, emitVPTOHostStub,

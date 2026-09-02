@@ -35,6 +35,10 @@ enum class ObjectEmissionDeviceTarget {
   Cube,
 };
 
+struct ObjectEmissionOptions {
+  bool disableBishengVFFusion = false;
+};
+
 class CANNToolchain {
 public:
   static std::optional<CANNToolchain> create(llvm::raw_ostream &diagOS);
@@ -120,7 +124,7 @@ LogicalResult emitFatobjCCE(llvm::StringRef cppSource,
 LogicalResult emitVPTOVectorDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
     const CANNToolchain &toolchain, llvm::StringRef stderrPath,
-    llvm::raw_ostream &diagOS);
+    llvm::raw_ostream &diagOS, ObjectEmissionOptions options = {});
 
 LogicalResult emitVPTOCubeDeviceObject(
     llvm::Module &module, llvm::StringRef llPath, llvm::StringRef outObjPath,
@@ -132,7 +136,7 @@ LogicalResult emitFatobjLLVM(
     llvm::StringRef stubSource, llvm::StringRef outputPath,
     llvm::StringRef moduleId, const CANNToolchain &toolchain,
     TempFileRegistry &tempFiles, VFSIMTSizeFixMode vfsimtSizeFixMode,
-    llvm::raw_ostream &diagOS);
+    llvm::raw_ostream &diagOS, ObjectEmissionOptions options = {});
 
 LogicalResult mergeDeviceObjects(llvm::ArrayRef<std::string> deviceObjPaths,
                                  llvm::StringRef outObjPath,
@@ -157,7 +161,8 @@ LogicalResult emitFatobjLLVMWithRuntime(llvm::Module *cubeModule,
                                         llvm::StringRef stubSource,
                                         llvm::ToolOutputFile &outputFile,
                                         VFSIMTSizeFixMode vfsimtSizeFixMode,
-                                        llvm::raw_ostream &diagOS);
+                                        llvm::raw_ostream &diagOS,
+                                        ObjectEmissionOptions options = {});
 
 } // namespace mlir::pto
 
