@@ -1638,6 +1638,30 @@ def VPTOCombineReductions
   let dependentDialects = ["mlir::pto::PTODialect"];
 }
 
+def PTOVfSimUnrollPlanner
+    : Pass<"pto-vfsim-unroll-planner", "ModuleOp"> {
+  let summary = "Plan VMI low-level loop unroll with VfSimulator";
+  let description = [{
+    Calls the optional VfSimulator generic-MLIR adapter after VPTO reduction
+    combination and CSE. For each static-trip-count VMI loop-fusion result, the
+    planner evaluates ABCABC and AABBCC candidates, including a residual loop
+    when the factor does not divide the trip count. It writes the best factor
+    as the dedicated `pto.vfsim.unroll_factor` i32 attribute, keeping the
+    cost-model result distinct from a hand-written `pto.unroll_factor` hint.
+    After planning, the PTOAS wrapper removes the internal
+    `pto.vmi.loop_fused` and `pto.vmi.loop_fusion.id` selection attributes.
+  }];
+  let constructor = "mlir::pto::createPTOVfSimUnrollPlannerPass()";
+  let options = [
+    Option<"maxUnrollFactor", "max-unroll-factor", "unsigned", "8",
+           "Maximum unroll factor considered by VfSimulator">,
+    Option<"dumpCandidates", "dump-candidates", "bool", "false",
+           "Print candidate cycles, selection, and skip reasons">
+  ];
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect"];
+}
+
 def VPTOMaskSimplify
     : Pass<"vpto-mask-simplify", "ModuleOp"> {
   let summary = "Simplify provably redundant VPTO mask transformations";

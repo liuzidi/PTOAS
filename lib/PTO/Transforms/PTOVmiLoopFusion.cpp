@@ -909,7 +909,8 @@ static SmallVector<Member, 8> collectRun(Block &body,
 
 // Build the fused scf.for for a run of members. Members are erased by caller.
 static scf::ForOp buildFusedLoop(OpBuilder &builder,
-                                 MutableArrayRef<Member> members) {
+                                 MutableArrayRef<Member> members,
+                                 int64_t fusionId) {
   scf::ForOp firstLoop = members.front().loop;
   Location loc = firstLoop.getLoc();
 
@@ -962,6 +963,8 @@ static scf::ForOp buildFusedLoop(OpBuilder &builder,
   fused->setAttr("pto.tilelib.impl", builder.getStringAttr("vmi"));
   fused->setAttr("pto.vmi.fusion.source", builder.getStringAttr("tilelib"));
   fused->setAttr("pto.vmi.fusion.principal_loop", builder.getUnitAttr());
+  fused->setAttr("pto.vmi.loop_fused", builder.getUnitAttr());
+  fused->setAttr("pto.vmi.loop_fusion.id", builder.getI64IntegerAttr(fusionId));
 
   // Map each member's results to the corresponding slice of the fused loop's
   // results so external (top-level) users can be rewired.
@@ -1033,12 +1036,12 @@ static scf::ForOp buildFusedLoop(OpBuilder &builder,
 // spans for's whose between-ops are all placeable. Returns true if a fusion
 // happened (>=2 members).
 static bool fuseRun(Block &body, SmallVectorImpl<scf::ForOp> &loops,
-                    unsigned firstLoopIdx) {
+                    unsigned firstLoopIdx, int64_t &nextFusionId) {
   SmallVector<Member, 8> members = collectRun(body, loops, firstLoopIdx);
   if (members.size() < 2)
     return false;
   OpBuilder builder(members.front().loop);
-  buildFusedLoop(builder, members);
+  buildFusedLoop(builder, members, nextFusionId++);
   return true;
 }
 
@@ -1047,25 +1050,28 @@ struct PTOVmiLoopFusionPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
-    module.walk([&](pto::FusionRegionOp region) {
-      bool progressed = true;
-      while (progressed) {
-        progressed = false;
-        Block &body = region.getBody().front();
-        SmallVector<scf::ForOp, 16> loops;
-        for (Operation &op : body.getOperations())
-          if (auto f = dyn_cast<scf::ForOp>(op))
-            loops.push_back(f);
+    for (func::FuncOp func : module.getOps<func::FuncOp>()) {
+      int64_t nextFusionId = 0;
+      func.walk([&](pto::FusionRegionOp region) {
+        bool progressed = true;
+        while (progressed) {
+          progressed = false;
+          Block &body = region.getBody().front();
+          SmallVector<scf::ForOp, 16> loops;
+          for (Operation &op : body.getOperations())
+            if (auto f = dyn_cast<scf::ForOp>(op))
+              loops.push_back(f);
 
-        for (unsigned i = 0; i < loops.size();) {
-          if (fuseRun(body, loops, i)) {
-            progressed = true;
-            break; // re-collect after mutation
+          for (unsigned i = 0; i < loops.size();) {
+            if (fuseRun(body, loops, i, nextFusionId)) {
+              progressed = true;
+              break; // re-collect after mutation
+            }
+            ++i;
           }
-          ++i;
         }
-      }
-    });
+      });
+    }
   }
 };
 

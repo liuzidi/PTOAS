@@ -31,7 +31,8 @@ if(PTO_ENABLE_VFSIM_COSTMODEL)
     message(FATAL_ERROR
       "PTO_ENABLE_VFSIM_COSTMODEL=ON requires the native C++ VfSimulator "
       "CMake entry at ${PTO_VFSIM_SOURCE_DIR}/native. Update the "
-      "3rdparty/VfSimulator submodule to vfsim-native-v0.2 or newer.")
+      "3rdparty/VfSimulator submodule to a cpp-native-vfsim-compatible "
+      "revision.")
   endif()
 
   message(STATUS "VfSimulator cost model source: ${PTO_VFSIM_SOURCE_DIR}")
