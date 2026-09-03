@@ -757,8 +757,8 @@ static bool shouldDeclareVariablesAtTop(ModuleOp module) {
 static void appendVMISemanticPipeline(OpPassManager &pm,
                                       bool enableFusionPipeline);
 
-static void prepareVPTOForEmission(PassManager &pm) {
-  auto &kernelModulePM = pm.nest<ModuleOp>();
+static void prepareVPTOForEmission(OpPassManager &kernelModulePM,
+                                   bool enableVmiVfSimPlanner) {
   // VPTO LLVM emission lowers pto.barrier to the backend barrier intrinsic.
   // A5 does not support a standalone PIPE_V barrier; vector barriers are either
   // unnecessary or must be removed before LLVM emission. Upper-level
@@ -831,6 +831,12 @@ static void prepareVPTOForEmission(PassManager &pm) {
   // scheduler sees the final MI instruction set and dependencies.
   kernelModulePM.addPass(pto::createVPTOCombineReductionsPass());
   kernelModulePM.addPass(createCSEPass());
+  if (enableVmiVfSimPlanner) {
+    pto::PTOVfSimUnrollPlannerOptions options;
+    options.maxUnrollFactor = 8;
+    options.dumpCandidates = dumpVfSimCostmodel || dumpVfSimUnrollTest;
+    kernelModulePM.addPass(pto::createPTOVfSimUnrollPlannerPass(options));
+  }
   if (vptoSchedulerMode != VPTOSchedulerCLIMode::Off) {
     pto::VPTOSchedulerOptions schedulerOptions;
     schedulerOptions.mode = vptoSchedulerMode == VPTOSchedulerCLIMode::Analyze
@@ -1047,7 +1053,9 @@ static LogicalResult runVPTOBackendPipeline(OwningOpRef<ModuleOp> &module,
   kernelModulePM.addPass(createInlinerPass());
   appendVMISemanticPipeline(kernelModulePM, enableVMI);
   if (!emitMlirIR) {
-    prepareVPTOForEmission(pm);
+    prepareVPTOForEmission(
+        kernelModulePM,
+        enableVfSimCostmodelOptimization && useVMIFusionPipeline);
   }
   if (failed(applyConfiguredPassManagerCLOptions(
           pm, "VPTO unified emission pipeline")))
@@ -1216,6 +1224,19 @@ static LogicalResult validateFusionConfiguration(const CompilePipelineState &sta
                     "pto.fusion.row/col_unroll_factor, which is produced by "
                     "--enable-vfsim-costmodel-optimization.\n";
   }
+  const bool useVMIFusionPipeline =
+      enableVMI && state.opFusionEnabled && state.arch == "a5" &&
+      state.level != PTOBuildLevel::Level1 && backend == PTOBackend::VPTO;
+  if (enableVfSimCostmodelOptimization && enableVMI &&
+      !useVMIFusionPipeline) {
+    llvm::errs()
+        << "Error: --enable-vmi with "
+           "--enable-vfsim-costmodel-optimization requires the effective "
+           "A5 VPTO VMI fusion pipeline; use --pto-arch=a5, "
+           "--pto-backend=vpto, --pto-level=level2 or level3, and "
+           "--enable-op-fusion=true.\n";
+    return failure();
+  }
   return success();
 }
 
@@ -1240,7 +1261,7 @@ static void setFusionPipelineFlags(CompilePipelineState &state,
                     "consumption.\n";
   }
   if (enableVfSimCostmodelOptimization && state.enableA5VPTOFusionPath &&
-      !enableUnrollAfterLoopFusion) {
+      !enableVMI && !enableUnrollAfterLoopFusion) {
     llvm::errs() << "Warning: --enable-vfsim-costmodel-optimization may "
                     "annotate pto.fusion.row/col_unroll_factor, but "
                     "--enable-unroll-after-loop-fusion is not enabled; unroll "
@@ -1413,7 +1434,7 @@ static LogicalResult appendFusionFrontendPasses(
   pto::FusionPlanOptions fusionPlanOpts;
   fusionPlanOpts.enableShapeInference = enableShapeInference;
   fusionPlanOpts.enableVfSimCostmodelOptimization =
-      enableVfSimCostmodelOptimization;
+      enableVfSimCostmodelOptimization && !useVMIFusionPipeline;
   fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
   if (useVMIFusionPipeline) {
     fusionPlanOpts.strategy = "vmi-ub-disjoint";
