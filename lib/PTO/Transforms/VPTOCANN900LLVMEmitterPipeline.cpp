@@ -10,11 +10,60 @@
 
 namespace mlir::pto::detail {
 
+// Rewrite pure-integer signedness casts (i64 -> si32 etc., issue 1454) into
+// explicit arith width ops so the LLVM translation never sees an
+// unrealized_conversion_cast. Same-width casts fold to their input.
+class FoldIntegerSignednessCast final : public OpConversionPattern<UnrealizedConversionCastOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
+      return failure();
+    }
+    auto srcType = dyn_cast<IntegerType>(op.getOperand(0).getType());
+    auto dstType = dyn_cast<IntegerType>(op.getResult(0).getType());
+    if (!srcType || !dstType) {
+      return failure();
+    }
+    Value input = adaptor.getOperands().front();
+    auto inputType = dyn_cast<IntegerType>(input.getType());
+    // Result must be signless for arith ops; siN/uiN carry only semantic
+    // signedness which is irrelevant once the width op is materialized.
+    Type convertedResultType = getTypeConverter()->convertType(op.getResult(0).getType());
+    auto resultType = dyn_cast<IntegerType>(convertedResultType);
+    if (!inputType || !resultType) {
+      return rewriter.notifyMatchFailure(op, "integer cast type conversion failed");
+    }
+    unsigned inputWidth = inputType.getWidth();
+    unsigned resultWidth = resultType.getWidth();
+    if (inputWidth == resultWidth) {
+      rewriter.replaceOp(op, input);
+    } else if (inputWidth < resultWidth) {
+      bool isUnsigned = srcType.isUnsigned() || (srcType.isSignless() && dstType.isUnsigned());
+      if (isUnsigned) {
+        rewriter.replaceOpWithNewOp<arith::ExtUIOp>(op, resultType, input);
+      } else {
+        rewriter.replaceOpWithNewOp<arith::ExtSIOp>(op, resultType, input);
+      }
+    } else {
+      rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, resultType, input);
+    }
+    return success();
+  }
+};
+
+} // namespace mlir::pto::detail
+
+namespace mlir::pto::detail {
+
 void populateVPTOOpLoweringPatterns(VPTOTypeConverter &typeConverter, RewritePatternSet &patterns,
                                     LoweringState &state) {
   populateVPTOArithmeticPatterns(typeConverter, patterns, state);
   populateVPTOVectorMemoryPatterns(typeConverter, patterns, state);
   populateVPTOScalarPatterns(typeConverter, patterns, state);
+  patterns.add<FoldIntegerSignednessCast>(typeConverter, patterns.getContext());
 }
 
 void markIllegalVPTOSyncOps(ConversionTarget &target) {
@@ -89,7 +138,13 @@ void configureVPTOOpLoweringTarget(ConversionTarget &target, VPTOTypeConverter &
   target.addLegalOp<ModuleOp>();
   target.addLegalDialect<arith::ArithDialect, cf::ControlFlowDialect, LLVM::LLVMDialect, func::FuncDialect,
                          scf::SCFDialect>();
-  target.addLegalOp<UnrealizedConversionCastOp>();
+  // Pure-integer signedness casts must be rewritten by
+  // ConvertVPTOUnrealizedCastOp before LLVM translation (issue 1454);
+  // everything else stays legal here.
+  target.addDynamicallyLegalOp<UnrealizedConversionCastOp>([&](UnrealizedConversionCastOp op) {
+    return !(op->getNumOperands() == 1 && op->getNumResults() == 1 &&
+             isa<IntegerType>(op.getOperand(0).getType()) && isa<IntegerType>(op.getResult(0).getType()));
+  });
   markIllegalVPTOSyncOps(target);
   markIllegalVPTOSimtOps(target);
   markIllegalVPTOConfigOps(target);

@@ -287,6 +287,12 @@ static bool hasVPTOConvertibleType(TypeRange types) {
   return llvm::any_of(types, [](Type type) { return hasVPTOConvertibleType(type); });
 }
 
+static bool isPureIntegerCast(UnrealizedConversionCastOp op) {
+  return op->getNumOperands() == 1 && op->getNumResults() == 1 &&
+         isa<IntegerType>(op.getOperand(0).getType()) &&
+         isa<IntegerType>(op.getResult(0).getType());
+}
+
 static Value materializeVPTOCast(OpBuilder &builder, Type resultType,
                                  ValueRange inputs, Location loc) {
   if (inputs.size() != 1) {
@@ -12389,6 +12395,34 @@ public:
     {
       return rewriter.notifyMatchFailure(op, "expected single-operand single-result cast");
     }
+    if (isPureIntegerCast(op)) {
+      Type convertedResultType =
+          getTypeConverter()->convertType(op.getResult(0).getType());
+      Value input = adaptor.getOperands().front();
+      auto inputType = dyn_cast<IntegerType>(input.getType());
+      auto resultType = dyn_cast<IntegerType>(convertedResultType);
+      if (!inputType || !resultType) {
+        return rewriter.notifyMatchFailure(op, "integer cast type conversion failed");
+      }
+      unsigned inputWidth = inputType.getWidth();
+      unsigned resultWidth = resultType.getWidth();
+      if (inputWidth == resultWidth) {
+        rewriter.replaceOp(op, input);
+      } else if (inputWidth < resultWidth) {
+        auto sourceType = cast<IntegerType>(op.getOperand(0).getType());
+        auto semanticResultType = cast<IntegerType>(op.getResult(0).getType());
+        bool isUnsigned = sourceType.isUnsigned() ||
+                          (sourceType.isSignless() && semanticResultType.isUnsigned());
+        if (isUnsigned) {
+          rewriter.replaceOpWithNewOp<arith::ExtUIOp>(op, resultType, input);
+        } else {
+          rewriter.replaceOpWithNewOp<arith::ExtSIOp>(op, resultType, input);
+        }
+      } else {
+        rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, resultType, input);
+      }
+      return success();
+    }
     if (!hasVPTOConvertibleType(op->getOperandTypes()) &&
         !hasVPTOConvertibleType(op->getResultTypes())) {
       return rewriter.notifyMatchFailure(op, "no VPTO convertible types");
@@ -13474,7 +13508,8 @@ static void configureVPTOOpLoweringTarget(ConversionTarget &target,
                           func::FuncDialect, scf::SCFDialect>();
   target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
       [](UnrealizedConversionCastOp op) {
-        return !hasVPTOConvertibleType(op->getOperandTypes()) &&
+        return !isPureIntegerCast(op) &&
+               !hasVPTOConvertibleType(op->getOperandTypes()) &&
                !hasVPTOConvertibleType(op->getResultTypes());
       });
   target.addIllegalOp<pto::SetFlagOp, pto::WaitFlagOp, pto::SetFlagDynOp, pto::WaitFlagDynOp, pto::SyncSetOp,
@@ -13708,7 +13743,8 @@ static LogicalResult lowerVPTOTypes(ModuleOp module, llvm::raw_ostream &diagOS) 
                       pto::StructGetOp, pto::StructSetOp>();
   target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
       [&](UnrealizedConversionCastOp op) {
-        return !hasVPTOConvertibleType(op->getOperandTypes()) &&
+        return !isPureIntegerCast(op) &&
+               !hasVPTOConvertibleType(op->getOperandTypes()) &&
                !hasVPTOConvertibleType(op->getResultTypes());
       });
   target.addDynamicallyLegalOp<LLVM::AllocaOp>([&](LLVM::AllocaOp op) {

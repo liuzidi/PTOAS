@@ -19,6 +19,34 @@ public:
     if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
       return failure();
     }
+    // Pure-integer signedness casts (e.g. i64 -> si32 produced by PTODSL
+    // runtime signedness strip/restore) must become explicit arith width ops
+    // or fold away, otherwise translateToLLVMIR rejects them (issue 1454).
+    if (isa<IntegerType>(op.getOperand(0).getType()) && isa<IntegerType>(op.getResult(0).getType())) {
+      Value input = adaptor.getOperands().front();
+      auto inputType = dyn_cast<IntegerType>(input.getType());
+      auto resultType = dyn_cast<IntegerType>(op.getResult(0).getType());
+      if (!inputType || !resultType) {
+        return rewriter.notifyMatchFailure(op, "integer cast type conversion failed");
+      }
+      unsigned inputWidth = inputType.getWidth();
+      unsigned resultWidth = resultType.getWidth();
+      if (inputWidth == resultWidth) {
+        rewriter.replaceOp(op, input);
+      } else if (inputWidth < resultWidth) {
+        auto sourceType = cast<IntegerType>(op.getOperand(0).getType());
+        bool isUnsigned = sourceType.isUnsigned() ||
+                          (sourceType.isSignless() && resultType.isUnsigned());
+        if (isUnsigned) {
+          rewriter.replaceOpWithNewOp<arith::ExtUIOp>(op, resultType, input);
+        } else {
+          rewriter.replaceOpWithNewOp<arith::ExtSIOp>(op, resultType, input);
+        }
+      } else {
+        rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, resultType, input);
+      }
+      return success();
+    }
     if (!hasVPTOConvertibleType(op->getOperandTypes()) && !hasVPTOConvertibleType(op->getResultTypes())) {
       return failure();
     }
