@@ -272,11 +272,117 @@ jobs:
           export LD_LIBRARY_PATH="${LLVM_INSTALL_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           auditwheel repair --plat manylinux_2_34_${{ matrix.arch }} "$PTO_WHEEL_DIST_DIR"/ptoas*.whl -w "$PTO_WHEELHOUSE"
 
+      - name: Diagnose 1 - env and site-packages
+        run: |
+          set -x
+          echo "PYBIN=$(which python3)"
+          python3 --version
+          echo "=== site-packages listing ==="
+          ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ > /tmp/diag1.log 2>&1 || true
+          cat /tmp/diag1.log
+          echo "::error::SITEPKG $(head -c 1500 /tmp/diag1.log | tr '\n' '|')"
+          exit 0
+
+      - name: Diagnose 2 - ptodsl imports
+        run: |
+          set +e
+          cd /tmp
+          LOG=/tmp/diag2.log
+          : > $LOG
+          echo "=== bare import ===" >> $LOG
+          timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== src-tree PYTHONPATH import ptodsl ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== src-tree PYTHONPATH import ptoas.mlir.ir ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 150 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK')" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== build-tree staged python ===" >> $LOG
+          ls /__w/PTOAS/PTOAS/build-release/python >> $LOG 2>&1
+          echo "=== staged ptoas.mlir import ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/build-release/python timeout 150 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK via build tree')" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          cat $LOG
+          echo "::error::IMPORTS2 $(cat $LOG | tr '\n' '@' | head -c 2000)"
+          exit 0
+
+      - name: Diagnose 3 - manual daemon start
+        run: |
+          set -x
+          cd /tmp
+          rm -f /tmp/diag_daemon.sock
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 100 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock > /tmp/diag3.log 2>&1 &
+          DPID=$!
+          sleep 45
+          if [ -S /tmp/diag_daemon.sock ]; then
+            echo "DAEMON SOCKET CREATED - OK"
+            echo "::error::DAEMON socket created successfully with src-tree PYTHONPATH"
+          else
+            echo "DAEMON SOCKET NOT CREATED"
+            echo "::error::DAEMON FAILED: $(head -c 1500 /tmp/diag3.log | tr '\n' '|')"
+          fi
+          cat /tmp/diag3.log
+          kill $DPID 2>/dev/null || true
+          exit 0
+
       - name: Test wheel installation
         run: |
+          set -x
+          printf '%s\n' \
+            'import sys' \
+            'log = open("/tmp/wheel-test.log", errors="replace").read()' \
+            'lines = log.splitlines()' \
+            'err_idx = [i for i, l in enumerate(lines) if any(k in l for k in ("Error", "error", "Traceback", "FAILED", "not a supported", "exit code"))]' \
+            'if not err_idx:' \
+            '    err_idx = [max(0, len(lines) - 30)]' \
+            'start = max(0, err_idx[0] - 5)' \
+            'for n, line in enumerate(lines[start:start + 30]):' \
+            '    text = line.replace("%", "%25")[:600]' \
+            '    print(f"::error::wheel-test[{n}] {text}")' \
+            > /tmp/emit_annotations.py
           PTO_EXPECT_STATIC_LLVM=1 \
             PTO_TEST_WHEEL_PATH="$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" \
-            bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh
+            bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh 2>&1 | tee /tmp/wheel-test.log
+          echo "TEST_EXIT_CODE=${PIPESTATUS[1]}" >> "$GITHUB_ENV"
+          exit ${PIPESTATUS[1]}
+
+      - name: Write failure log to step summary
+        if: always()
+        run: |
+          {
+            echo "### wheel-test log (py${{ matrix.python }} ${{ matrix.arch }})"
+            echo '```'
+            cat /tmp/wheel-test.log 2>/dev/null
+            echo '```'
+            echo "### diag log"
+            echo '```'
+            cat /tmp/diag.log 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          # Emit diagnostics via annotations so they are visible anonymously.
+          printf '%s\n' \
+            'import sys' \
+            'lines = [l.rstrip() for l in sys.stdin if l.strip()]' \
+            'keys = ("Error", "error", "Traceback", "FAILED", "OK", "site-packages", "/__w", "socket", "drwx", "total", "Python 3")' \
+            'picked = [l for l in lines if any(k in l for k in keys)]' \
+            'for n, line in enumerate(picked[:40]):' \
+            '    text = line.replace("%", "%25")[:600]' \
+            '    print(f"::error::diag[{n}] {text}")' \
+            > /tmp/emit_diag.py
+          for f in /tmp/diag.log /tmp/wheel-test.log; do
+            if [ -f "$f" ]; then
+              python3 /tmp/emit_diag.py < "$f" || true
+            fi
+          done
+          exit 0
+
+      - name: Upload wheel-test log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-test-log-py${{ matrix.python }}-${{ matrix.arch }}
+          path: /tmp/wheel-test.log
 
       - name: Upload wheel artifact
         if: github.event_name == 'release' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

@@ -41,7 +41,31 @@ static std::string getLogicalKernelName(llvm::StringRef symbol) {
   if (symbol.ends_with("_mix_aic")) {
     return symbol.drop_back(strlen("_mix_aic")).str();
   }
+  // CANN >= 9.0.0.2 public ABI suffixes (see CANNToolchain::vptoPublicABISuffix).
+  if (symbol.ends_with(".vector")) {
+    return symbol.drop_back(strlen(".vector")).str();
+  }
+  if (symbol.ends_with(".cube")) {
+    return symbol.drop_back(strlen(".cube")).str();
+  }
   return symbol.str();
+}
+
+// The device-side forward-call suffix must match the public ABI suffix that
+// ObjectEmission's applyVPTOLLVMABINames stamps onto the device body symbol
+// before bisheng compiles it. CANN >= 9.0.0.2 renamed the suffix family from
+// _mix_aiv/_mix_aic to .vector/.cube; picking the wrong one leaves the merged
+// device ELF with an undefined symbol at link time.
+static std::string getKernelABISuffix(pto::FunctionKernelKind kind,
+                                      const pto::CANNVersion &cannVersion) {
+  const bool usesNewABI = cannVersion >= pto::kCANN900Beta2Version;
+  if (kind == pto::FunctionKernelKind::Vector) {
+    return usesNewABI ? ".vector" : "_mix_aiv";
+  }
+  if (kind == pto::FunctionKernelKind::Cube) {
+    return usesNewABI ? ".cube" : "_mix_aic";
+  }
+  return "";
 }
 
 // A stub arg type string of "__gm__ void *" marks a pointer (tensor) param;
@@ -104,14 +128,22 @@ static unsigned getPointerElementBytes(Type type) {
 
 static LogicalResult collectVPTOKernelStubDecls(
     ArrayRef<ModuleOp> modules, SmallVectorImpl<VPTOKernelStubDecl> &decls,
-    llvm::raw_ostream &diagOS) {
+    llvm::raw_ostream &diagOS,
+    const pto::CANNVersion &cannVersion = pto::kDefaultCANNVersion) {
   bool hadError = false;
   llvm::StringMap<unsigned> logicalNameToIndex;
+  const pto::CANNVersion effectiveCannVersion = cannVersion;
 
   for (ModuleOp module : modules) {
-    module.walk([&decls, &logicalNameToIndex, &hadError,
-                 &diagOS](func::FuncOp func) {
-      if (!pto::isPTOEntryFunction(func)) {
+    module.walk([&decls, &logicalNameToIndex, &hadError, &diagOS,
+                 &effectiveCannVersion](func::FuncOp func) {
+      // PyPTO's PTO codegen marks InCore kernels with only a
+      // ``pto.kernel_kind`` attribute (no explicit ``pto.entry``), so accept
+      // a kernel_kind-bearing definition as an entry as well.
+      bool isEntry = pto::isPTOEntryFunction(func) ||
+                     (func && !func.isDeclaration() &&
+                      func->hasAttr("pto.kernel_kind"));
+      if (!isEntry) {
         return;
       }
 
@@ -138,18 +170,16 @@ static LogicalResult collectVPTOKernelStubDecls(
         ++argNo;
       }
       // Derive the ABI suffix from the kernel_kind attr on the owning child
-      // ModuleOp (Vector -> "_mix_aiv", Cube -> "_mix_aic"). The PTO IR func
-      // name has no suffix yet (rename happens later in the lowering pipeline),
-      // so the wrapper forward-call target = logicalName + suffix.
+      // ModuleOp, resolved against the CANN public-ABI family (see
+      // getKernelABISuffix). The PTO IR func name has no suffix yet (rename
+      // happens later in the lowering pipeline), so the wrapper forward-call
+      // target = logicalName + suffix.
       std::string suffix;
       if (auto *parentOp = func->getParentOp()) {
         if (auto kindAttr = parentOp->getAttrOfType<pto::FunctionKernelKindAttr>(
                 pto::FunctionKernelKindAttr::name)) {
-          if (kindAttr.getKernelKind() == pto::FunctionKernelKind::Vector) {
-            suffix = "_mix_aiv";
-          } else if (kindAttr.getKernelKind() == pto::FunctionKernelKind::Cube) {
-            suffix = "_mix_aic";
-          }
+          suffix = getKernelABISuffix(kindAttr.getKernelKind(),
+                                      effectiveCannVersion);
         }
       }
 
@@ -216,9 +246,10 @@ LogicalResult mlir::pto::emitVPTOHostStubSource(ArrayRef<ModuleOp> modules,
 
 LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
     ArrayRef<ModuleOp> modules, std::string &wrapperSource,
-    llvm::raw_ostream &diagOS) {
+    llvm::raw_ostream &diagOS, const CANNVersion &cannVersion) {
   SmallVector<VPTOKernelStubDecl> stubDecls;
-  if (failed(collectVPTOKernelStubDecls(modules, stubDecls, diagOS))) {
+  if (failed(collectVPTOKernelStubDecls(modules, stubDecls, diagOS,
+                                         cannVersion))) {
     return failure();
   }
   if (stubDecls.empty()) {
@@ -275,15 +306,23 @@ LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
   // function body. The body's own definition carries __aicore__; the extern
   // declaration here just needs the symbol name and signature.
   for (const VPTOKernelStubDecl &decl : stubDecls) {
+    // CANN >= 9.0.0.2 public ABI suffixes (".vector"/".cube") are not legal
+    // C++ identifiers, so declare a local alias and bind it to the mangled
+    // symbol through a top-level asm label.
+    const std::string cxxName = decl.logicalName + "_vpto_body";
+    const std::string asmName = decl.logicalName + decl.kernelSuffix;
     os << "extern \"C\" __aicore__ __attribute__((always_inline)) void "
-       << decl.logicalName << decl.kernelSuffix << "(";
+       << cxxName << "(";
     for (size_t i = 0; i < decl.argTypes.size(); ++i) {
       if (i) {
         os << ", ";
       }
       os << decl.argTypes[i];
     }
-    os << ");\n";
+    // GCC-style asm label on the declaration: every reference to cxxName in
+    // this TU resolves to the public ABI symbol asmName in the object file,
+    // even when asmName is not a legal C++ identifier (".vector"/".cube").
+    os << ") __asm__(\"" << asmName << "\");\n";
   }
   os << "extern \"C\" __aicore__\n"
         "void kernel_entry(__gm__ int64_t* args) {\n"
@@ -358,8 +397,9 @@ LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
     }
 
     // Forward to the typed VPTO body. (Single-kernel-per-module case: this is
-    //  the only path the scheduler will reach via kernel_entry.)
-    os << "  " << decl.logicalName << decl.kernelSuffix << "(";
+    //  the only path the scheduler will reach via kernel_entry.) The call goes
+    // through the identifier-safe alias bound to the public ABI symbol above.
+    os << "  " << decl.logicalName << "_vpto_body(";
     for (size_t i = 0; i < callArgs.size(); ++i) {
       if (i) {
         os << ", ";
@@ -374,7 +414,8 @@ LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
 }
 
 LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
-    ModuleOp module, std::string &wrapperSource, llvm::raw_ostream &diagOS) {
+    ModuleOp module, std::string &wrapperSource, llvm::raw_ostream &diagOS,
+    const CANNVersion &cannVersion) {
   return emitVPTODeviceWrapperSource(ArrayRef<ModuleOp>(module), wrapperSource,
-                                      diagOS);
+                                      diagOS, cannVersion);
 }

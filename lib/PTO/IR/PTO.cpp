@@ -3398,6 +3398,12 @@ bool mlir::pto::hasExternalArtifactVisibility(func::FuncOp func) {
   if (isPTOEntryFunction(func)) {
     return true;
   }
+  // PyPTO's PTO codegen marks InCore kernels with only ``pto.kernel_kind``
+  // (no explicit ``pto.entry``); keep those externally visible so the merged
+  // device ELF's kernel_entry wrapper can link against them.
+  if (func->hasAttr("pto.kernel_kind")) {
+    return true;
+  }
   auto attr = func->getAttrOfType<StringAttr>(kPTOVisibilityAttrName);
   if (!attr) {
     return false;
