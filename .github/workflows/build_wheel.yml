@@ -274,9 +274,18 @@ jobs:
 
       - name: Test wheel installation
         run: |
+          set -x
           PTO_EXPECT_STATIC_LLVM=1 \
             PTO_TEST_WHEEL_PATH="$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" \
-            bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh
+            bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh 2>&1 | tee /tmp/wheel-test.log
+          exit ${PIPESTATUS[1]}
+
+      - name: Upload wheel-test log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-test-log-py${{ matrix.python }}-${{ matrix.arch }}
+          path: /tmp/wheel-test.log
 
       - name: Upload wheel artifact
         if: github.event_name == 'release' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
