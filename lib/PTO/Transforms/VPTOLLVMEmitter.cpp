@@ -13965,7 +13965,13 @@ static LogicalResult renameKernelFunctionsForKernelKind(ModuleOp module,
   }
 
   for (func::FuncOp funcOp : module.getOps<func::FuncOp>()) {
-    if (!pto::hasExplicitPTOEntryAttr(funcOp))
+    // PyPTO's PTO codegen marks InCore kernels with only ``pto.kernel_kind``
+    // (no explicit ``pto.entry``); rename those definitions too, or the device
+    // wrapper's forward call to <name>_mix_aiv fails to link.
+    bool isEntry = pto::hasExplicitPTOEntryAttr(funcOp) ||
+                   (!funcOp.isDeclaration() &&
+                    funcOp->hasAttr(FunctionKernelKindAttr::name));
+    if (!isEntry)
     {
       continue;
     }
