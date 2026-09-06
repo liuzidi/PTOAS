@@ -275,23 +275,29 @@ jobs:
       - name: Diagnose daemon environment
         run: |
           set -x
+          exec > >(tee /tmp/diag.log) 2>&1 || true
           echo "=== active python ==="
-          which python python3; python3 --version
+          (which python; which python3; python3 --version) || true
           echo "=== /opt/python/cp311 site-packages ==="
-          ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ | head -40
+          (ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ || true) | head -40
           echo "=== baked daemon paths ==="
-          strings "$GITHUB_WORKSPACE/wheelhouse"/ptoas*.whl >/dev/null 2>&1 || true
-          mkdir -p /tmp/whlx && cd /tmp/whlx && python3 -m zipfile -e "$GITHUB_WORKSPACE"/wheelhouse/ptoas*.whl . >/dev/null 2>&1
-          strings ptoas/mlir/_mlir_libs/libPTOASCompiler.so | grep -E "/__w|/opt/python" | head -10 || true
-          echo "=== try daemon directly ==="
-          cd /tmp && timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl, sys; print('ptodsl OK', ptodsl.__file__)" 2>&1 | tail -5
-          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK via src tree:', ptodsl.__file__)" 2>&1 | tail -5
-          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ptoas.mlir.ir OK')" 2>&1 | tail -5
-          echo "=== try starting daemon manually ==="
-          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock 2>&1 | head -30 &
-          sleep 30
-          ls -la /tmp/diag_daemon.sock 2>&1 || echo "socket NOT created"
-          cd "$GITHUB_WORKSPACE"
+          (mkdir -p /tmp/whlx && cd /tmp/whlx && python3 -m zipfile -e "$GITHUB_WORKSPACE"/wheelhouse/ptoas*.whl .) || true
+          (cd /tmp/whlx && strings ptoas/mlir/_mlir_libs/libPTOASCompiler.so | grep -E "/__w|/opt/python" | head -10) || true
+          echo "=== import ptodsl bare ==="
+          (timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK', ptodsl.__file__)" 2>&1 | tail -5) || true
+          echo "=== import ptodsl via src tree PYTHONPATH ==="
+          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK:', ptodsl.__file__)" 2>&1 | tail -5) || true
+          echo "=== import ptoas.mlir via src tree PYTHONPATH ==="
+          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ptoas.mlir.ir OK')" 2>&1 | tail -5) || true
+          echo "=== manual daemon ==="
+          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock > /tmp/diag_daemon.log 2>&1) || true &
+          sleep 45
+          (ls -la /tmp/diag_daemon.sock) || echo "socket NOT created"
+          (cat /tmp/diag_daemon.log | head -30) || true
+          echo "=== workspace ptodsl tree ==="
+          (ls /__w/PTOAS/PTOAS/ptodsl/ || true) | head -10
+          (ls /__w/PTOAS/PTOAS/ptodsl/ptodsl/tilelib/serving/ || true) | head
+          exit 0
 
       - name: Test wheel installation
         run: |
@@ -320,13 +326,29 @@ jobs:
           {
             echo "### wheel-test log (py${{ matrix.python }} ${{ matrix.arch }})"
             echo '```'
-            cat /tmp/wheel-test.log
+            cat /tmp/wheel-test.log 2>/dev/null
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          # Also emit the log via annotations so it is visible anonymously.
-          if [ "${TEST_EXIT_CODE:-0}" != "0" ] || grep -q "Error\|error\|Traceback\|FAILED" /tmp/wheel-test.log; then
-            python3 /tmp/emit_annotations.py
-          fi
+            echo "### diag log"
+            echo '```'
+            cat /tmp/diag.log 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          # Emit diagnostics via annotations so they are visible anonymously.
+          printf '%s\n' \
+            'import sys' \
+            'lines = [l.rstrip() for l in sys.stdin if l.strip()]' \
+            'keys = ("Error", "error", "Traceback", "FAILED", "OK", "site-packages", "/__w", "socket", "drwx", "total", "Python 3")' \
+            'picked = [l for l in lines if any(k in l for k in keys)]' \
+            'for n, line in enumerate(picked[:40]):' \
+            '    text = line.replace("%", "%25")[:600]' \
+            '    print(f"::error::diag[{n}] {text}")' \
+            > /tmp/emit_diag.py
+          for f in /tmp/diag.log /tmp/wheel-test.log; do
+            if [ -f "$f" ]; then
+              python3 /tmp/emit_diag.py < "$f" || true
+            fi
+          done
+          exit 0
 
       - name: Upload wheel-test log (always)
         if: always()
