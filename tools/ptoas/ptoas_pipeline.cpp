@@ -877,12 +877,29 @@ static void appendA5VPTOPostLoweringFusionPipeline(OpPassManager &kernelModulePM
   kernelModulePM.addPass(mlir::createCSEPass());
 }
 
+// Prefix the wrapper-derived package root (PTOAS_PYTHON_PACKAGE_ROOT, set by
+// ptoas/_cli.py from the active _core location) ahead of the baked-in
+// source-tree PYTHONPATH. ptodsl's imports need ptoas.mlir, which only exists
+// in the staged/installed package tree — <source>/ptodsl/ptoas carries only
+// the CLI stubs. Without this, every daemon/helper subprocess fails to import
+// ptoas.mlir in installed/wheel layouts.
+static std::string resolveTileLibPkgPath() {
+  std::string packagePath = tileLibPackagePath;
+  if (tileLibBackend == "ptodsl") {
+    if (const char *runtimeRoot = ::getenv("PTOAS_PYTHON_PACKAGE_ROOT");
+        runtimeRoot && runtimeRoot[0] != '\0') {
+      packagePath = std::string(runtimeRoot) + ":" + packagePath;
+    }
+  }
+  return packagePath;
+}
+
 static pto::ExpandTileOpOptions buildExpandTileOpOptions() {
   pto::ExpandTileOpOptions options;
   options.pythonExe = tileLibPythonExe;
   options.daemonSocketPath = daemonSocketPath;
   options.tileLibBackend = tileLibBackend;
-  options.tileLibPkgPath = tileLibPackagePath;
+  options.tileLibPkgPath = resolveTileLibPkgPath();
   options.daemonHelperModule = tileLibBackend == "ptodsl"
                                    ? "ptodsl.tilelib.serving.helper"
                                    : "tilelang_dsl.daemon_helper";
@@ -894,7 +911,7 @@ buildInsertTemplateAttributesOptions() {
   pto::InsertTemplateAttributesOptions options;
   options.pythonExe = tileLibPythonExe;
   options.daemonSocketPath = daemonSocketPath;
-  options.tileLibPkgPath = tileLibPackagePath;
+  options.tileLibPkgPath = resolveTileLibPkgPath();
   options.daemonHelperModule = "ptodsl.tilelib.serving.helper";
   return options;
 }
@@ -914,7 +931,7 @@ static LogicalResult ensureTileLibDaemon(bool hasTileOpsToExpand) {
   const std::string daemonModule = usePTODSL
                                        ? "ptodsl.tilelib.serving.daemon"
                                        : "tilelang_dsl.daemon";
-  std::string packagePath = tileLibPackagePath;
+  std::string packagePath = resolveTileLibPkgPath();
   if (usePTODSL) {
     packagePath += ":" PTOAS_DEFAULT_TILEOPS_PKG_PATH;
   }
