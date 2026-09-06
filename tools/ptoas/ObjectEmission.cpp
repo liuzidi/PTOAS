@@ -17,6 +17,13 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Transforms/Utils/UnrollLoop.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -1095,6 +1102,49 @@ mlir::LogicalResult mlir::pto::emitVPTOVectorDeviceObject(
           toolchain.vptoPublicABISuffix(ObjectEmissionDeviceTarget::Vector),
           diagOS))) {
     return failure();
+  }
+  // Unroll-by-2 experiment: the persistent-loop version counter is an i64
+  // loop-carried phi read inside the aivector_scope VF region.  Bisheng's
+  // mix_aiv VF extraction cannot pass such phis in registers and spills them
+  // to UB with a per-iteration DSB/DCCI sync chain, which breaks MTE
+  // prefetch/store overlap (measured ~5% on per_block_cast [8064,2560]).
+  // Unrolling the outer persistent loop by 2 turns the ping-pong parity into
+  // a compile-time constant per unrolled copy, eliminating the crossing phi
+  // from each VF body.  Trip counts are runtime (persistent), so request a
+  // runtime count-2 unroll and let LLVM bail out when the loop is unsuitable.
+  if (const char *unrollEnv = std::getenv("PTOAS_VECTOR_UNROLL2")) {
+    (void)unrollEnv;
+    for (llvm::Function &function : module) {
+      if (function.isDeclaration()) {
+        continue;
+      }
+      llvm::DominatorTree dt(function);
+      llvm::LoopInfo li(dt);
+      llvm::AssumptionCache ac(function);
+      llvm::TargetLibraryInfoImpl tlii;
+      llvm::TargetLibraryInfo tli(tlii);
+      llvm::ScalarEvolution se(function, tli, ac, dt, li);
+      llvm::OptimizationRemarkEmitter ore(&function);
+      const llvm::TargetTransformInfo tti(module.getDataLayout());
+      for (llvm::Loop *loop : li.getTopLevelLoops()) {
+        // Only the outer persistent loop; skip the aivector_scope VF loop,
+        // whose latch already carries llvm.loop metadata.
+        llvm::BasicBlock *latch = loop->getLoopLatch();
+        if (!latch || latch->getTerminator()->hasMetadata()) {
+          continue;
+        }
+        llvm::UnrollLoopOptions ulo;
+        ulo.Count = 2;
+        ulo.Force = true;
+        ulo.Runtime = true;
+        ulo.AllowExpensiveTripCount = false;
+        ulo.UnrollRemainder = true;
+        ulo.ForgetAllSCEV = false;
+        (void)llvm::UnrollLoop(loop, ulo, &li, &se, &dt, &ac, &tti, &ore,
+                               true);
+      }
+      break; // only the first (kernel entry) function
+    }
   }
   if (failed(writeLLVMModule(module, llPath, diagOS))) {
     return failure();

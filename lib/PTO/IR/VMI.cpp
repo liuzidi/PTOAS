@@ -3301,7 +3301,7 @@ static bool isSupportedVCmpPredicate(StringRef cmpMode) {
 //===----------------------------------------------------------------------===//
 
 static const std::set<StringRef> &validDistModes() {
-  static const std::set<StringRef> modes = {"continuous", "dintlv", "brc"};
+  static const std::set<StringRef> modes = {"continuous", "dintlv", "unpack", "brc"};
   return modes;
 }
 
@@ -5437,10 +5437,18 @@ LogicalResult VMIvLoadOp::verify() {
 
   for (auto res : getResults()) {
     auto resType = cast<VMIVRegType>(res.getType());
-    if (failed(verifyMemoryElementMatches(getOperation(),
-                                          getSource().getType(), resType,
-                                          "source"))) {
-      return failure();
+    if (!(distMode && *distMode == "unpack")) {
+      if (failed(verifyMemoryElementMatches(getOperation(),
+                                            getSource().getType(), resType,
+                                            "source"))) {
+        return failure();
+      }
+    } else {
+      Type memElem = getMemoryElementType(getSource().getType());
+      unsigned srcBits = memElem ? pto::getPTOStorageElemBitWidth(memElem) : 0;
+      unsigned dstBits = pto::getPTOStorageElemBitWidth(resType.getElementType());
+      if (srcBits == 0 || dstBits != 2 * srcBits)
+        return emitOpError("unpack requires destination element width to be twice the source width");
     }
     if (isDintlv &&
         failed(verifyContiguousIfLayoutAssigned(getOperation(), resType,

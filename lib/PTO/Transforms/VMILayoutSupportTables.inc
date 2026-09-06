@@ -26,18 +26,20 @@ static constexpr EnsureLayoutPattern kEnsureLayoutPatterns[] = {
     {bits<8, 16, 32, 64>(), N<1>(), c(), gs(1)},
     {bits<8, 16, 32, 64>(), N<1>(), gs(1), c()},
 
-    {bits<16>(), N<256>(), c(), d(2)},
-    {bits<32>(), N<128, 256>(), c(), d(2)},
+    {bits<16>(), N<64, 128, 256>(), c(), d(2)},
+    {bits<32>(), N<64, 128, 256>(), c(), d(2)},
     {bits<64>(), N<64, 128, 256>(), c(), d(2)},
-    {bits<16>(), N<256>(), d(2), c()},
-    {bits<32>(), N<128, 256>(), d(2), c()},
+    {bits<16>(), N<64, 128, 256>(), d(2), c()},
+    {bits<32>(), N<64, 128, 256>(), d(2), c()},
     {bits<64>(), N<64, 128, 256>(), d(2), c()},
 
-    {bits<32>(), N<256>(), c(), d(4)},
+    {bits<32>(), N<128, 256>(), c(), d(4)},
     {bits<64>(), N<128, 256>(), c(), d(4)},
-    {bits<32>(), N<256>(), d(4), c()},
+    {bits<32>(), N<128, 256>(), d(4), c()},
     {bits<64>(), N<128, 256>(), d(4), c()},
 
+    {bits<16>(), N<128, 256>(), d(2), d(4)},
+    {bits<16>(), N<128, 256>(), d(4), d(2)},
     {bits<32>(), N<256, 512>(), d(2), d(4)},
     {bits<64>(), N<128, 256>(), d(2), d(4)},
     {bits<32>(), N<256, 512>(), d(4), d(2)},
@@ -79,9 +81,13 @@ static constexpr EnsureMaskLayoutPattern kEnsureMaskLayoutPatterns[] = {
     {mb32(), N<128>(), bd(2), c()},
 
     {mb32(), N<256>(), c(), d(4)},
+    {mb32(), N<128>(), c(), d(4)},
     {mb32(), N<256>(), c(), bd(4)},
+    {mb32(), N<128>(), c(), bd(4)},
     {mb32(), N<256>(), d(4), c()},
+    {mb32(), N<128>(), d(4), c()},
     {mb32(), N<256>(), bd(4), c()},
+    {mb32(), N<128>(), bd(4), c()},
 
     {mb8(), N<1, 2, 4, 8, 64, 128>(), c(), ls(2)},
     {mb16(), N<1, 2, 4, 8, 64>(), c(), ls(2)},
@@ -587,6 +593,16 @@ struct WidthChangingBitcastLayoutPattern {
 static constexpr WidthChangingBitcastLayoutPattern
     kWidthChangingBitcastLayoutPatterns[] = {
     {c()},
+    // Dense splits (deinterleaved=2/4, laneStride=1) are representation-
+    // preserving across element widths: a bitcast only reinterprets the same
+    // physical carriers under a wider/narrower element view, and dense splits
+    // keep part boundaries and lane positions unchanged.  This lets layout
+    // propagation push a deinterleaved=4 group-reduce source layout back
+    // through a bf16->f32 reinterpret into the producing vintlv, whose
+    // d(2)->d(4) zero-copy relation then keeps the whole amax chain free of
+    // materialization trees.
+    {d(2)},
+    {d(4)},
 };
 
 //===----------------------------------------------------------------------===//

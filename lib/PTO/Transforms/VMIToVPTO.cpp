@@ -2021,9 +2021,19 @@ checkSupportedGroupStoreShape(VMIGroupStoreOp op, std::string *reason) {
       return success();
     }
 
-    if (!rowStride || *rowStride != 1)
-      return fail("slots=8 group_store currently requires constant unit "
+    // Lane-strided group-slot layouts (e.g. gs(8,2)/gs(8,4)) deliberately
+    // write alternating scale slots, matching ASC's even/odd carriers.  The
+    // physical store path below handles these via the corresponding
+    // deinterleaved/strided distribution token; only compact gs(8) requires
+    // unit row stride.
+    if (!layout.hasLaneStride()) {
+      if (!rowStride || *rowStride != 1)
+        return fail("slots=8 group_store currently requires constant unit "
+                    "row_stride");
+    } else if (!rowStride || *rowStride <= 0) {
+      return fail("lane-strided slots=8 group_store requires positive "
                   "row_stride");
+    }
     return success();
   }
 
@@ -4350,8 +4360,17 @@ FailureOr<SmallVector<Value>> materializeDataLayoutConversion(
       sourceLayout.getLaneStride() == 1 && resultLayout.getLaneStride() == 1 &&
       (sourceLayout.getFactor() == 2 || sourceLayout.getFactor() == 4) &&
       (resultLayout.getFactor() == 2 || resultLayout.getFactor() == 4)) {
+    // Both endpoint layouts cover the same logical element footprint, so the
+    // intermediate contiguous value has exactly as many physical parts as the
+    // source deinterleaved value; the per-step conversions below then only
+    // reshuffle lanes inside those parts.
+    if (sourceParts.empty()) {
+      return failure();
+    }
+    SmallVector<Type> intermediateTypes(sourceParts.size(),
+                                        sourceParts.front().getType());
     FailureOr<SmallVector<Value>> dense = materializeDataLayoutConversion(
-        op, sourceParts, resultTypes, sourceLayout, contiguous,
+        op, sourceParts, intermediateTypes, sourceLayout, contiguous,
         sourceVMIElementType, rewriter);
     if (failed(dense))
       return failure();

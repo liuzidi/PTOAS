@@ -576,10 +576,14 @@ def _vmi_vreg_element_count(type_obj, *, context: str):
     raise TypeError(f"{context} could not determine VMI vector lane count from {type_obj}")
 
 
-def _resolve_vmi_vload_result_types(source, size, *, dist_mode, context: str):
+def _resolve_vmi_vload_result_types(source, size, *, dist_mode, to_dtype=None, context: str):
     if size is None:
         raise TypeError(f"{context} requires size")
     element_type = _pointer_element_type(_type_of(source), context=context)
+    if dist_mode == "unpack":
+        if to_dtype is None:
+            raise TypeError(f"{context} with dist_mode='unpack' requires to_dtype")
+        element_type = _ensure_tensor_storage_dtype(to_dtype, context=context)
     resolved = _pto.VMIVRegType.get(size, element_type)
     if dist_mode == "dintlv":
         return [resolved, resolved]
@@ -590,6 +594,7 @@ def _validate_vmi_load_modes(
     context: str,
     *,
     dist_mode,
+    to_dtype=None,
     group,
     stride,
     block_stride,
@@ -736,6 +741,7 @@ class _VMINamespace:
         offset,
         *,
         size,
+        to_dtype=None,
         stride=None,
         block_stride=None,
         dist_mode=None,
@@ -746,16 +752,18 @@ class _VMINamespace:
         _validate_vmi_load_modes(
             "pto.vmi.vload(...)",
             dist_mode=dist_mode,
+            to_dtype=to_dtype,
             group=group,
             stride=stride,
             block_stride=block_stride,
             allow_group_brc=True,
-            allowed_dist_modes={None, "continuous", "dintlv", "brc"},
+            allowed_dist_modes={None, "continuous", "dintlv", "unpack", "brc"},
         )
         result_types = _resolve_vmi_vload_result_types(
             source,
             size,
             dist_mode=dist_mode,
+            to_dtype=to_dtype,
             context="pto.vmi.vload(...)",
         )
         return _call_value(
@@ -777,7 +785,7 @@ class _VMINamespace:
         destination,
         offset,
         mask=None,
-        *,
+        *legacy_values,
         stride=None,
         block_stride=None,
         dist_mode=None,
@@ -786,6 +794,16 @@ class _VMINamespace:
         loc=None,
         ip=None,
     ):
+        # The TileLang intrinsic emitter uses the low/high vectors as
+        # separate operands, while the public PTODSL API documents a pair.
+        # Normalize the former spelling here before validation.
+        if legacy_values:
+            # Called as vstore(even, odd, destination, offset, mask, ...).
+            values, destination, offset, mask = (values, destination, offset, mask)
+            # In this call shape ``offset`` currently holds the odd vector and
+            # ``mask`` holds the destination; recover the shifted arguments.
+            odd, destination, offset, mask = destination, offset, mask, legacy_values[0]
+            values = (values, odd)
         _validate_vmi_load_modes(
             "pto.vmi.vstore(...)",
             dist_mode=dist_mode,
@@ -1103,6 +1121,25 @@ class _VMINamespace:
             loc=loc,
             ip=ip,
         )
+
+    @staticmethod
+    def extf(source, to_dtype=None, *, loc=None, ip=None):
+        """Floating-point widening with PTOAS-native physical lane split."""
+        context = "pto.vmi.extf(...)"
+        source_type = _as_vmi_vreg_type(_type_of(source), context=context)
+        # The generated PTODSL call carries the result type in the op builder,
+        # so a missing annotation is the canonical BF16/F16 -> FP32 widening.
+        target_type = _ensure_tensor_storage_dtype(
+            F32Type.get() if to_dtype is None else to_dtype, context=context
+        )
+        src_bits = _type_bit_width(source_type.element_type, context=context)
+        dst_bits = _type_bit_width(target_type, context=context)
+        if dst_bits <= src_bits:
+            raise TypeError(f"{context} requires a wider floating-point target")
+        result_type = _pto.VMIVRegType.get(
+            source_type.element_count, target_type, layout=source_type.layout
+        )
+        return _call_value("extf", result_type, _raw(source), loc=loc, ip=ip)
 
     @staticmethod
     def vinterpret_cast(source, to_dtype=None, *, loc=None, ip=None):
