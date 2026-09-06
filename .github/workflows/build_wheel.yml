@@ -272,31 +272,55 @@ jobs:
           export LD_LIBRARY_PATH="${LLVM_INSTALL_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           auditwheel repair --plat manylinux_2_34_${{ matrix.arch }} "$PTO_WHEEL_DIST_DIR"/ptoas*.whl -w "$PTO_WHEELHOUSE"
 
-      - name: Diagnose daemon environment
+      - name: Diagnose 1 - env and site-packages
         run: |
           set -x
-          exec > >(tee /tmp/diag.log) 2>&1 || true
-          echo "=== active python ==="
-          (which python; which python3; python3 --version) || true
-          echo "=== /opt/python/cp311 site-packages ==="
-          (ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ || true) | head -40
-          echo "=== baked daemon paths ==="
-          (mkdir -p /tmp/whlx && cd /tmp/whlx && python3 -m zipfile -e "$GITHUB_WORKSPACE"/wheelhouse/ptoas*.whl .) || true
-          (cd /tmp/whlx && strings ptoas/mlir/_mlir_libs/libPTOASCompiler.so | grep -E "/__w|/opt/python" | head -10) || true
-          echo "=== import ptodsl bare ==="
-          (timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK', ptodsl.__file__)" 2>&1 | tail -5) || true
-          echo "=== import ptodsl via src tree PYTHONPATH ==="
-          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK:', ptodsl.__file__)" 2>&1 | tail -5) || true
-          echo "=== import ptoas.mlir via src tree PYTHONPATH ==="
-          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ptoas.mlir.ir OK')" 2>&1 | tail -5) || true
-          echo "=== manual daemon ==="
-          (PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock > /tmp/diag_daemon.log 2>&1) || true &
+          echo "PYBIN=$(which python3)"
+          python3 --version
+          echo "=== site-packages listing ==="
+          ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ > /tmp/diag1.log 2>&1 || true
+          cat /tmp/diag1.log
+          echo "::error::SITEPKG $(head -c 1500 /tmp/diag1.log | tr '\n' '|')"
+          exit 0
+
+      - name: Diagnose 2 - ptodsl imports
+        run: |
+          set -x
+          cd /tmp
+          echo "=== bare import (cwd=/tmp) ==="
+          OUT1=$(timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT1"
+          echo "=== src-tree PYTHONPATH import ==="
+          OUT2=$(PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT2"
+          echo "=== ptoas.mlir import via src tree ==="
+          OUT3=$(PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 120 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK')" 2>&1 | tail -5); echo "$OUT3"
+          echo "=== ptodsl from venv wheel-install root ==="
+          VENVSP=$(ls -d /tmp/ptoas-wheel-test.*/venv/lib/python3.11/site-packages 2>/dev/null | head -1); echo "VENVSP=$VENVSP"
+          if [ -n "$VENVSP" ]; then
+            OUT4=$(PYTHONPATH="$VENVSP" timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT4"
+            OUT5=$(PYTHONPATH="$VENVSP" timeout 120 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK via venv site-packages')" 2>&1 | tail -5); echo "$OUT5"
+          fi
+          { echo "--- bare:"; echo "$OUT1"; echo "--- src:"; echo "$OUT2"; echo "--- src ir:"; echo "$OUT3"; echo "--- venvsp: $VENVSP"; echo "$OUT4"; echo "--- venv ir:"; echo "$OUT5"; } > /tmp/diag2.log
+          cat /tmp/diag2.log
+          echo "::error::IMPORTS $(cat /tmp/diag2.log | tr '\n' '|' | head -c 1500)"
+          exit 0
+
+      - name: Diagnose 3 - manual daemon start
+        run: |
+          set -x
+          cd /tmp
+          rm -f /tmp/diag_daemon.sock
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 100 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock > /tmp/diag3.log 2>&1 &
+          DPID=$!
           sleep 45
-          (ls -la /tmp/diag_daemon.sock) || echo "socket NOT created"
-          (cat /tmp/diag_daemon.log | head -30) || true
-          echo "=== workspace ptodsl tree ==="
-          (ls /__w/PTOAS/PTOAS/ptodsl/ || true) | head -10
-          (ls /__w/PTOAS/PTOAS/ptodsl/ptodsl/tilelib/serving/ || true) | head
+          if [ -S /tmp/diag_daemon.sock ]; then
+            echo "DAEMON SOCKET CREATED - OK"
+            echo "::error::DAEMON socket created successfully with src-tree PYTHONPATH"
+          else
+            echo "DAEMON SOCKET NOT CREATED"
+            echo "::error::DAEMON FAILED: $(head -c 1500 /tmp/diag3.log | tr '\n' '|')"
+          fi
+          cat /tmp/diag3.log
+          kill $DPID 2>/dev/null || true
           exit 0
 
       - name: Test wheel installation
