@@ -278,7 +278,18 @@ jobs:
           PTO_EXPECT_STATIC_LLVM=1 \
             PTO_TEST_WHEEL_PATH="$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" \
             bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh 2>&1 | tee /tmp/wheel-test.log
+          echo "TEST_EXIT_CODE=${PIPESTATUS[1]}" >> "$GITHUB_ENV"
           exit ${PIPESTATUS[1]}
+
+      - name: Write failure log to step summary
+        if: always()
+        run: |
+          {
+            echo "### wheel-test log (py${{ matrix.python }} ${{ matrix.arch }})"
+            echo '```'
+            cat /tmp/wheel-test.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload wheel-test log (always)
         if: always()
