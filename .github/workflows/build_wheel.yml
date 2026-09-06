@@ -275,6 +275,18 @@ jobs:
       - name: Test wheel installation
         run: |
           set -x
+          printf '%s\n' \
+            'import sys' \
+            'log = open("/tmp/wheel-test.log", errors="replace").read()' \
+            'lines = log.splitlines()' \
+            'err_idx = [i for i, l in enumerate(lines) if any(k in l for k in ("Error", "error", "Traceback", "FAILED", "not a supported", "exit code"))]' \
+            'if not err_idx:' \
+            '    err_idx = [max(0, len(lines) - 30)]' \
+            'start = max(0, err_idx[0] - 5)' \
+            'for n, line in enumerate(lines[start:start + 30]):' \
+            '    text = line.replace("%", "%25")[:600]' \
+            '    print(f"::error::wheel-test[{n}] {text}")' \
+            > /tmp/emit_annotations.py
           PTO_EXPECT_STATIC_LLVM=1 \
             PTO_TEST_WHEEL_PATH="$GITHUB_WORKSPACE/wheelhouse/ptoas*.whl" \
             bash $PTO_SOURCE_DIR/docker/test_wheel_imports.sh 2>&1 | tee /tmp/wheel-test.log
@@ -292,19 +304,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # Also emit the log via annotations so it is visible anonymously.
           if [ "${TEST_EXIT_CODE:-0}" != "0" ] || grep -q "Error\|error\|Traceback\|FAILED" /tmp/wheel-test.log; then
-            python3 - <<'PY'
-import os
-log = open("/tmp/wheel-test.log", errors="replace").read()
-# annotations cap ~10 per step; chunk important lines
-lines = log.splitlines()
-err_idx = [i for i, l in enumerate(lines) if any(k in l for k in ("Error", "error", "Traceback", "FAILED", "not a supported", "exit code"))]
-if not err_idx:
-    err_idx = [max(0, len(lines) - 30)]
-start = max(0, err_idx[0] - 5)
-for n, line in enumerate(lines[start:start + 30]):
-    text = line.replace("%", "%25")[:600]
-    print(f"::error::wheel-test[{n}] {text}")
-PY
+            python3 /tmp/emit_annotations.py
           fi
 
       - name: Upload wheel-test log (always)
