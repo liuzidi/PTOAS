@@ -272,6 +272,27 @@ jobs:
           export LD_LIBRARY_PATH="${LLVM_INSTALL_DIR}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           auditwheel repair --plat manylinux_2_34_${{ matrix.arch }} "$PTO_WHEEL_DIST_DIR"/ptoas*.whl -w "$PTO_WHEELHOUSE"
 
+      - name: Diagnose daemon environment
+        run: |
+          set -x
+          echo "=== active python ==="
+          which python python3; python3 --version
+          echo "=== /opt/python/cp311 site-packages ==="
+          ls /opt/python/cp311-cp311/lib/python3.11/site-packages/ | head -40
+          echo "=== baked daemon paths ==="
+          strings "$GITHUB_WORKSPACE/wheelhouse"/ptoas*.whl >/dev/null 2>&1 || true
+          mkdir -p /tmp/whlx && cd /tmp/whlx && python3 -m zipfile -e "$GITHUB_WORKSPACE"/wheelhouse/ptoas*.whl . >/dev/null 2>&1
+          strings ptoas/mlir/_mlir_libs/libPTOASCompiler.so | grep -E "/__w|/opt/python" | head -10 || true
+          echo "=== try daemon directly ==="
+          cd /tmp && timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl, sys; print('ptodsl OK', ptodsl.__file__)" 2>&1 | tail -5
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print('ptodsl OK via src tree:', ptodsl.__file__)" 2>&1 | tail -5
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ptoas.mlir.ir OK')" 2>&1 | tail -5
+          echo "=== try starting daemon manually ==="
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 90 /opt/python/cp311-cp311/bin/python3.11 -m ptodsl.tilelib.serving.daemon --socket /tmp/diag_daemon.sock 2>&1 | head -30 &
+          sleep 30
+          ls -la /tmp/diag_daemon.sock 2>&1 || echo "socket NOT created"
+          cd "$GITHUB_WORKSPACE"
+
       - name: Test wheel installation
         run: |
           set -x
