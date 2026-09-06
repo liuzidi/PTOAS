@@ -285,23 +285,26 @@ jobs:
 
       - name: Diagnose 2 - ptodsl imports
         run: |
-          set -x
+          set +e
           cd /tmp
-          echo "=== bare import (cwd=/tmp) ==="
-          OUT1=$(timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT1"
-          echo "=== src-tree PYTHONPATH import ==="
-          OUT2=$(PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT2"
-          echo "=== ptoas.mlir import via src tree ==="
-          OUT3=$(PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 120 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK')" 2>&1 | tail -5); echo "$OUT3"
-          echo "=== ptodsl from venv wheel-install root ==="
-          VENVSP=$(ls -d /tmp/ptoas-wheel-test.*/venv/lib/python3.11/site-packages 2>/dev/null | head -1); echo "VENVSP=$VENVSP"
-          if [ -n "$VENVSP" ]; then
-            OUT4=$(PYTHONPATH="$VENVSP" timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" 2>&1 | tail -3); echo "$OUT4"
-            OUT5=$(PYTHONPATH="$VENVSP" timeout 120 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK via venv site-packages')" 2>&1 | tail -5); echo "$OUT5"
-          fi
-          { echo "--- bare:"; echo "$OUT1"; echo "--- src:"; echo "$OUT2"; echo "--- src ir:"; echo "$OUT3"; echo "--- venvsp: $VENVSP"; echo "$OUT4"; echo "--- venv ir:"; echo "$OUT5"; } > /tmp/diag2.log
-          cat /tmp/diag2.log
-          echo "::error::IMPORTS $(cat /tmp/diag2.log | tr '\n' '|' | head -c 1500)"
+          LOG=/tmp/diag2.log
+          : > $LOG
+          echo "=== bare import ===" >> $LOG
+          timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== src-tree PYTHONPATH import ptodsl ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 60 /opt/python/cp311-cp311/bin/python3.11 -c "import ptodsl; print(ptodsl.__file__)" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== src-tree PYTHONPATH import ptoas.mlir.ir ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/ptodsl timeout 150 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK')" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          echo "=== build-tree staged python ===" >> $LOG
+          ls /__w/PTOAS/PTOAS/build-release/python >> $LOG 2>&1
+          echo "=== staged ptoas.mlir import ===" >> $LOG
+          PYTHONPATH=/__w/PTOAS/PTOAS/build-release/python timeout 150 /opt/python/cp311-cp311/bin/python3.11 -c "from ptoas.mlir import ir; print('ir OK via build tree')" >> $LOG 2>&1
+          echo "rc=$?" >> $LOG
+          cat $LOG
+          echo "::error::IMPORTS2 $(cat $LOG | tr '\n' '@' | head -c 2000)"
           exit 0
 
       - name: Diagnose 3 - manual daemon start
