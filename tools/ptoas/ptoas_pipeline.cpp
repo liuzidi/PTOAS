@@ -1007,6 +1007,19 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     }
   }
 
+  // M1: emit the device-side kernel_entry wrapper so simpler's scheduler can
+  // dispatch the VPTO body via the same kernel_entry(int64_t* args) ABI the
+  // EmitC route uses. Only needed for the merged-device-only output mode; the
+  // regular fatobj route keeps the <<<>>> launch ABI and does not use it.
+  std::string deviceWrapperSource;
+  if (vptoEmitMergedDeviceOnly) {
+    if (failed(pto::emitVPTODeviceWrapperSource(module, deviceWrapperSource,
+                                                llvm::errs(), cannVersion))) {
+      llvm::errs() << "Error: Failed to emit VPTO device wrapper source.\n";
+      return 1;
+    }
+  }
+
   if (failed(
           pto::lowerVPTOModuleToLLVMModules(module, options,
                                             result.vptoCubeModule,
@@ -1017,6 +1030,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.vptoDeviceWrapperSource = std::move(deviceWrapperSource);
   result.objectEmissionOptions.disableBishengVFFusion =
       enableVMI || disableBishengVFFusion;
   result.kind = PTOASCompileResultKind::VPTOObject;
@@ -1152,6 +1166,13 @@ static LogicalResult validateCompileBackendFlags(PTOBackend backend,
   }
   if (vptoSchedulerMode != VPTOSchedulerCLIMode::Off && arch != "a5") {
     llvm::errs() << "Error: --vpto-scheduler requires --pto-arch=a5.\n";
+    return failure();
+  }
+  if (vptoEmitMergedDeviceOnly && backend != PTOBackend::VPTO) {
+    llvm::errs()
+        << "Error: --vpto-emit-merged-device-only requires a VPTO-only "
+           "compile; it bypasses fatobj packaging and is incompatible with "
+           "mixed pto.backend modules.\n";
     return failure();
   }
   return success();

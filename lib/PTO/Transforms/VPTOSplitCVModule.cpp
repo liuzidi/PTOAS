@@ -323,12 +323,75 @@ static ModuleOp cloneModuleForKind(ModuleOp source, FunctionKernelKind kind,
   return cloned;
 }
 
+// PyPTO's PTO codegen emits entry kernels carrying only ``pto.kernel_kind``
+// (no explicit ``pto.entry``), while internal helpers may also carry
+// ``pto.kernel_kind`` (verifiers read it off the enclosing func).
+// ``pto.kernel_kind`` alone therefore cannot distinguish entries from
+// helpers. Helpers are identifiable structurally: they are either marked
+// ``private`` or referenced by a func.call in the same module, while the
+// entry is a public definition no other function calls (see
+// test/samples/TPushTPop/test1/kernel.pto for the canonical shape). Stamp
+// an explicit ``pto.entry`` only when exactly one such unreferenced public
+// kind-tagged definition exists, so downstream entry detection stays
+// attribute-driven instead of pattern-matching on kernel_kind.
+//
+// Callers are counted within this module's own body only (no recursive walk):
+// a nested child module is a separate compile unit whose calls must not
+// reclassify this module's top-level functions as helpers. When the module
+// body contains anything other than plain functions — nested modules
+// included — the shape is not the canonical flat PyPTO module, so we stay
+// conservative and require an explicit ``pto.entry`` instead of inferring.
+static void stampPyPTOEntryAttribute(ModuleOp module) {
+  bool hasNestedModule = false;
+  for (Operation &op : module.getBodyRegion().front()) {
+    if (isa<ModuleOp>(op)) {
+      hasNestedModule = true;
+      break;
+    }
+  }
+  if (hasNestedModule) {
+    return;
+  }
+
+  llvm::SmallDenseSet<StringRef> calledNames;
+  for (Operation &op : module.getBodyRegion().front()) {
+    auto func = dyn_cast<func::FuncOp>(op);
+    if (!func) {
+      continue;
+    }
+    func.getBody().walk([&](func::CallOp call) {
+      calledNames.insert(call.getCallee());
+    });
+  }
+  SmallVector<func::FuncOp> entryCandidates;
+  for (func::FuncOp funcOp : module.getOps<func::FuncOp>()) {
+    if (funcOp.isDeclaration() ||
+        !funcOp->hasAttr(FunctionKernelKindAttr::name) ||
+        hasExplicitPTOEntryAttr(funcOp)) {
+      continue;
+    }
+    auto visibility = funcOp->getAttrOfType<StringAttr>("sym_visibility");
+    if (visibility && visibility.getValue() == "private") {
+      continue;
+    }
+    if (calledNames.contains(funcOp.getSymName())) {
+      continue;
+    }
+    entryCandidates.push_back(funcOp);
+  }
+  if (entryCandidates.size() == 1) {
+    entryCandidates.front()->setAttr(
+        kPTOEntryAttrName, UnitAttr::get(module.getContext()));
+  }
+}
+
 static LogicalResult materializeExplicitKernelKindSections(ModuleOp module) {
   auto kindAttr = module->getAttrOfType<FunctionKernelKindAttr>(
       FunctionKernelKindAttr::name);
   if (!kindAttr) {
     return success();
   }
+  stampPyPTOEntryAttribute(module);
   if (failed(verifyNoNestedSections(module)) ||
       failed(verifyExplicitKernelKindMatchesSections(module))) {
     return failure();
@@ -359,6 +422,11 @@ static LogicalResult splitPerFuncKernelKind(ModuleOp module) {
     return success();
   }
 
+  // Same entry stamping as materializeExplicitKernelKindSections: PyPTO
+  // entries carry only ``pto.kernel_kind``; helpers are private and/or called.
+  // Stamp ``pto.entry`` on the single unreferenced public kind-tagged
+  // definition before the clone so every kind child module inherits it.
+  stampPyPTOEntryAttribute(module);
   // Collect the distinct kernel kinds requested by top-level functions.
   SmallVector<FunctionKernelKind, 2> kinds;
   for (func::FuncOp funcOp : module.getOps<func::FuncOp>()) {

@@ -1,0 +1,38 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You should not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root directory of the software repository for the full text of the License.
+
+// Regression guard for PyPTO entry stamping with nested modules present.
+// stampPyPTOEntryAttribute counts func.call callees within one module's own
+// functions only and skips modules whose body contains nested child modules
+// (they are separate compile units; their calls must not reclassify the
+// outer functions, and the mixed top-level shape is not the canonical PyPTO
+// single-kernel module). Here each kernel submodule is stamped independently:
+// the public uncalled kind-tagged kernel becomes the entry, the called
+// private helper does not.
+
+// RUN: pto-test-opt --vpto-split-cv-module %s | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @nested_shape_kernel(%arg0: !pto.ptr<f32>, %arg1: i32, %arg2: i32) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    func.call @nested_callee() : () -> ()
+    return
+  }
+  func.func private @nested_callee() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    return
+  }
+  module attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    func.func @child_unit_func() {
+      return
+    }
+  }
+}
+
+// The top-level module contains a nested child module, so no implicit
+// `pto.entry` is stamped on the top-level functions.
+// CHECK: func.func @nested_shape_kernel{{.*}}attributes {pto.kernel_kind = #pto.kernel_kind<vector>}
+// CHECK-NOT: attributes {{.*}}pto.entry

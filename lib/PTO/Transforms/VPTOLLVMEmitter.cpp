@@ -13965,6 +13965,9 @@ static LogicalResult renameKernelFunctionsForKernelKind(ModuleOp module,
   }
 
   for (func::FuncOp funcOp : module.getOps<func::FuncOp>()) {
+    // PyPTO's kernel_kind-only entries are stamped with an explicit
+    // ``pto.entry`` by vpto-split-cv-module before lowering; helpers that
+    // merely carry ``pto.kernel_kind`` must not become public ABI symbols.
     if (!pto::hasExplicitPTOEntryAttr(funcOp))
     {
       continue;
