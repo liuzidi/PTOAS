@@ -744,6 +744,36 @@ def min_128b_row_vmi_constraint(**metadata) -> bool:
     return _physical_row_vmi_constraint(128, **metadata)
 
 
+def narrow_full_row_vmi_constraint(
+    src_shape=(),
+    src_valid_shape=(),
+    dst_shape=(),
+    dst_valid_shape=(),
+    **_,
+) -> bool:
+    """Accept statically full rows below 128 bytes (sub-VL compact tails).
+
+    Row-reduce pipelines (row_sum/row_max chains) produce narrow [1, C]
+    tails such as 1x8 f32 whose rows stay under the 128-byte minimum of the
+    standard elementwise candidates. A full valid row is still required:
+    partial lanes would make the VMI mask hide the unwritten tail, and the
+    slot-padding safety argument (memory planning pads each UB slot to
+    256 bytes) only covers accesses beyond the tile's own row width.
+    """
+
+    def full(shape, valid):
+        return (
+            len(shape) == 2
+            and len(valid) == 2
+            and all(isinstance(dim, int) and dim > 0 for dim in shape)
+            and tuple(valid) == tuple(shape)
+        )
+
+    if not full(src_shape, src_valid_shape) or not full(dst_shape, dst_valid_shape):
+        return False
+    return src_shape == dst_shape
+
+
 def sinkhorn_compact_elementwise_vmi_constraint(**metadata) -> bool:
     """Accept only the static compact f32 forms used by DSv4 Sinkhorn."""
 

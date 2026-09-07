@@ -11,13 +11,24 @@ from ptodsl import pto
 import ptodsl.tilelib as tilelib
 
 
-def _valid_column_expand(src_valid_shape=(), dst_valid_shape=(), **_):
-    return (
+def _valid_column_expand(src_valid_shape=(), dst_valid_shape=(), src_shape=(), dst_shape=(), **_):
+    # The A5 TCOLEXPAND reference iterates the destination's valid columns and
+    # reads the source row physically at those offsets, so a source whose
+    # valid prefix is narrower than the destination's is legal as long as the
+    # source's physical row covers the full destination width (the trailing
+    # lanes read the source tile's own padding, matching the EmitC path).
+    if not (
         len(src_valid_shape) == 2
         and len(dst_valid_shape) == 2
-        and src_valid_shape[0] >= 1
-        and src_valid_shape[1] == dst_valid_shape[1]
-    )
+        and len(src_shape) == 2
+        and len(dst_shape) == 2
+    ):
+        return False
+    if not (src_valid_shape[0] >= 1 and src_valid_shape[1] >= 1):
+        return False
+    if not src_valid_shape[1] <= dst_valid_shape[1]:
+        return False
+    return src_shape[1] >= dst_valid_shape[1]
 
 
 def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_layouts, **_):

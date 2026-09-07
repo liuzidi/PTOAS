@@ -19673,6 +19673,47 @@ LogicalResult ReserveBufferOp::verify() {
   return success();
 }
 
+// Parse-time backend hint: the driver sets this before parsing the input
+// module so op verifiers that relax cross-module peer checks for the VPTO
+// single-kernel-per-file shape can do so before the module attribute is
+// stamped. Defaults to empty (no backend known), which keeps verifiers
+// strict.
+static std::string gPTOParseTimeBackendHint;
+void mlir::pto::setPTOParseTimeBackendHint(llvm::StringRef backend) {
+  gPTOParseTimeBackendHint = backend.str();
+}
+StringRef mlir::pto::getPTOParseTimeBackendHint() {
+  return gPTOParseTimeBackendHint;
+}
+
+bool mlir::pto::isSingleKernelVptoUnit(Operation *op) {
+  // The merged-device VPTO flow (PyPTO) compiles each kernel as its own
+  // compilation unit: the file holds exactly one authored func.func and the
+  // peer that owns the imported reserved buffer lives in a different unit.
+  // A file with more than one authored function can always resolve peers
+  // in-file, so unresolved peer_func symbols there stay a hard error.
+  // Compiler-synthesized private helpers (e.g. the VPTO emitter's
+  // aivscope_dummy declaration) are not authored kernels and don't count.
+  auto topModule = op->getParentOfType<ModuleOp>();
+  if (!topModule) {
+    return false;
+  }
+  Operation *root = topModule->getParentOp() ? topModule->getParentOp() : op;
+  while (root->getParentOp() != nullptr) {
+    root = root->getParentOp();
+  }
+  unsigned funcCount = 0;
+  root->walk([&](func::FuncOp funcOp) {
+    auto visibility = funcOp->getAttrOfType<StringAttr>("sym_visibility");
+    if (visibility && visibility.getValue() == "private") {
+      return WalkResult::advance();
+    }
+    ++funcCount;
+    return WalkResult::advance();
+  });
+  return funcCount == 1;
+}
+
 LogicalResult ImportReservedBufferOp::verify() {
   auto funcOp = getOperation()->getParentOfType<func::FuncOp>();
   if (!funcOp) {
@@ -19681,6 +19722,26 @@ LogicalResult ImportReservedBufferOp::verify() {
 
   auto peerFunc = lookupPeerFuncAcrossContainer(getOperation(), getPeerFuncAttr());
   if (!peerFunc) {
+    // The merged-device VPTO flow compiles each kernel to its own module
+    // (one entry per device ELF), so the peer function that owns the
+    // reserved buffer lives in another compilation unit and cannot be
+    // verified here. Only the VPTO backend opts into this split shape;
+    // the module attribute covers pass-time re-verification and the
+    // parse-time check consults the driver-provided backend hint. The
+    // relaxation is additionally gated on the single-kernel-per-file
+    // shape: a unit with multiple functions can always resolve peers
+    // in-file and must keep rejecting bad peer_func symbols.
+    auto isVPTOBackend = [&]() {
+      if (auto module = getOperation()->getParentOfType<ModuleOp>()) {
+        if (auto backend = module->getAttrOfType<StringAttr>("pto.backend")) {
+          return backend.getValue() == "vpto";
+        }
+      }
+      return getPTOParseTimeBackendHint() == "vpto";
+    }();
+    if (isVPTOBackend && isSingleKernelVptoUnit(getOperation())) {
+      return success();
+    }
     return emitOpError("expects 'peer_func' to reference an existing func.func");
   }
 

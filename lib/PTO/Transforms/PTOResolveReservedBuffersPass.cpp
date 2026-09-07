@@ -189,6 +189,24 @@ static LogicalResult collectPeerAwareInit(InitOpT initOp,
     }
     auto key = getPipePeerKey(addr, info.funcOp);
     if (!key) {
+      // Merged-device VPTO compiles each kernel to its own module, so an
+      // import_reserved_buffer may reference a peer function that lives in
+      // another compilation unit. The peer owner cannot be resolved, but the
+      // (peer_func, name) pair is still a well-defined logical pipe key:
+      // record it under a synthetic owner so the init participates in flag
+      // allocation instead of being rejected outright. Only the
+      // single-kernel-per-file shape qualifies; multi-function units must
+      // resolve peers in-file.
+      if (auto importOp = addr.getDefiningOp<ImportReservedBufferOp>()) {
+        if (!isSingleKernelVptoUnit(importOp.getOperation())) {
+          return false;
+        }
+        PipePeerKey crossKey{
+            importOp.getPeerFuncAttr().getValue().str(),
+            importOp.getName().str(), effectiveDirMask};
+        keyedInits[crossKey].push_back(info.op);
+        return true;
+      }
       return false;
     }
     key->dirMask = effectiveDirMask;
@@ -252,6 +270,71 @@ static bool samePipeInitSignature(const PipeInitInfo &lhs,
                   rhs.globalOnly);
 }
 
+// Whether every init op in an incomplete component belongs to a pipe whose
+// peer side lives in another compilation unit. In the merged-device VPTO
+// flow PyPTO compiles each kernel to its own PTO module, so a pipe's
+// producer and consumer inits never meet in one module. The peer-pair
+// completeness check exists to keep same-module multi-kernel modules
+// consistent (both sides must agree on the shared fixpipe flag_base); with
+// the peer provably absent from this module there is nothing to pair with
+// and per-component automatic flag allocation is safe.
+static bool allOpsAreCrossModulePipe(
+    ArrayRef<Operation *> ops,
+    const llvm::DenseMap<Operation *, const PipeInitInfo *> &infoByOp) {
+  for (Operation *op : ops) {
+    auto it = infoByOp.find(op);
+    if (it == infoByOp.end()) {
+      return false;
+    }
+    const PipeInitInfo &info = *it->second;
+
+    Value localAddr;
+    if (auto l2l = dyn_cast<InitializeL2LPipeOp>(op)) {
+      localAddr = l2l.getLocalAddr();
+    } else if (auto l2g2l = dyn_cast<InitializeL2G2LPipeOp>(op)) {
+      localAddr = l2g2l.getLocalAddr();
+    }
+    if (!localAddr) {
+      return false;
+    }
+    if (auto reserveOp = localAddr.getDefiningOp<ReserveBufferOp>()) {
+      // Reserve side: the peer exists in this module only if some
+      // import_reserved_buffer points back at this reserve from the
+      // peer function.
+      ModuleOp module = info.funcOp->getParentOfType<ModuleOp>();
+      if (!module) {
+        return false;
+      }
+      bool peerPresent = false;
+      module->walk([&](ImportReservedBufferOp importOp) {
+        auto peerFunc = lookupPeerFuncAcrossContainer(
+            importOp.getOperation(), importOp.getPeerFuncAttr());
+        if (peerFunc == info.funcOp &&
+            importOp.getName() == reserveOp.getName()) {
+          peerPresent = true;
+        }
+      });
+      if (peerPresent) {
+        return false;
+      }
+      continue;
+    }
+    if (auto importOp = localAddr.getDefiningOp<ImportReservedBufferOp>()) {
+      // Import side: the peer is the reserve owner. getPipePeerKey already
+      // resolves it through the symbol table; a resolution failure means
+      // the owner is not in this module.
+      auto peerFunc = lookupPeerFuncAcrossContainer(
+          importOp.getOperation(), importOp.getPeerFuncAttr());
+      if (peerFunc) {
+        return false;
+      }
+      continue;
+    }
+    return false;
+  }
+  return !ops.empty();
+}
+
 static FailureOr<SmallVector<PipeComponent>>
 buildPeerAwareComponents(const SmallVectorImpl<PipeInitInfo> &initInfos,
                          const PipeInitGroups &keyedInits) {
@@ -296,7 +379,8 @@ buildPeerAwareComponents(const SmallVectorImpl<PipeInitInfo> &initInfos,
       }
     }
 
-    if (!rootInfo.globalOnly && component.ops.size() != kPeerPipeInitOpCount) {
+    if (!rootInfo.globalOnly && component.ops.size() != kPeerPipeInitOpCount &&
+        !allOpsAreCrossModulePipe(component.ops, infoByOp)) {
       return rootInfo.op->emitOpError(
           "requires a complete compatible peer init pair when local_addr comes "
           "from pto.reserve_buffer or pto.import_reserved_buffer");
@@ -334,7 +418,8 @@ buildPeerAwareComponents(const SmallVectorImpl<PipeInitInfo> &initInfos,
       }
     }
     if (!component.globalOnly &&
-        component.participants.size() != kPeerPipeParticipantCount) {
+        component.participants.size() != kPeerPipeParticipantCount &&
+        !allOpsAreCrossModulePipe(component.ops, infoByOp)) {
       return component.ops.front()->emitOpError(
           "requires a complete compatible peer init pair when local_addr comes "
           "from pto.reserve_buffer or pto.import_reserved_buffer");
@@ -527,6 +612,25 @@ struct PTOResolveReservedBuffersPass
             lookupPeerFuncAcrossContainer(importOp.getOperation(),
                                           importOp.getPeerFuncAttr());
         if (!peerFunc) {
+          // Merged-device VPTO compiles each kernel to its own module, so
+          // the peer reserve owner is in another compilation unit. The
+          // import is a symbolic reference to the cross-module fixpipe slot
+          // base, which both sides plan identically from the shared pipe
+          // metadata; materialize the constant the same way the peer side's
+          // reserve_buffer does. Without a peer there is nothing to
+          // cross-check, so the constant comes from the local pipe contract.
+          // Only the single-kernel-per-file shape qualifies; multi-function
+          // units must resolve peers in-file.
+          auto backendAttr = moduleOp->getAttrOfType<StringAttr>("pto.backend");
+          if (backendAttr && backendAttr.getValue() == "vpto" &&
+              isSingleKernelVptoUnit(importOp.getOperation())) {
+            builder.setInsertionPoint(importOp);
+            Value cst = builder.create<arith::ConstantIntOp>(
+                importOp.getLoc(), 0, 32);
+            importOp.getAddr().replaceAllUsesWith(cst);
+            eraseOps.push_back(importOp.getOperation());
+            continue;
+          }
           return importOp.emitOpError(
               "expects 'peer_func' to reference an existing func.func");
         }

@@ -229,6 +229,11 @@ loadInputModule(std::unique_ptr<llvm::MemoryBuffer> inputBuffer,
                 std::string &arch) {
   llvm::StringRef buffer = inputBuffer->getBuffer();
 
+  // Parse-time op verifiers consult this hint to relax cross-module peer
+  // checks for the VPTO single-kernel-per-file shape; the module attribute
+  // only appears after parsing.
+  mlir::pto::setPTOParseTimeBackendHint(mlir::pto::ptoBackend);
+
   OwningOpRef<ModuleOp> module;
   if (isPTOBCBuffer(buffer)) {
     arch = normalizePTOASArch(mlir::pto::ptoTargetArch);

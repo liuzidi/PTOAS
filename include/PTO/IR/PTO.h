@@ -298,6 +298,18 @@ func::FuncOp lookupPeerFuncAcrossContainer(Operation *op,
 /// Find one reserve_buffer by logical name inside a function.
 ReserveBufferOp findReserveBufferByName(func::FuncOp funcOp, StringRef name);
 
+/// Parse-time backend hint ("" when unset). The driver installs the
+/// requested backend before parsing so verifiers that relax cross-module
+/// peer checks for the VPTO single-kernel-per-file shape can consult it
+/// before the module attribute is stamped.
+void setPTOParseTimeBackendHint(StringRef backend);
+StringRef getPTOParseTimeBackendHint();
+
+/// True when \p op sits in a compilation unit whose whole tree contains
+/// exactly one func.func — the merged-device VPTO one-kernel-per-file
+/// shape where import_reserved_buffer peers live in another unit.
+bool isSingleKernelVptoUnit(Operation *op);
+
 } // namespace pto
 } // namespace mlir
 

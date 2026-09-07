@@ -382,6 +382,34 @@ static void stampPyPTOEntryAttribute(ModuleOp module) {
   if (entryCandidates.size() == 1) {
     entryCandidates.front()->setAttr(
         kPTOEntryAttrName, UnitAttr::get(module.getContext()));
+    return;
+  }
+  if (entryCandidates.empty()) {
+    return;
+  }
+  // PyPTO's merged-device grouping emits one PTO module per fused AIC+AIV
+  // group where the AIV entry and its AIC peer (pulled in for
+  // import_reserved_buffer resolution) are both public, uncalled,
+  // kind-tagged definitions. The clone below splits them into per-kind
+  // child modules, so stamping every candidate is safe when each kernel
+  // kind contributes at most one candidate — exactly the PyPTO peer shape.
+  // A kind with several candidates still means kind-tagged helpers and
+  // keeps the conservative single-candidate behavior.
+  llvm::SmallDenseSet<FunctionKernelKind> candidateKinds;
+  bool oneKindPerCandidate = true;
+  for (func::FuncOp funcOp : entryCandidates) {
+    auto kindAttr = funcOp->getAttrOfType<FunctionKernelKindAttr>(
+        FunctionKernelKindAttr::name);
+    if (!kindAttr || !candidateKinds.insert(kindAttr.getKernelKind()).second) {
+      oneKindPerCandidate = false;
+      break;
+    }
+  }
+  if (oneKindPerCandidate) {
+    for (func::FuncOp funcOp : entryCandidates) {
+      funcOp->setAttr(kPTOEntryAttrName,
+                      UnitAttr::get(module.getContext()));
+    }
   }
 }
 

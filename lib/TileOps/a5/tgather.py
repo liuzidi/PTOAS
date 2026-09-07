@@ -15,12 +15,12 @@ from ._common import element_store_dist
 from ._row_arg import _scalar_literal
 
 
-def _axis_is_row(axis_value, **_):
-    return axis_value == "row"
+def _axis_is_row(axis="row", **_):
+    return axis == "row"
 
 
-def _axis_is_col(axis_value, **_):
-    return axis_value == "col"
+def _axis_is_col(axis="col", **_):
+    return axis == "col"
 
 
 def _no_mask_pattern(mask_pattern=True):
@@ -41,6 +41,24 @@ def gather_dtype_signatures(dtypes=NUMERIC_DTYPES):
     for dtype in dtypes:
         for dtype_indices in ('i16', 'ui16', "i32", "ui32"):
             res.append((dtype, dtype, dtype_indices))
+    return res
+
+
+def gather_tmp_dtype_signatures(dtypes=NUMERIC_DTYPES):
+    # PyPTO's A5 flat-index gather emits a 4-operand index form whose tmp
+    # workspace is not read by the A5 vgather2 sequence. The op verifier
+    # couples the workspace to the indices dtype (same element type), and
+    # the index width follows the data width exactly like the 3-operand
+    # template (4-byte data -> i32, 2-byte data -> i16).
+    dtype_index = {
+        "f32": "i32", "i32": "i32", "ui32": "i32",
+        "f16": "i16", "bf16": "i16", "i16": "i16", "ui16": "i16",
+        "i8": "i16", "ui8": "i16",
+    }
+    res = []
+    for dtype in dtypes:
+        dtype_indices = dtype_index[dtype]
+        res.append((dtype, dtype, dtype_indices, dtype_indices))
     return res
 
 
@@ -101,7 +119,83 @@ def template_tgather(
                 pto.vsts(dst_reg, dst[row, col:], mask)
 
 
+@tilelib.tile_template(
+    op="pto.tgather",
+    target="a5",
+    name="template_tgather_tmp",
+    dtypes=gather_tmp_dtype_signatures(),
+    iteration_axis="none",
+    op_engine="vector",
+    op_class="other",
+    layouts=("row_major",),
+    loop_depth=2,
+    is_post_update=False,
+    constraints=(_no_mask_pattern, _dst_shape_le_indices_shape),
+    id=4,
+)
+def template_tgather_tmp(
+    src: pto.Tile,
+    dst: pto.Tile,
+    indices: pto.Tile,
+    tmp: pto.Tile):
+    # PyPTO's A5 flat-index gather path emits ins(src, indices, tmp) where
+    # the tmp workspace only feeds the pto-isa C++ kernel; the vgather2
+    # sequence below never reads it.
+    _ = tmp
+    dtype = dst.element_type
+    dtype_indices = indices.element_type
+    elem_bytes = pto.bytewidth(dtype)
+    elem_bytes_s1 = pto.bytewidth(dtype_indices)
+    lanes = pto.elements_per_vreg(dtype_indices)
+    valid_rows, valid_cols = dst.valid_shape
+    src_ptr = src.as_ptr()
+    if pto.const_expr(elem_bytes == 2 and elem_bytes_s1 == 4):
+        indices_type = pto.ui32
+        mask_elem = indices_type
+    elif pto.const_expr(elem_bytes == 1):
+        indices_type = pto.ui16
+        lanes = pto.elements_per_vreg(dtype) >> 1
+        result_elem = pto.ui16 if pto.const_expr(str(dtype) in ("ui8",)) else pto.i16
+        result_ty = pto.vreg_type(lanes, result_elem)
+        mask_elem = result_elem
+    elif pto.const_expr(elem_bytes == 4):
+        indices_type = pto.ui32
+        mask_elem = indices_type
+    else:
+        indices_type = pto.ui16
+        mask_elem = indices_type
+    for row in range(0, valid_rows, 1):
+        remained = valid_cols
+        for col in range(0, valid_cols, lanes):
+            indices_reg = pto.vlds(indices[row, col:])
+            mask, remained = pto.make_mask(mask_elem, remained)
+            if pto.const_expr(elem_bytes == 2 and elem_bytes_s1 == 4):
+                dst_reg = pto.vgather2_bc(src_ptr, pto.vbitcast(indices_reg, indices_type), mask)
+            elif pto.const_expr(elem_bytes == 1):
+                dst_reg = pto.vgather2(src_ptr, pto.vbitcast(indices_reg, indices_type), mask, result_vreg_type=result_ty)
+            else:
+                dst_reg = pto.vgather2(src_ptr, pto.vbitcast(indices_reg, indices_type), mask)
+            if pto.const_expr(elem_bytes == 1):
+                pto.vsts(dst_reg, dst[row, col:], mask, dist=pto.VStoreDist.PK_B16)
+            else:
+                pto.vsts(dst_reg, dst[row, col:], mask)
+
+
 _GATHER_MASK_DTYPES = [(dtype, dtype) for dtype in NUMERIC_DTYPES]
+
+# Cross-dtype mask-pattern signatures: PyPTO decodes packed sort keys by
+# gathering with output_dtype != src.dtype (e.g. FP32 sort32 key bits read
+# back as INT32 indices). The hardware performs a bit reinterpretation, so
+# only equal-storage-width combinations are legal.
+_GATHER_MASK_CROSS_DTYPES = [
+    (src_dtype, dst_dtype)
+    for src_dtype in ("f16", "i16", "ui16")
+    for dst_dtype in ("i16", "ui16", "f16")
+] + [
+    (src_dtype, dst_dtype)
+    for src_dtype in ("f32", "i32", "ui32")
+    for dst_dtype in ("i32", "ui32", "f32")
+]
 
 
 _MASK_PATTERN_TO_INTERLEAVE = {
@@ -129,7 +223,7 @@ _MASK_PATTERN_TO_STRIDE = {
     op="pto.tgather",
     target="a5",
     name="template_tgather_mask_row",
-    dtypes=_GATHER_MASK_DTYPES,
+    dtypes=_GATHER_MASK_DTYPES + _GATHER_MASK_CROSS_DTYPES,
     iteration_axis="none",
     op_engine="vector",
     op_class="other",
@@ -144,26 +238,36 @@ def template_tgather_mask_row(src: pto.Tile, dst: pto.Tile):
     mask_pattern = pto.get_op_attr("mask_pattern", "P1111")
     interleave_args = _MASK_PATTERN_TO_INTERLEAVE[mask_pattern]
     dtype = dst.dtype
+    src_dtype = src.dtype
     valid_rows, valid_cols = dst.valid_shape
     lanes = pto.elements_per_vreg(dtype)
+    # Cross-dtype mask gathers reinterpret the gathered lanes as the
+    # destination dtype (e.g. FP32 sort keys read back as INT32 indices);
+    # the combinations are storage-width-equal so the vreg bit pattern is
+    # preserved verbatim.
+    reinterpret = not pto.const_expr(str(src_dtype) == str(dtype))
     times = 1 << len(interleave_args)
+
+    def _emit(dst_reg):
+        if reinterpret:
+            dst_reg = pto.vbitcast(dst_reg, dtype)
+        mask, remained[0] = pto.make_mask(dtype, remained[0])
+        pto.vsts(dst_reg, dst[row, col:], mask)
+
     for row in range(0, valid_rows, 1):
-        remained = valid_cols
+        remained = [valid_cols]
         for col in range(0, valid_cols, lanes):
             if not interleave_args:
                 src_reg = pto.vlds(src[row, col:])
-                mask, remained = pto.make_mask(dtype, remained)
-                pto.vsts(src_reg, dst[row, col:], mask)
+                _emit(src_reg)
             elif len(interleave_args) == 1:
                 reg0 = pto.vlds(src[row, col * times:])
                 reg1 = pto.vlds(src[row, col * times + lanes:])
                 res0, res1 = pto.vdintlv(reg0, reg1)
                 if interleave_args[0]:
-                    dst_reg = res0
+                    _emit(res0)
                 else:
-                    dst_reg = res1
-                mask, remained = pto.make_mask(dtype, remained)
-                pto.vsts(dst_reg, dst[row, col:], mask)
+                    _emit(res1)
             else:
                 reg0 = pto.vlds(src[row, col * times:])
                 reg1 = pto.vlds(src[row, col * times + lanes:])
@@ -179,11 +283,9 @@ def template_tgather_mask_row(src: pto.Tile, dst: pto.Tile):
                     tmp1 = r1_b
                 final_a, final_b = pto.vdintlv(tmp0, tmp1)
                 if interleave_args[0]:
-                    dst_reg = final_a
+                    _emit(final_a)
                 else:
-                    dst_reg = final_b
-                mask, remained = pto.make_mask(dtype, remained)
-                pto.vsts(dst_reg, dst[row, col:], mask)
+                    _emit(final_b)
 
 
 @tilelib.tile_template(

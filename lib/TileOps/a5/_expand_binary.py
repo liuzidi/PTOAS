@@ -290,13 +290,18 @@ def _emit_column_expand_body(src0, src1, dst, vector_op):
 
 
 def _valid_row_expand_binary(src0_valid_shape=(), src1_valid_shape=(), dst_valid_shape=(), **_):
+    # src1 supplies one broadcast scalar per destination row. The A5
+    # TROWEXPAND* references iterate the destination's valid rows and read
+    # src1 at those row offsets, so a src1 tile with more valid rows than
+    # the destination (e.g. a full [8, 1] col-major scale vector feeding a
+    # partially valid [8, C] tile) is still a legal row prefix.
     return (
         len(src0_valid_shape) == 2
         and len(src1_valid_shape) == 2
         and len(dst_valid_shape) == 2
         and _known_eq(src0_valid_shape[0], dst_valid_shape[0])
         and _known_eq(src0_valid_shape[1], dst_valid_shape[1])
-        and _known_eq(src1_valid_shape[0], dst_valid_shape[0])
+        and _known_ge(src1_valid_shape[0], dst_valid_shape[0])
         and _known_ge(src1_valid_shape[1], 1)
     )
 
