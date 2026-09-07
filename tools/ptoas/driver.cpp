@@ -1181,7 +1181,9 @@ static LogicalResult emitVPTOLLVMFatobj(
           jobResult.vptoVectorModule.module.get(), stubSource,
           outputPath, moduleId, *toolchain, context.getTempFiles(),
           context.getVFSIMTSizeFixMode(), llvm::errs(),
-          jobResult.objectEmissionOptions))) {
+          jobResult.objectEmissionOptions,
+          jobResult.vptoDeviceWrapperSource,
+          mlir::pto::vptoEmitMergedDeviceOnly))) {
     return failure();
   }
   return success();
@@ -1345,6 +1347,15 @@ static LogicalResult buildBackendInfo(ModuleOp module, bool cliBackendSpecified,
         !mlir::pto::emitMlirIR && !mlir::pto::emitVPTO &&
         !mlir::pto::emitVPTOLLVMDialect;
     return success();
+  }
+
+  if (!backendInfo.singleBackend &&
+      mlir::pto::vptoEmitMergedDeviceOnly) {
+    llvm::errs() << "Error: --vpto-emit-merged-device-only is not supported "
+                    "in mixed pto.backend fatobj mode; it skips host-stub "
+                    "packaging and would produce non-fatobj intermediates "
+                    "for the mixed link.\n";
+    return failure();
   }
 
   if (mlir::pto::emitMlirIR || mlir::pto::emitVPTO ||

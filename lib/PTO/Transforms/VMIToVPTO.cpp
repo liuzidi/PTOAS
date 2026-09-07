@@ -11111,6 +11111,7 @@ struct OneToNVMIGroupReduceOpPattern : OneToNOpConversionPattern<OpTy> {
 private:
   FailureOr<VRegType> getRowResultType(VRegType sourceType,
                                        VRegType resultType) const {
+    (void)sourceType; // only consumed by the AddI specialization below
     if constexpr (std::is_same_v<OpTy, VMIGroupReduceAddIOp>)
       return getVcaddResultType(sourceType);
     return resultType;

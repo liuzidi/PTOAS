@@ -877,12 +877,29 @@ static void appendA5VPTOPostLoweringFusionPipeline(OpPassManager &kernelModulePM
   kernelModulePM.addPass(mlir::createCSEPass());
 }
 
+// Prefix the wrapper-derived package root (PTOAS_PYTHON_PACKAGE_ROOT, set by
+// ptoas/_cli.py from the active _core location) ahead of the baked-in
+// source-tree PYTHONPATH. ptodsl's imports need ptoas.mlir, which only exists
+// in the staged/installed package tree — <source>/ptodsl/ptoas carries only
+// the CLI stubs. Without this, every daemon/helper subprocess fails to import
+// ptoas.mlir in installed/wheel layouts.
+static std::string resolveTileLibPkgPath() {
+  std::string packagePath = tileLibPackagePath;
+  if (tileLibBackend == "ptodsl") {
+    if (const char *runtimeRoot = ::getenv("PTOAS_PYTHON_PACKAGE_ROOT");
+        runtimeRoot && runtimeRoot[0] != '\0') {
+      packagePath = std::string(runtimeRoot) + ":" + packagePath;
+    }
+  }
+  return packagePath;
+}
+
 static pto::ExpandTileOpOptions buildExpandTileOpOptions() {
   pto::ExpandTileOpOptions options;
   options.pythonExe = tileLibPythonExe;
   options.daemonSocketPath = daemonSocketPath;
   options.tileLibBackend = tileLibBackend;
-  options.tileLibPkgPath = tileLibPackagePath;
+  options.tileLibPkgPath = resolveTileLibPkgPath();
   options.daemonHelperModule = tileLibBackend == "ptodsl"
                                    ? "ptodsl.tilelib.serving.helper"
                                    : "tilelang_dsl.daemon_helper";
@@ -894,7 +911,7 @@ buildInsertTemplateAttributesOptions() {
   pto::InsertTemplateAttributesOptions options;
   options.pythonExe = tileLibPythonExe;
   options.daemonSocketPath = daemonSocketPath;
-  options.tileLibPkgPath = tileLibPackagePath;
+  options.tileLibPkgPath = resolveTileLibPkgPath();
   options.daemonHelperModule = "ptodsl.tilelib.serving.helper";
   return options;
 }
@@ -914,7 +931,7 @@ static LogicalResult ensureTileLibDaemon(bool hasTileOpsToExpand) {
   const std::string daemonModule = usePTODSL
                                        ? "ptodsl.tilelib.serving.daemon"
                                        : "tilelang_dsl.daemon";
-  std::string packagePath = tileLibPackagePath;
+  std::string packagePath = resolveTileLibPkgPath();
   if (usePTODSL) {
     packagePath += ":" PTOAS_DEFAULT_TILEOPS_PKG_PATH;
   }
@@ -1007,6 +1024,19 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
     }
   }
 
+  // M1: emit the device-side kernel_entry wrapper so simpler's scheduler can
+  // dispatch the VPTO body via the same kernel_entry(int64_t* args) ABI the
+  // EmitC route uses. Only needed for the merged-device-only output mode; the
+  // regular fatobj route keeps the <<<>>> launch ABI and does not use it.
+  std::string deviceWrapperSource;
+  if (vptoEmitMergedDeviceOnly) {
+    if (failed(pto::emitVPTODeviceWrapperSource(module, deviceWrapperSource,
+                                                llvm::errs(), cannVersion))) {
+      llvm::errs() << "Error: Failed to emit VPTO device wrapper source.\n";
+      return 1;
+    }
+  }
+
   if (failed(
           pto::lowerVPTOModuleToLLVMModules(module, options,
                                             result.vptoCubeModule,
@@ -1017,6 +1047,7 @@ static int emitVPTOBackendResult(ModuleOp module, PTOASCompileResult &result,
   }
 
   result.vptoStubSource = std::move(stubSource);
+  result.vptoDeviceWrapperSource = std::move(deviceWrapperSource);
   result.objectEmissionOptions.disableBishengVFFusion =
       enableVMI || disableBishengVFFusion;
   result.kind = PTOASCompileResultKind::VPTOObject;
@@ -1152,6 +1183,13 @@ static LogicalResult validateCompileBackendFlags(PTOBackend backend,
   }
   if (vptoSchedulerMode != VPTOSchedulerCLIMode::Off && arch != "a5") {
     llvm::errs() << "Error: --vpto-scheduler requires --pto-arch=a5.\n";
+    return failure();
+  }
+  if (vptoEmitMergedDeviceOnly && backend != PTOBackend::VPTO) {
+    llvm::errs()
+        << "Error: --vpto-emit-merged-device-only requires a VPTO-only "
+           "compile; it bypasses fatobj packaging and is incompatible with "
+           "mixed pto.backend modules.\n";
     return failure();
   }
   return success();

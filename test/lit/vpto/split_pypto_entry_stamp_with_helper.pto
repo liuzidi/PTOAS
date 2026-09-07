@@ -1,0 +1,33 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You should not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root directory of the software repository for the full text of the License.
+
+// Regression guard for PyPTO entry stamping: a module with one public
+// kernel_kind entry plus a private kernel_kind helper (the canonical PyPTO
+// shape) gets `pto.entry` stamped on the entry only. The helper is private
+// and called, so it must stay a non-entry; and the entry must be stamped so
+// host stub / device wrapper emission can find it.
+
+// RUN: ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto %s -o - 2>/dev/null | FileCheck %s
+
+module attributes {pto.target_arch = "a5"} {
+  func.func @pypto_entry_kernel(%arg0: !pto.ptr<f32>, %__pypto_spmd_block_idx: i32, %__pypto_spmd_block_num: i32) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    func.call @pypto_kind_helper() : () -> ()
+    %c0_i64 = arith.constant 0 : i64
+    %cast = pto.castptr %c0_i64 {pto.tile_shape = array<i64: 16, 16>} : i64 -> !pto.ptr<f32, ub>
+    return
+  }
+  func.func private @pypto_kind_helper() attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+    return
+  }
+}
+
+// CHECK: func.func @pypto_entry_kernel{{.*}}attributes {{{.*}}pto.entry{{.*}}pto.kernel_kind = #pto.kernel_kind<vector>
+// The inliner may erase the (now-empty) private helper after the split; when
+// it survives, it must never carry the stamped entry attribute.
+// CHECK-NOT: attributes {{{.*}}pto.entry{{.*}}pto.kernel_kind = #pto.kernel_kind<vector>{{.*}}func.func private @pypto_kind_helper
+// CHECK-NOT: func.func private @pypto_kind_helper{{.*}}pto.entry

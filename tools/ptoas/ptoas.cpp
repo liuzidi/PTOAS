@@ -392,6 +392,18 @@ llvm::cl::opt<bool> mlir::pto::emitVPTOLLVMDialect(
     llvm::cl::desc("Write translated VPTO LLVM IR to -o"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> mlir::pto::vptoEmitMergedDeviceOnly(
+    "vpto-emit-merged-device-only",
+    llvm::cl::desc("Emit the merged device ELF directly to -o (no fatobj "
+                   "outer packaging); a device-side kernel_entry wrapper is "
+                   "merged in so simpler can consume it via "
+                   "extract_text_section + CoreCallable.build. Requires "
+                   "exactly one PTO entry per kernel-kind ELF (the PyPTO "
+                   "single-kernel-per-file shape); multi-entry modules are "
+                   "rejected — split them per kernel kind or use the "
+                   "regular fatobj route"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> vptoPrintIR(
     "vpto-print-ir",
     llvm::cl::desc("Print post-pass VPTO backend IR to stderr"),
