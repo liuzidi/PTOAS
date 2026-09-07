@@ -811,10 +811,13 @@ def PTOUnrollLoops : Pass<"pto-unroll-loops", "func::FuncOp"> {
       loops with a statically known positive step are unrolled; a no-op
       factor (1), a dynamic step, or a factor above `max-unroll-factor`
       keeps the loop and drops the hint with a remark.
+    - `{pto.vfsim.unroll_factor = N}`: a factor selected by VfSimulator. It is
+      validated and consumed through its own cost-model path, which shares only
+      the native `loopUnrollByFactor` implementation with the user hint path.
 
     Malformed hints are hard errors: an unknown `pto.unroll` value, both
-    attributes on one loop, or an out-of-contract factor (not a signless
-    i32, or non-positive).
+    user attributes on one loop, a VfSim factor combined with a user hint, or
+    an out-of-contract factor (not a signless i32, or non-positive).
 
     The annotation is opt-in: loops without an attribute are left unchanged
     regardless of trip count.
@@ -1551,7 +1554,7 @@ def PTOVexpdifFusion : Pass<"pto-vexpdif-fusion", "func::FuncOp"> {
 def PTOUnrollAfterLoopFusion
     : Pass<"pto-unroll-after-loop-fusion", "func::FuncOp"> {
   let summary = "Partial-unroll the innermost scf.for inside pto.fusion_region "
-                "after PTOLowLevelLoopFusion (divisible trip count only)";
+                "after PTOLowLevelLoopFusion";
   let description = [{
     Partial-unrolls the loop nests inside `pto.fusion_region` according to the
     unroll factors supplied by the cost model.
@@ -1636,6 +1639,30 @@ def VPTOCombineReductions
   }];
   let constructor = "mlir::pto::createVPTOCombineReductionsPass()";
   let dependentDialects = ["mlir::pto::PTODialect"];
+}
+
+def PTOVfSimUnrollPlanner
+    : Pass<"pto-vfsim-unroll-planner", "ModuleOp"> {
+  let summary = "Plan VMI low-level loop unroll with VfSimulator";
+  let description = [{
+    Calls the optional VfSimulator generic-MLIR adapter after VPTO reduction
+    combination and CSE. For each static-trip-count VMI loop-fusion result, the
+    planner evaluates ABCABC and AABBCC candidates, including a residual loop
+    when the factor does not divide the trip count. It writes the best factor
+    as the dedicated `pto.vfsim.unroll_factor` i32 attribute, keeping the
+    cost-model result distinct from a hand-written `pto.unroll_factor` hint.
+    After planning, the PTOAS wrapper removes the internal
+    `pto.vmi.loop_fused` and `pto.vmi.loop_fusion.id` selection attributes.
+  }];
+  let constructor = "mlir::pto::createPTOVfSimUnrollPlannerPass()";
+  let options = [
+    Option<"maxUnrollFactor", "max-unroll-factor", "unsigned", "8",
+           "Maximum unroll factor considered by VfSimulator">,
+    Option<"dumpCandidates", "dump-candidates", "bool", "false",
+           "Print candidate cycles, selection, and skip reasons">
+  ];
+  let dependentDialects = ["mlir::pto::PTODialect",
+                           "mlir::scf::SCFDialect"];
 }
 
 def VPTOMaskSimplify

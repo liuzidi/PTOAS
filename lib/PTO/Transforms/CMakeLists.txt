@@ -54,6 +54,7 @@ add_mlir_dialect_library(PTOTransforms
   VPTOPtrNormalize.cpp
   VPTOPtrCastCleanup.cpp
   VPTOCombineReductions.cpp
+  PTOVfSimUnrollPlanner.cpp
   VPTOOptimizeVcvt.cpp
   VPTOMaskSimplify.cpp
   VPTOExpandWrapperOps.cpp
@@ -207,6 +208,21 @@ add_mlir_dialect_library(PTOTransforms
   PRIVATE
   ${_ptoas_transforms_private_link_libs}
 )
+
+# LLVM 19 stores the raw LINK_LIBRARIES list in an exported, flat-string
+# aggregate property. VfSim is intentionally build-tree-only, so keep its
+# BUILD_INTERFACE links on the real target but omit them from install-time
+# aggregate metadata, which cannot contain generator expressions.
+if(TARGET vfsim::native_core OR TARGET vfsim::ir_planner)
+  get_target_property(_ptoas_aggregate_imported_deps PTOTransforms
+    MLIR_AGGREGATE_DEP_LIBS_IMPORTED)
+  if(_ptoas_aggregate_imported_deps)
+    list(FILTER _ptoas_aggregate_imported_deps EXCLUDE REGEX "vfsim::")
+    set_property(TARGET PTOTransforms PROPERTY
+      MLIR_AGGREGATE_DEP_LIBS_IMPORTED
+      "${_ptoas_aggregate_imported_deps}")
+  endif()
+endif()
 
 install(TARGETS PTOTransforms
   EXPORT PTOASTargets      # 将此 Target 加入导出集

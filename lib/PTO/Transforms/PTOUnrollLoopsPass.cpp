@@ -25,6 +25,10 @@
 //                               over-cap factor cannot be unrolled: the
 //                               attribute is removed with a remark in those
 //                               cases.
+//   {pto.vfsim.unroll_factor = N}
+//                             - cost-model-selected factor with the same
+//                               validation and native-unroll behavior.  It is
+//                               rejected when combined with either user hint.
 //
 // {pto.unroll = "enable"} is never unrolled here; it is left untouched for
 // pto-convert-scf-to-cf-with-loop-hints, which forwards it to the compiler's cost model as
@@ -160,28 +164,29 @@ struct PTOUnrollLoopsImpl {
     return UnrollOutcome::Changed;
   }
 
-  /// Try to unroll a loop annotated {pto.unroll_factor = N} by N.  Requires a
-  /// statically known positive step; dynamic upper bounds are supported and
-  /// produce an epilogue loop that threads live-out values.
-  UnrollOutcome tryFactorUnroll(scf::ForOp forOp, int64_t factor) const {
+  /// Try to unroll a loop annotated with a factor by N. Requires a statically
+  /// known positive step; dynamic upper bounds are supported and produce an
+  /// epilogue loop that threads live-out values.
+  UnrollOutcome tryFactorUnroll(scf::ForOp forOp, int64_t factor,
+                                llvm::StringRef attrName) const {
     // A huge factor makes loopUnrollByFactor clone the body an unbounded
     // number of times; refuse to unroll natively to bound compile time.
     if (maxUnrollFactor >= 0 && factor > maxUnrollFactor) {
       forOp.emitRemark()
-          << "'" << pto::kUnrollFactorAttrName << "' = " << factor
+          << "'" << attrName << "' = " << factor
           << " exceeds max-unroll-factor=" << maxUnrollFactor
           << "; cannot unroll natively, dropping the hint";
-      forOp->removeAttr(pto::kUnrollFactorAttrName);
+      forOp->removeAttr(attrName);
       return UnrollOutcome::Unchanged;
     }
 
     std::optional<int64_t> step = getConstantIntValue(forOp.getStep());
     if (!step || *step <= 0) {
       forOp.emitRemark()
-          << "'" << pto::kUnrollFactorAttrName
+          << "'" << attrName
           << "' loop has no constant positive step; cannot unroll natively, "
              "dropping the hint";
-      forOp->removeAttr(pto::kUnrollFactorAttrName);
+      forOp->removeAttr(attrName);
       return UnrollOutcome::Unchanged;
     }
 
@@ -201,9 +206,9 @@ struct PTOUnrollLoopsImpl {
     if (lb && ub) {
       if (*ub <= *lb) {
         forOp.emitRemark()
-            << "'" << pto::kUnrollFactorAttrName
+            << "'" << attrName
             << "' loop never iterates; dropping the hint";
-        forOp->removeAttr(pto::kUnrollFactorAttrName);
+        forOp->removeAttr(attrName);
         return UnrollOutcome::Unchanged;
       }
     } else {
@@ -229,14 +234,26 @@ struct PTOUnrollLoopsImpl {
     // nor the epilogue clone keeps it.  The attribute is restored on failure.
     IntegerAttr factorAttr =
         IntegerAttr::get(IntegerType::get(forOp.getContext(), 32), factor);
-    forOp->removeAttr(pto::kUnrollFactorAttrName);
+    forOp->removeAttr(attrName);
 
     if (failed(loopUnrollByFactor(forOp, static_cast<uint64_t>(factor)))) {
-      forOp->setAttr(pto::kUnrollFactorAttrName, factorAttr);
+      forOp->setAttr(attrName, factorAttr);
       return UnrollOutcome::Unchanged;
     }
 
     return UnrollOutcome::Changed;
+  }
+
+  UnrollOutcome tryUserFactorUnroll(scf::ForOp forOp,
+                                    IntegerAttr factorAttr) const {
+    return tryFactorUnroll(forOp, factorAttr.getInt(),
+                           pto::kUnrollFactorAttrName);
+  }
+
+  UnrollOutcome tryVfSimFactorUnroll(scf::ForOp forOp,
+                                     IntegerAttr factorAttr) const {
+    return tryFactorUnroll(forOp, factorAttr.getInt(),
+                           pto::kVfSimUnrollFactorAttrName);
   }
 
   /// Validate the hint attributes on one loop.  Emits a hard error for
@@ -245,6 +262,8 @@ struct PTOUnrollLoopsImpl {
   LogicalResult validateHint(scf::ForOp forOp) const {
     Attribute unrollRaw = forOp->getAttr(pto::kUnrollAttrName);
     Attribute factorRaw = forOp->getAttr(pto::kUnrollFactorAttrName);
+    Attribute vfSimFactorRaw =
+        forOp->getAttr(pto::kVfSimUnrollFactorAttrName);
 
     // Wrong attribute *types* must not slip through as "no hint": the typed
     // getters below would return null and the loop would silently keep a
@@ -263,11 +282,27 @@ struct PTOUnrollLoopsImpl {
       return failure();
     }
 
+    auto vfSimFactorAttr =
+        dyn_cast_if_present<IntegerAttr>(vfSimFactorRaw);
+    if (vfSimFactorRaw && !vfSimFactorAttr) {
+      forOp.emitError() << "'" << pto::kVfSimUnrollFactorAttrName
+                        << "' must be a signless i32 attribute, got "
+                        << vfSimFactorRaw;
+      return failure();
+    }
+
     if (unrollAttr && factorAttr) {
       forOp.emitError()
           << "'" << pto::kUnrollAttrName << "' and '"
           << pto::kUnrollFactorAttrName
           << "' are mutually exclusive on one loop";
+      return failure();
+    }
+    if (vfSimFactorAttr && (unrollAttr || factorAttr)) {
+      forOp.emitError() << "'" << pto::kVfSimUnrollFactorAttrName
+                        << "' cannot be combined with '"
+                        << pto::kUnrollAttrName << "' or '"
+                        << pto::kUnrollFactorAttrName << "'";
       return failure();
     }
 
@@ -294,6 +329,18 @@ struct PTOUnrollLoopsImpl {
       }
       return failure();
     }
+    if (vfSimFactorAttr && !pto::isValidUnrollFactorAttr(vfSimFactorAttr)) {
+      if (!vfSimFactorAttr.getType().isSignlessInteger(32)) {
+        forOp.emitError() << "'" << pto::kVfSimUnrollFactorAttrName
+                          << "' must be a signless i32 attribute, got "
+                          << vfSimFactorAttr.getType();
+      } else {
+        forOp.emitError() << "'" << pto::kVfSimUnrollFactorAttrName
+                          << "' must be a positive integer, got "
+                          << vfSimFactorAttr.getInt();
+      }
+      return failure();
+    }
 
     return success();
   }
@@ -305,6 +352,8 @@ struct PTOUnrollLoopsImpl {
     auto unrollAttr = forOp->getAttrOfType<StringAttr>(pto::kUnrollAttrName);
     auto factorAttr =
         forOp->getAttrOfType<IntegerAttr>(pto::kUnrollFactorAttrName);
+    auto vfSimFactorAttr = forOp->getAttrOfType<IntegerAttr>(
+        pto::kVfSimUnrollFactorAttrName);
 
     // "enable" is the metadata hint owned by pto-convert-scf-to-cf-with-loop-hints: it never
     // reaches the native-unroll utility, so none of the guards below apply
@@ -327,6 +376,7 @@ struct PTOUnrollLoopsImpl {
                             "body; dropping the hint";
       forOp->removeAttr(pto::kUnrollAttrName);
       forOp->removeAttr(pto::kUnrollFactorAttrName);
+      forOp->removeAttr(pto::kVfSimUnrollFactorAttrName);
       return UnrollOutcome::Unchanged;
     }
 
@@ -361,7 +411,18 @@ struct PTOUnrollLoopsImpl {
         forOp->removeAttr(pto::kUnrollFactorAttrName);
         return UnrollOutcome::Unchanged;
       }
-      return tryFactorUnroll(forOp, factorAttr.getInt());
+      return tryUserFactorUnroll(forOp, factorAttr);
+    }
+
+    if (vfSimFactorAttr) {
+      if (vfSimFactorAttr.getInt() == 1) {
+        forOp.emitRemark()
+            << "'" << pto::kVfSimUnrollFactorAttrName
+            << "' = 1 is a no-op; dropping the hint";
+        forOp->removeAttr(pto::kVfSimUnrollFactorAttrName);
+        return UnrollOutcome::Unchanged;
+      }
+      return tryVfSimFactorUnroll(forOp, vfSimFactorAttr);
     }
 
     return UnrollOutcome::Unchanged;
@@ -375,9 +436,12 @@ struct PTOUnrollLoopsImpl {
     bool valid = true;
     func.walk([&](scf::ForOp forOp) {
       if (forOp->hasAttr(pto::kUnrollAttrName) ||
-          forOp->hasAttr(pto::kUnrollFactorAttrName))
-        if (failed(validateHint(forOp)))
+          forOp->hasAttr(pto::kUnrollFactorAttrName) ||
+          forOp->hasAttr(pto::kVfSimUnrollFactorAttrName)) {
+        if (failed(validateHint(forOp))) {
           valid = false;
+        }
+      }
     });
     if (!valid)
       return failure();
@@ -401,8 +465,10 @@ struct PTOUnrollLoopsImpl {
       SmallVector<scf::ForOp, 8> annotated;
       func.walk<WalkOrder::PostOrder>([&](scf::ForOp forOp) {
         if (forOp->hasAttr(pto::kUnrollAttrName) ||
-            forOp->hasAttr(pto::kUnrollFactorAttrName))
+            forOp->hasAttr(pto::kUnrollFactorAttrName) ||
+            forOp->hasAttr(pto::kVfSimUnrollFactorAttrName)) {
           annotated.push_back(forOp);
+        }
       });
       if (annotated.empty())
         return success();

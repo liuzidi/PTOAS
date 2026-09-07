@@ -98,28 +98,9 @@ static FailureOr<UnrollFactor> selectUnrollFactor(int64_t rowFactor,
   return failure();
 }
 
-static FailureOr<int64_t> getDivisibleTripCount(scf::ForOp forOp,
-                                                UnrollFactor factor) {
-  std::optional<int64_t> trip = getConstantTripCount(forOp);
-  if (!trip) {
-    LLVM_DEBUG(llvm::dbgs() << "PTOUnrollAfterLoopFusion: skip non-constant "
-               << "trip scf.for at " << forOp.getLoc() << " factor(from "
-               << factor.source << ")=" << factor.value << "\n");
-    return failure();
-  }
-  if (*trip % factor.value != 0) {
-    LLVM_DEBUG(llvm::dbgs() << "PTOUnrollAfterLoopFusion: skip indivisible "
-               << "trip scf.for at " << forOp.getLoc() << " trip=" << *trip
-               << " factor=" << factor.value << "(from " << factor.source
-               << ")\n");
-    return failure();
-  }
-  return *trip;
-}
-
 /// Attempt to partial-unroll a single leaf `scf.for` inside a fusion_region.
 /// Returns success on actual unroll, failure on every skip (non-fusion scope,
-/// non-leaf, no factor > 1, non-constant / indivisible trip)
+/// non-leaf, no factor > 1, or non-constant trip count).
 static LogicalResult tryUnrollLeafForOp(scf::ForOp forOp) {
   // Scope gate: only loops inside a fusion_region.
   auto region = forOp->getParentOfType<pto::FusionRegionOp>();
@@ -156,8 +137,26 @@ static LogicalResult tryUnrollLeafForOp(scf::ForOp forOp) {
     return failure();
   }
 
-  FailureOr<int64_t> trip = getDivisibleTripCount(forOp, *factor);
-  if (failed(trip)) {
+  std::optional<int64_t> trip = getConstantTripCount(forOp);
+  if (!trip) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "PTOUnrollAfterLoopFusion: skip non-constant or empty "
+                  "trip scf.for at "
+               << forOp.getLoc() << " factor=" << factor->value << "(from "
+               << factor->source << ")\n");
+    return failure();
+  }
+  if (factor->value > *trip) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "PTOUnrollAfterLoopFusion: skip factor larger than trip "
+               << "count at " << forOp.getLoc() << " factor="
+               << factor->value << " trip=" << *trip << "\n");
+    return failure();
+  }
+  if (!forOp.getInductionVar().getType().isIndex()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "PTOUnrollAfterLoopFusion: skip non-index loop at "
+               << forOp.getLoc() << "\n");
     return failure();
   }
 
@@ -176,7 +175,7 @@ static LogicalResult tryUnrollLeafForOp(scf::ForOp forOp) {
                << "(iter_args live-out?) at " << forOp.getLoc() << "\n");
     return failure();
   }
-  (void)unrolled; // mainLoopOp/epilogueLoopOp unused: divisibility => no tail.
+  (void)unrolled; // mainLoopOp/epilogueLoopOp are not needed by this pass.
 
   llvm::StringRef consumedAttr =
       factor->source == "col" ? kColUnrollFactorAttr : kRowUnrollFactorAttr;
