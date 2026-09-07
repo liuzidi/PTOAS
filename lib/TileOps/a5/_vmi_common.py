@@ -747,8 +747,10 @@ def min_128b_row_vmi_constraint(**metadata) -> bool:
 def narrow_full_row_vmi_constraint(
     src_shape=(),
     src_valid_shape=(),
+    src_dtype=None,
     dst_shape=(),
     dst_valid_shape=(),
+    dst_dtype=None,
     **_,
 ) -> bool:
     """Accept statically full rows below 128 bytes (sub-VL compact tails).
@@ -759,6 +761,10 @@ def narrow_full_row_vmi_constraint(
     partial lanes would make the VMI mask hide the unwritten tail, and the
     slot-padding safety argument (memory planning pads each UB slot to
     256 bytes) only covers accesses beyond the tile's own row width.
+
+    The upper bound keeps this candidate mutually exclusive with the
+    ``min_128b_row`` / ``full_physical_row`` candidates so wide rows keep
+    selecting the standard (higher-priority) elementwise forms.
     """
 
     def full(shape, valid):
@@ -771,7 +777,14 @@ def narrow_full_row_vmi_constraint(
 
     if not full(src_shape, src_valid_shape) or not full(dst_shape, dst_valid_shape):
         return False
-    return src_shape == dst_shape
+    if src_shape != dst_shape:
+        return False
+    src_bytes = (
+        src_shape[1] * _DTYPE_BYTEWIDTH.get(src_dtype, 0)
+        if isinstance(src_shape[1], int)
+        else 0
+    )
+    return 0 < src_bytes < 128
 
 
 def sinkhorn_compact_elementwise_vmi_constraint(**metadata) -> bool:

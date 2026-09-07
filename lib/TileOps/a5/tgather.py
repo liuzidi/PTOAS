@@ -80,6 +80,10 @@ def template_tgather(
     src: pto.Tile,
     dst: pto.Tile,
     indices: pto.Tile):
+    # The vgather2 sequence below is deliberately duplicated in
+    # template_tgather_tmp: the template tracer evaluates loop bounds
+    # through the traced function's scope, so a shared helper breaks
+    # range() tracing. Keep both bodies in sync on any dtype/lane change.
     dtype = dst.element_type
     dtype_indices = indices.element_type
     elem_bytes = pto.bytewidth(dtype)

@@ -19677,7 +19677,9 @@ LogicalResult ReserveBufferOp::verify() {
 // module so op verifiers that relax cross-module peer checks for the VPTO
 // single-kernel-per-file shape can do so before the module attribute is
 // stamped. Defaults to empty (no backend known), which keeps verifiers
-// strict.
+// strict. One ptoas process compiles one input under one CLI backend, so
+// the process-global lifetime is intentional; the hint is only consulted
+// as a fallback when the module attribute is absent.
 static std::string gPTOParseTimeBackendHint;
 void mlir::pto::setPTOParseTimeBackendHint(llvm::StringRef backend) {
   gPTOParseTimeBackendHint = backend.str();

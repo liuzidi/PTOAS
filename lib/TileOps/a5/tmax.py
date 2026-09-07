@@ -11,7 +11,7 @@ from ptodsl import pto
 import ptodsl.tilelib as tilelib
 
 from ._common import same_dtype_signatures
-from ._elementwise import register_binary
+from ._elementwise import _ub_or_vec_row_major, register_binary
 
 
 def _vmax(lhs, rhs, mask):
@@ -36,14 +36,6 @@ template_tmax_1d = register_binary(
     dtypes=_DTYPES,
     traversal="1d",
 )
-
-
-def _ub_or_vec_row_major(operand_memory_spaces, operand_b_layouts, operand_s_layouts, **_):
-    return (
-        all(space in {"ub", "vec"} for space in operand_memory_spaces)
-        and all(layout == "row_major" for layout in operand_b_layouts)
-        and all(layout == "none_box" for layout in operand_s_layouts)
-    )
 
 
 def _dst_valid_prefix_operand(src0_shape=(), src1_shape=(), dst_shape=(),

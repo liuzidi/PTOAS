@@ -624,6 +624,12 @@ struct PTOResolveReservedBuffersPass
           auto backendAttr = moduleOp->getAttrOfType<StringAttr>("pto.backend");
           if (backendAttr && backendAttr.getValue() == "vpto" &&
               isSingleKernelVptoUnit(importOp.getOperation())) {
+            // The PyPTO pipe contract plans both sides' fixpipe slot bases
+            // from base=0; emit a remark so a future divergent contract is
+            // diagnosable instead of silently disagreeing with the peer
+            // unit's reserve-side materialization.
+            importOp.emitRemark()
+                << "cross-module import materialized to pipe-contract base 0";
             builder.setInsertionPoint(importOp);
             Value cst = builder.create<arith::ConstantIntOp>(
                 importOp.getLoc(), 0, 32);

@@ -44,7 +44,10 @@ def _row_major_or_single_column(operand_memory_spaces, operand_b_layouts,
     src_layout, dst_layout = operand_b_layouts
     src_s, dst_s = operand_s_layouts
     src_m, dst_m = operand_memory_spaces
-    if not ok(dst_layout, dst_s, dst_m):
+    # The op verifier (verifyTRowExpandCommon) only produces row-major dst
+    # tiles, so keep the dst side strict; only the src vector may be the
+    # col-major [M, 1] column form.
+    if dst_layout != "row_major" or not ok(dst_layout, dst_s, dst_m):
         return False
     if src_layout == "row_major":
         return ok(src_layout, src_s, src_m)
