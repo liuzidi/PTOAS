@@ -512,6 +512,50 @@ static LogicalResult populateFusionRegion(pto::FusionRegionOp region,
   return verify(region.getOperation());
 }
 
+// A pto.set_validshape immediately after the fusion region updates the
+// runtime valid shape of a region output tile. The op verifier requires a
+// locally bound tile source (alloc/declare/reshape chain), so leaving it
+// outside makes it reference the region result and fail verification. Move
+// such ops into the region body and rebind the source to the local value the
+// region yields for that output, preserving the mutation before any external
+// reader observes the output.
+static LogicalResult
+hoistTrailingSetValidShapeOps(pto::FusionRegionOp region) {
+  SmallVector<pto::SetValidShapeOp, mlir::pto::kValue8> candidates;
+  auto yieldOp = dyn_cast<pto::YieldOp>(
+      region.getBody().front().getTerminator());
+  if (!yieldOp) {
+    return success();
+  }
+
+  DenseMap<Value, Value> localByOutput;
+  auto outputs = llvm::to_vector(region.getOutputs());
+  for (auto [output, yielded] :
+       llvm::zip_equal(outputs, yieldOp.getOperands())) {
+    localByOutput[output] = yielded;
+  }
+
+  for (Operation *next = region->getNextNode(); next;) {
+    Operation *current = next;
+    next = current->getNextNode();
+    auto setVS = dyn_cast<pto::SetValidShapeOp>(current);
+    if (!setVS) {
+      break;
+    }
+    auto it = localByOutput.find(setVS.getSource());
+    if (it == localByOutput.end()) {
+      break;
+    }
+    candidates.push_back(setVS);
+  }
+
+  for (auto setVS : llvm::reverse(candidates)) {
+    setVS.getSourceMutable().assign(localByOutput[setVS.getSource()]);
+    setVS->moveBefore(region.getBody().front().getTerminator());
+  }
+  return success();
+}
+
 static LogicalResult
 encapsulateGroupSpan(const GroupSpan &span,
                      const PreFusionAnalysisIndex *analysisIndex) {
@@ -529,6 +573,9 @@ encapsulateGroupSpan(const GroupSpan &span,
     return failure();
   }
   replaceEscapingUsesOutsideRegion(fusionRegion, iface.externallyVisibleValues);
+  if (failed(hoistTrailingSetValidShapeOps(fusionRegion))) {
+    return failure();
+  }
   return success();
 }
 

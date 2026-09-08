@@ -1528,8 +1528,14 @@ def emit_scalar_fill_vmi(
     block_map = CanonicalBlockMap.from_tile(dst)
     _prepare_tile_access(dst)
     mask = _create_mask(block_map, dst.element_type, trace=dst._trace)
+    # _create_mask snaps the mask lane count up to the nearest legal VMI size
+    # (e.g. a 32-wide row yields a 64-lane mask with 32 active lanes). The
+    # broadcast vector must use the same snapped count or the vstore verifier
+    # rejects the mask/data lane mismatch.
     fill = _wrap_vreg(
-        _vmi_builder.vbrc(scalar.value, size=block_map.logical_lanes),
+        _vmi_builder.vbrc(
+            scalar.value, size=_snap_lanes(block_map.logical_lanes)
+        ),
         dst.element_type,
     )
     with for_(0, block_map.logical_block_count, step=1) as logical_block:
