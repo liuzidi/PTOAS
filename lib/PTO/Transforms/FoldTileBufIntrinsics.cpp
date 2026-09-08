@@ -237,6 +237,10 @@ static bool isRuntimeTileCarrier(Value value) {
 }
 
 static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
+                                                       Operation *user);
+static bool getConstIndexValue(Value v, int64_t &out);
+
+static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
                                                        Operation *user) {
   // A tile_buf anchor may be a fusion_region result (possibly wrapped in
   // bridging casts — e.g. when the producer carries a richer tile_buf type
@@ -274,6 +278,48 @@ static std::optional<TileHandleInfo> resolveTileHandle(Value tileBuf,
     }
     return TileHandleInfo{alloc.getAddr(), alloc.getValidRow(),
                           alloc.getValidCol(), tileTy.getConfigAttr()};
+  }
+
+  // A zero-offset pto.subview of a fusion_region result is a pure alias the
+  // fusion pipeline (PTOVmiLoopFusion) leaves in place when it re-binds tile
+  // handles through region results. Recurse through it so the view does not
+  // defeat region-yield → alloc recovery. Non-zero offsets cannot be folded
+  // to the source handle address; they keep the error path.
+  if (auto subview = tileBuf.getDefiningOp<pto::SubViewOp>()) {
+    bool allOffsetsZero = true;
+    for (Value offset : subview.getOffsets()) {
+      int64_t constOffset = 0;
+      if (!getConstIndexValue(offset, constOffset) || constOffset != 0) {
+        allOffsetsZero = false;
+        break;
+      }
+    }
+    if (!allOffsetsZero) {
+      user->emitError("FoldTileBufIntrinsics: pto.subview with non-zero "
+                      "offsets is not a tile-handle bridge anchor");
+      return std::nullopt;
+    }
+
+    auto sourceInfo = resolveTileHandle(subview.getSource(), user);
+    if (!sourceInfo) {
+      return std::nullopt;
+    }
+
+    auto tileTy = dyn_cast<pto::TileBufType>(subview.getResult().getType());
+    if (!tileTy) {
+      user->emitError(
+          "FoldTileBufIntrinsics: pto.subview must produce !pto.tile_buf");
+      return std::nullopt;
+    }
+
+    // The subview may narrow the valid window (valid_row/valid_col operands
+    // clip the parent's dynamic valid shape); prefer the subview's own
+    // override when present, mirroring the treshape handling above.
+    auto [validRow, validCol] = findSetValidShapeOverride(tileBuf);
+    return TileHandleInfo{sourceInfo->addr,
+                          validRow ? validRow : sourceInfo->validRow,
+                          validCol ? validCol : sourceInfo->validCol,
+                          tileTy.getConfigAttr()};
   }
 
   if (auto reshape = tileBuf.getDefiningOp<pto::TReshapeOp>()) {
