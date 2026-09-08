@@ -171,6 +171,23 @@ static Value computeTileAddress(Value value, IRRewriter &rewriter,
   if (auto alloc = value.getDefiningOp<pto::AllocTileOp>()) {
     return ensureI64(alloc.getAddr(), rewriter, loc);
   }
+  // A fusion_region result yields a locally materialized tile handle. The
+  // VMI fusion pipeline (PTOVmiLoopFusion) re-binds tile handles through
+  // region results, so subviews anchored on them must recover the yielded
+  // local alloc/declare handle to compute the runtime address.
+  if (auto regionResult = dyn_cast<OpResult>(value)) {
+    if (auto fusionRegion =
+            dyn_cast<pto::FusionRegionOp>(regionResult.getOwner())) {
+      auto yieldOp = dyn_cast<pto::YieldOp>(
+          fusionRegion.getBody().front().getTerminator());
+      unsigned resultIndex = regionResult.getResultNumber();
+      if (!yieldOp || resultIndex >= yieldOp.getOperands().size()) {
+        return {};
+      }
+      return computeTileAddress(yieldOp.getOperands()[resultIndex], rewriter,
+                                loc);
+    }
+  }
   if (value.getDefiningOp<pto::DeclareTileOp>()) {
     auto tileType = dyn_cast<pto::TileBufType>(value.getType());
     if (!tileType) {
