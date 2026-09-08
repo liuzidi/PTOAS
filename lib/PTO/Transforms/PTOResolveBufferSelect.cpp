@@ -166,6 +166,45 @@ static uint64_t getTileAddressAlignmentBytes(pto::TileBufType type) {
   return 1;
 }
 
+// Clone a pure integer-arithmetic address chain into the current insertion
+// point. Values defined inside a fusion_region do not dominate uses after
+// the region, so the outer subview materialization must recompute the
+// address arithmetic outside instead of referencing region-local values.
+// Constants and function-entry values are used directly; region-local
+// arith ops are cloned recursively.
+static Value cloneAddressMathOutsideRegion(Value value,
+                                           IRRewriter &rewriter) {
+  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    return blockArg;
+  }
+  Operation *defOp = value.getDefiningOp();
+  if (!defOp) {
+    return value;
+  }
+  if (isa<arith::ConstantOp, arith::ConstantIntOp, arith::ConstantIndexOp>(
+          defOp)) {
+    Operation *clone = rewriter.clone(*defOp);
+    return clone->getResult(0);
+  }
+  if (isa<arith::AddIOp, arith::MulIOp, arith::IndexCastOp,
+          arith::IndexCastUIOp, arith::ExtSIOp, arith::ExtUIOp>(defOp)) {
+    SmallVector<Value, mlir::pto::kValue2> operands;
+    for (Value operand : defOp->getOperands()) {
+      operands.push_back(cloneAddressMathOutsideRegion(operand, rewriter));
+    }
+    OperationState state(defOp->getLoc(), defOp->getName());
+    state.addTypes(defOp->getResultTypes());
+    state.addOperands(operands);
+    state.addAttributes(defOp->getAttrs());
+    Operation *clone = rewriter.create(state);
+    return clone->getResult(0);
+  }
+  // Not pure integer math (e.g. a tile_buf_addr on a declare_tile handle).
+  // Such values are only produced outside regions; a region-internal
+  // producer cannot be recovered here.
+  return {};
+}
+
 static Value computeTileAddress(Value value, IRRewriter &rewriter,
                                 Location loc) {
   if (auto alloc = value.getDefiningOp<pto::AllocTileOp>()) {
@@ -174,7 +213,9 @@ static Value computeTileAddress(Value value, IRRewriter &rewriter,
   // A fusion_region result yields a locally materialized tile handle. The
   // VMI fusion pipeline (PTOVmiLoopFusion) re-binds tile handles through
   // region results, so subviews anchored on them must recover the yielded
-  // local alloc/declare handle to compute the runtime address.
+  // local alloc/declare handle to compute the runtime address. The handle's
+  // address arithmetic is region-local, so it is cloned at the current
+  // insertion point to preserve dominance for outer uses.
   if (auto regionResult = dyn_cast<OpResult>(value)) {
     if (auto fusionRegion =
             dyn_cast<pto::FusionRegionOp>(regionResult.getOwner())) {
@@ -184,8 +225,49 @@ static Value computeTileAddress(Value value, IRRewriter &rewriter,
       if (!yieldOp || resultIndex >= yieldOp.getOperands().size()) {
         return {};
       }
-      return computeTileAddress(yieldOp.getOperands()[resultIndex], rewriter,
-                                loc);
+      Value yielded = yieldOp.getOperands()[resultIndex];
+      if (auto alloc = yielded.getDefiningOp<pto::AllocTileOp>()) {
+        if (!alloc.getAddr()) {
+          return {};
+        }
+        return cloneAddressMathOutsideRegion(alloc.getAddr(), rewriter);
+      }
+      if (auto subview = yielded.getDefiningOp<pto::SubViewOp>()) {
+        // The yielded handle is itself a subview that was already
+        // materialized inside the region. Recompute its address chain from
+        // the region-local anchor into the outer scope.
+        Value base = computeTileAddress(subview.getSource(), rewriter, loc);
+        auto sourceType = subview.getSource().getType();
+        int64_t rowStride = 0;
+        int64_t colStride = 0;
+        if (!base || !getTilePointerStrides(sourceType, rowStride,
+                                            colStride) ||
+            subview.getOffsets().size() != mlir::pto::kValue2) {
+          return {};
+        }
+        Value row = cloneAddressMathOutsideRegion(subview.getOffsets()[0],
+                                                  rewriter);
+        Value col = cloneAddressMathOutsideRegion(subview.getOffsets()[1],
+                                                  rewriter);
+        if (!row || !col) {
+          return {};
+        }
+        row = rewriter.create<arith::MulIOp>(loc, row,
+            rewriter.create<arith::ConstantIntOp>(loc, rowStride, 64));
+        col = rewriter.create<arith::MulIOp>(loc, col,
+            rewriter.create<arith::ConstantIntOp>(loc, colStride, 64));
+        Value elements = rewriter.create<arith::AddIOp>(loc, row, col);
+        int64_t elemBytes = static_cast<int64_t>(
+            pto::getPTOStorageElemByteSize(sourceType.getElementType()));
+        if (elemBytes == 0) {
+          return {};
+        }
+        Value bytes = rewriter.create<arith::MulIOp>(
+            loc, elements,
+            rewriter.create<arith::ConstantIntOp>(loc, elemBytes, 64));
+        return rewriter.create<arith::AddIOp>(loc, base, bytes);
+      }
+      return {};
     }
   }
   if (value.getDefiningOp<pto::DeclareTileOp>()) {

@@ -3,16 +3,19 @@
 // CANN Open Software License Agreement Version 2.0 (the "License").
 // Please refer to the License for details. You may not use this file except in compliance with the License.
 // THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// After the VMI fusion rebase, a subview whose source is a fusion_region
-// result that itself yields a subview-materialized tile handle is no longer
-// accepted by the FoldTileBufIntrinsics bridge. The IR dump after
-// pto-materialize-tile-handles still shows the materialized handle form before
-// the later pass rejects it.
+// A subview whose source is a fusion_region result that itself yields a
+// subview-materialized tile handle used to be rejected by the
+// FoldTileBufIntrinsics bridge ('expected tile_buf to be defined by the
+// active materialized tile-handle bridge'). PTOResolveBufferSelect now
+// recomputes the region-local address math at the outer subview so the
+// region result resolves to an addressed alloc_tile, and
+// FoldTileBufIntrinsics folds the zero-offset subview through the region
+// yield. The kernel must compile end-to-end on the VPTO backend.
 
-// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root not ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto --mlir-print-ir-after=pto-materialize-tile-handles %s -o /dev/null 2>&1 | FileCheck %s
+// RUN: env MLIR_PYTHON_ROOT=%mlir_python_root ptoas --pto-arch=a5 --pto-level=level3 --pto-backend=vpto --tile-lib-backend=ptodsl --ptodsl-python-exe=%python_executable --emit-vpto --mlir-print-ir-after=pto-resolve-buffer-select %s -o /dev/null 2>&1 | FileCheck %s
 
 module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
   func.func @materialize_fusion_region_subview() {
@@ -51,9 +54,11 @@ module attributes {pto.backend = "vpto", pto.target_arch = "a5"} {
   }
 }
 
+// The outer subview is materialized to an addressed alloc_tile whose address
+// chain is recomputed outside the region (no region-local dominance escape).
 // CHECK-LABEL: func.func @materialize_fusion_region_subview
 // CHECK: pto.fusion_region
 // CHECK: pto.alloc_tile addr = {{.*}} {pto.view_semantics = "subview"} : !pto.tile_buf<vec, 8x512xf32>
 // CHECK: pto.yield(%{{.*}} : (!pto.tile_buf<vec, 8x512xf32>) -> ()
-// CHECK: pto.subview %{{.*}}[%{{.*}}, %{{.*}}] sizes [8, 448] : !pto.tile_buf<vec, 8x512xf32> -> !pto.tile_buf<vec, 8x448xf32>
-// CHECK: error: FoldTileBufIntrinsics: expected tile_buf to be defined by the active materialized tile-handle bridge
+// CHECK: pto.alloc_tile addr = {{.*}} {pto.view_semantics = "subview"} : !pto.tile_buf<vec, 8x512xf32, valid=8x448>
+// CHECK-NOT: error:
