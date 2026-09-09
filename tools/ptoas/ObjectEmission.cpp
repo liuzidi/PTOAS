@@ -980,7 +980,14 @@ mlir::pto::CANNToolchain::validate(llvm::raw_ostream &diagOS) const {
 
 llvm::StringRef mlir::pto::CANNToolchain::vptoPublicABISuffix(
     ObjectEmissionDeviceTarget target) const {
-  const bool usesNewABI = cannVersion >= kCANN900Beta2Version;
+  // The `.vector`/`.cube` public ABI only exists from CANN 9.1 onward; every
+  // 9.0.x runtime and simulator resolves kernels exclusively through
+  // `_mix_aiv`/`_mix_aic` (stamping `.vector` there leaves the kernel
+  // undispatchable: the fatobj links, but the sim/device never starts the
+  // block). This is deliberately independent from the CANN900 lowering
+  // threshold (kCANN900Beta2Version), which only selects the intrinsic
+  // naming family.
+  const bool usesNewABI = cannVersion >= kCANN910Version;
   switch (target) {
   case ObjectEmissionDeviceTarget::Vector:
     return usesNewABI ? llvm::StringRef(".vector") : llvm::StringRef("_mix_aiv");
