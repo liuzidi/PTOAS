@@ -27,7 +27,8 @@ struct CANNVersion {
                         unsigned beta)
       : major(major), minor(minor), patch(patch), beta(beta) {}
 
-  static CANNVersion release(unsigned major, unsigned minor, unsigned patch) {
+  static constexpr CANNVersion release(unsigned major, unsigned minor,
+                                       unsigned patch) {
     return CANNVersion{major, minor, patch, RELEASE};
   }
 
@@ -58,7 +59,14 @@ struct CANNVersion {
 };
 
 inline constexpr CANNVersion kDefaultCANNVersion{9, 0, 0, 1};
+// CANN 9.0.0-beta.2 renamed the hivm intrinsic families (vadd.s.x.v64f32
+// instead of vadd.v64f32.x), which gates the CANN900 lowering emitter.
 inline constexpr CANNVersion kCANN900Beta2Version{9, 0, 0, 2};
+// The runtime-facing kernel symbol ABI stayed `_mix_aiv`/`_mix_aic` through
+// every CANN 9.0.x build (verified against the 9.0.0/9.0.1/9.1.0-beta.2
+// simulators and runtimes, which only resolve `_mix_aiv`). The
+// `.vector`/`.cube` suffix family first becomes dispatchable in CANN 9.1.
+inline constexpr CANNVersion kCANN910Version{9, 1, 0, CANNVersion::RELEASE};
 
 inline std::optional<unsigned> parseCANNVersionComponent(
     llvm::StringRef value) {

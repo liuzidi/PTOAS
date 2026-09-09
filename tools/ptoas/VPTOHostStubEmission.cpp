@@ -41,7 +41,7 @@ static std::string getLogicalKernelName(llvm::StringRef symbol) {
   if (symbol.ends_with("_mix_aic")) {
     return symbol.drop_back(strlen("_mix_aic")).str();
   }
-  // CANN >= 9.0.0.2 public ABI suffixes (see CANNToolchain::vptoPublicABISuffix).
+  // CANN 9.1+ public ABI suffixes (see CANNToolchain::vptoPublicABISuffix).
   if (symbol.ends_with(".vector")) {
     return symbol.drop_back(strlen(".vector")).str();
   }
@@ -53,12 +53,14 @@ static std::string getLogicalKernelName(llvm::StringRef symbol) {
 
 // The device-side forward-call suffix must match the public ABI suffix that
 // ObjectEmission's applyVPTOLLVMABINames stamps onto the device body symbol
-// before bisheng compiles it. CANN >= 9.0.0.2 renamed the suffix family from
-// _mix_aiv/_mix_aic to .vector/.cube; picking the wrong one leaves the merged
-// device ELF with an undefined symbol at link time.
+// before bisheng compiles it. The `.vector`/`.cube` family only exists from
+// CANN 9.1 onward; all 9.0.x runtimes and simulators resolve kernels through
+// `_mix_aiv`/`_mix_aic` (see CANNToolchain::vptoPublicABISuffix), and picking
+// the wrong one leaves the merged device ELF with an undefined symbol at link
+// time or an undispatchable kernel at runtime.
 static std::string getKernelABISuffix(pto::FunctionKernelKind kind,
                                       const pto::CANNVersion &cannVersion) {
-  const bool usesNewABI = cannVersion >= pto::kCANN900Beta2Version;
+  const bool usesNewABI = cannVersion >= pto::kCANN910Version;
   if (kind == pto::FunctionKernelKind::Vector) {
     return usesNewABI ? ".vector" : "_mix_aiv";
   }
@@ -315,7 +317,7 @@ LogicalResult mlir::pto::emitVPTODeviceWrapperSource(
   // function body. The body's own definition carries __aicore__; the extern
   // declaration here just needs the symbol name and signature.
   for (const VPTOKernelStubDecl &decl : stubDecls) {
-    // CANN >= 9.0.0.2 public ABI suffixes (".vector"/".cube") are not legal
+    // CANN 9.1+ public ABI suffixes (".vector"/".cube") are not legal
     // C++ identifiers, so declare a local alias and bind it to the mangled
     // symbol through a top-level asm label.
     const std::string cxxName = decl.logicalName + "_vpto_body";
