@@ -1,0 +1,80 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software; you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root directory of the software repository for the full text of the License.
+
+// Self-contained VMI VfSimulator cost-model test. VMI tile fusion creates the
+// fusion region and the VfSim planner writes the unroll decision on its loop.
+
+// REQUIRES: vfsim-costmodel
+// RUN: ptoas --enable-vmi --enable-vfsim-costmodel-optimization --dump-vfsim-costmodel --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion=true --emit-vpto %s --mlir-print-ir-after=pto-vfsim-unroll-planner  -o /dev/null 2>&1 | FileCheck %s --check-prefixes=VFSIM
+
+// RUN: ptoas --enable-vmi --enable-vfsim-costmodel-optimization --dump-vfsim-costmodel --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion=true --emit-vpto %s --mlir-print-ir-after=pto-unroll-loops  -o /dev/null 2>&1 | FileCheck %s --check-prefixes=UNROLL
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vmi_vfsim_unroll_tadd_tmul(
+      %b_ptr: !pto.ptr<f32>, %c_ptr: !pto.ptr<f32>, %d_ptr: !pto.ptr<f32>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c128 = arith.constant 128 : index
+    %b_view = pto.make_tensor_view %b_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %c_view = pto.make_tensor_view %c_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %d_view = pto.make_tensor_view %d_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %b_part = pto.partition_view %b_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+    %c_part = pto.partition_view %c_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+    %d_part = pto.partition_view %d_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %dst = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    pto.tload ins(%b_part : !pto.partition_tensor_view<32x128xf32>)
+              outs(%b : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tload ins(%c_part : !pto.partition_tensor_view<32x128xf32>)
+              outs(%c : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tadd ins(%b, %c : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
+             outs(%a : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tmul ins(%a, %b : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
+             outs(%dst : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tstore ins(%dst : !pto.tile_buf<vec, 32x128xf32>)
+               outs(%d_part : !pto.partition_tensor_view<32x128xf32>)
+    return
+  }
+}
+
+// VFSIM: IR Dump After PTOVfSimUnrollPlanner
+// VFSIM-LABEL: func.func @vmi_vfsim_unroll_tadd_tmul
+// VFSIM: scf.for %{{.*}} = %c0 to %c4096 step %c64
+// VFSIM: pto.vadd
+// VFSIM: pto.vmul
+// VFSIM: } {pto.tilelib.impl = "vmi", pto.vfsim.unroll_factor = 7 : i32
+
+// UNROLL: IR Dump After PTOUnrollLoops
+// UNROLL-LABEL: func.func @vmi_vfsim_unroll_tadd_tmul
+// UNROLL: pto.fusion_region {
+// UNROLL: scf.for %{{.*}} = %c0 to %c{{.*}} step %c448
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL: pto.vadd
+// UNROLL-NOT: pto.vfsim.unroll_factor
+// UNROLL: pto.vadd
+// UNROLL-NOT: pto.vadd

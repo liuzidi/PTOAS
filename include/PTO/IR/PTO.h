@@ -235,6 +235,10 @@ inline constexpr llvm::StringLiteral kUnrollEnableValue = "enable";
 inline constexpr llvm::StringLiteral kUnrollFullValue = "full";
 inline constexpr llvm::StringLiteral kUnrollFactorAttrName =
     "pto.unroll_factor";
+/// Unroll factor selected by the VfSimulator cost model. This is consumed by
+/// pto-unroll-loops after the planner has finished.
+inline constexpr llvm::StringLiteral kVfSimUnrollFactorAttrName =
+    "pto.vfsim.unroll_factor";
 
 /// Check whether a `pto.unroll_factor` attribute value satisfies the
 /// contract: a signless i32 holding a positive factor.  The factor is read

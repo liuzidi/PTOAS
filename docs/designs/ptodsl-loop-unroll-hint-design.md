@@ -244,10 +244,12 @@ for i in pto.range(0, N, unroll_factor=4):
 
 将 `kUnrollAttrName` / `kUnrollFullValue`（原为 `PTOUnrollSIMTForPass.cpp` 私有）提升为共享常量（`include/PTO/IR/PTO.h`），新增 `kUnrollFactorAttrName = "pto.unroll_factor"` 与 `isValidUnrollFactorAttr` 契约校验，供 pass 与文档共用。
 
-### 5.2 Pass A：`PTOUnrollLoops`（重构 `PTOUnrollSIMTFor`，唯一消费者）
+### 5.2 Pass A：`PTOUnrollLoops`（重构 `PTOUnrollSIMTFor`，用户 hint 的唯一消费者）
 
 - **新 pass 名**：`pto-unroll-loops`；保留 `pto-unroll-simt-for` 作为 alias（两个现存测试通过 `--mlir-print-ir-after=pto-unroll-simt-for` 引用，行为不变，零回归）；
-- **位置不变**：`prepareVPTOForEmission` 内、SCCP/canonicalize/CSE 之前（`tools/ptoas/ptoas.cpp`），保留 #838 "展开后常量分支被折叠"的收益；
+- **管线中出现两次**（`prepareVPTOForEmission` 内，`tools/ptoas/ptoas_pipeline.cpp`）：
+  1. 前端位置（`PTOAnalyzeSIMTPersistentFragmentPass` 之前、SCCP/canonicalize/CSE 之前），消费用户 `pto.unroll`/`pto.unroll_factor` hint——`pto.unroll = "full"` 先行展开后，persistent fragment 分析所需的 GEP 索引才能常量化，#838 "展开后常量分支被折叠"的收益也保留在此；
+  2. 末端位置（VfSim planner 之后），消费 cost model 写入的 `pto.vfsim.unroll_factor`（见 `vmi_vfsim_costmodel_integration_design.md`）；该次运行与用户 hint 路径共享 native `loopUnrollByFactor` 实现，但走独立校验，且 VfSim factor 与任一用户 hint 同现是硬错误；
 - **两阶段结构**：先 walk 全函数校验所有 hint（收集全部诊断后统一失败——函数 pass adaptor 在某个函数失败后可能跳过其余函数，诊断必须函数内完备），合法再进入展开 fixpoint；
 - **校验**（硬错误）：`pto.unroll` 非 `"full"`/`"enable"` 值（`"disable"` 及未知值）、两 attr 同现、factor 不符合 signless i32 正数契约（`isValidUnrollFactorAttr`）；`"enable"` 不消费、原样留给 Pass B(该判断排在所有 native-unroll guard 之前，否则空 body / 非 index loop 的 hint 会被静默丢弃);
 - **处理逻辑**（校验通过后）：
@@ -308,7 +310,7 @@ v2 曾整体移除该 pass;v3 为满足 #1242 Req2 的 enable 验收标准恢复
 
 ### 7.2 PTOAS lit 测试（`test/`、`test/lit/vpto/`）
 
-**Native unroll（Pass A，唯一消费者）**：
+**Native unroll（Pass A，用户 hint 的唯一消费者）**：
 
 - factor 整除（无 epilogue）/ 不整除（epilogue 存在且 init args 正确）；
 - trip count < factor、0 次、1 次迭代；
@@ -657,10 +659,12 @@ for i in pto.range(0, N, unroll_factor=4):
 
 Promote `kUnrollAttrName` / `kUnrollFullValue` (previously private in `PTOUnrollSIMTForPass.cpp`) into a shared header (`include/PTO/IR/PTO.h`), and add `kUnrollFactorAttrName = "pto.unroll_factor"` plus the `isValidUnrollFactorAttr` contract check, shared by the pass and the docs.
 
-### 5.2 Pass A: `PTOUnrollLoops` (refactor of `PTOUnrollSIMTFor`, the only consumer)
+### 5.2 Pass A: `PTOUnrollLoops` (refactor of `PTOUnrollSIMTFor`, the only consumer of user hints)
 
 - **New pass name**: `pto-unroll-loops`; keep `pto-unroll-simt-for` as an alias (two existing tests reference it via `--mlir-print-ir-after=pto-unroll-simt-for`; behavior is unchanged, zero regression);
-- **Position unchanged**: inside `prepareVPTOForEmission`, before SCCP/canonicalize/CSE (`tools/ptoas/ptoas.cpp`), preserving the #838 benefit of folding constant branches after unrolling;
+- **Runs twice in the pipeline** (inside `prepareVPTOForEmission`, `tools/ptoas/ptoas_pipeline.cpp`):
+  1. the frontend slot (before `PTOAnalyzeSIMTPersistentFragmentPass` and before SCCP/canonicalize/CSE), consuming user `pto.unroll`/`pto.unroll_factor` hints — unrolling `pto.unroll = "full"` first is what constant-folds the GEP indices required by the persistent-fragment analysis, and the #838 benefit of folding constant branches after unrolling is preserved here;
+  2. the tail slot (after the VfSim planner), consuming the cost model's `pto.vfsim.unroll_factor` (see `vmi_vfsim_costmodel_integration_design.md`); that run shares the native `loopUnrollByFactor` implementation with the user-hint path but validates through its own path, and a VfSim factor combined with either user hint is a hard error;
 - **Two-phase structure**: first walk the function and validate every hint (collecting all diagnostics before failing once - the function pass adaptor may stop scheduling functions after the first failure, so diagnostics must be complete per function), then run the unroll fixpoint;
 - **Validation** (hard errors): a `pto.unroll` value other than `"full"`/`"enable"` (`"disable"` and unknown values), both attributes on one loop, or a factor violating the signless-i32 positive-factor contract (`isValidUnrollFactorAttr`); `"enable"` is passed through untouched for Pass B (this check runs before every native-unroll guard - otherwise an empty-body or non-index loop would silently lose the hint);
 - **Handling logic** (after validation):
@@ -748,7 +752,7 @@ accordingly (the old `pto-lower-loop-hints` no longer described its job):
 
 ### 7.2 PTOAS lit tests (`test/`, `test/lit/vpto/`)
 
-**Native unroll (Pass A, the only consumer)**:
+**Native unroll (Pass A, the only consumer of user hints)**:
 
 - factor divides / does not divide the trip count (epilogue present with correct init args);
 - trip count < factor, zero-trip, single-iteration;

@@ -280,18 +280,22 @@ llvm::cl::opt<bool> enableShapeInference(
 
 llvm::cl::opt<bool> enableVfSimCostmodelOptimization(
     "enable-vfsim-costmodel-optimization",
-    llvm::cl::desc("Enable optional VfSimulator costmodel-driven fusion "
-                   "optimization. Requires the A5 tile-fusion pipeline. This "
-                   "may annotate pto.fusion.row/col_unroll_factor; pass "
-                   "--enable-unroll-after-loop-fusion to consume those "
-                   "attributes in the VPTO backend."),
+    llvm::cl::desc("Enable the optional VfSimulator costmodel planner. The "
+                   "legacy pipeline plans tile-fusion row/column unroll; the "
+                   "VMI pipeline plans low-level ABCABC/AABBCC loop unroll."),
     llvm::cl::init(false));
 
 llvm::cl::opt<bool> dumpVfSimUnrollTest(
     "dump-vfsim-unroll-test",
-    llvm::cl::desc("Print VfSimulator unroll candidate timings for accepted "
-                   "fusion groups. Debug dump only; does not enable or disable "
-                   "the VfSimulator planner."),
+    llvm::cl::desc("Print legacy VfSimulator tile-fusion unroll candidate "
+                   "timings. Debug dump only; does not enable the planner."),
+    llvm::cl::init(false));
+
+llvm::cl::opt<bool> dumpVfSimCostmodel(
+    "dump-vfsim-costmodel",
+    llvm::cl::desc("Print VfSimulator VMI candidate cycles, selected plan, "
+                   "and skip reasons. Debug dump only; does not enable the "
+                   "planner."),
     llvm::cl::init(false));
 
 llvm::cl::opt<bool> disableInferLayout(
