@@ -243,14 +243,53 @@ def emit_scalar_fill_2d(scalar, dst):
 
 
 def register_unary(*, op, name, vector_op, dtypes, constraints=(),
-                   traversal="2d", priority=None, candidate_id=None):
-    """Register a unary tile traversal using a public PTODSL vector operation."""
+                   traversal="2d", priority=None, candidate_id=None,
+                   has_tmp=False):
+    """Register a unary tile traversal using a public PTODSL vector operation.
+
+    ``has_tmp`` registers the 3-operand form of ops whose ODS stores the
+    optional workspace tile last in operand order (e.g. ``pto.trsqrt
+    ins(src, tmp) outs(dst)`` lowers to operands ``(src, dst, tmp)``); the
+    workspace is not read by the PTODSL body.
+    """
 
     loop_depth, priority, candidate_id = traversal_metadata(
         traversal,
         priority=priority,
         candidate_id=candidate_id,
     )
+
+    if has_tmp:
+        candidate_constraints = _with_traversal_constraint(
+            traversal,
+            ("src", "dst", "tmp"),
+            _common_constraints("src", "dst", "tmp") + list(constraints),
+        )
+
+        @tilelib.tile_template(
+            op=op,
+            target="a5",
+            name=name,
+            dtypes=dtypes,
+            iteration_axis="none",
+            op_engine="vector",
+            op_class="elementwise",
+            constraints=candidate_constraints,
+            priority=priority,
+            id=candidate_id,
+            loop_depth=loop_depth,
+            is_post_update=False,
+            tags=("elementwise", "unary"),
+        )
+        def template(src: pto.Tile, dst: pto.Tile, tmp: pto.Tile):
+            _ = tmp
+            if traversal == "1d":
+                emit_unary_1d(src, dst, vector_op)
+            else:
+                emit_unary_2d(src, dst, vector_op)
+
+        return template
+
     candidate_constraints = _with_traversal_constraint(
         traversal,
         ("src", "dst"),

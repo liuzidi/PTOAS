@@ -680,6 +680,70 @@ static Value projectSCFIfViewResult(Value view, PTOViewProjectionKind kind,
   return projection;
 }
 
+// Rewrite the tile-world scalar element IO ops onto plain typed-pointer
+// scalar loads/stores. The VPTO LLVM emitters have no conversion pattern for
+// pto.tsetval / pto.tgetval (their EmitC counterparts lower to opaque calls),
+// so leaving them intact lets the op survive until LLVM translation where its
+// unconverted tile_buf operand forces an unrealized_conversion_cast. Both ops
+// only make sense on VEC (UB) tiles — the TGetValOp verifier already enforces
+// that on the read side.
+static LogicalResult rewriteTileScalarIO(func::FuncOp func,
+                                         OpBuilder &builder) {
+  SmallVector<Operation *, 8> scalarIOOps;
+  func.walk([&](Operation *op) {
+    if (isa<pto::TSetValOp, pto::TGetValOp>(op))
+      scalarIOOps.push_back(op);
+  });
+
+  for (Operation *op : scalarIOOps) {
+    Location loc = op->getLoc();
+    Type valueTy;
+    Value tile;
+    Value offset;
+    if (auto setVal = dyn_cast<pto::TSetValOp>(op)) {
+      tile = setVal.getDst();
+      offset = setVal.getOffset();
+      valueTy = setVal.getVal().getType();
+    } else {
+      auto getVal = cast<pto::TGetValOp>(op);
+      tile = getVal.getSrc();
+      offset = getVal.getOffset();
+      valueTy = getVal.getDst().getType();
+    }
+
+    auto tileTy = dyn_cast<pto::TileBufType>(tile.getType());
+    if (!tileTy) {
+      return op->emitError("tile scalar IO requires a tile_buf operand");
+    }
+    auto memorySpace =
+        dyn_cast_or_null<pto::AddressSpaceAttr>(tileTy.getMemorySpace());
+    if (!memorySpace ||
+        memorySpace.getAddressSpace() != pto::AddressSpace::VEC) {
+      return op->emitError(
+          "tile scalar IO in the VPTO backend requires a vec (UB) tile_buf");
+    }
+    if (tileTy.getElementType() != valueTy) {
+      return op->emitError(
+          "tile scalar IO value type must match the tile element type");
+    }
+
+    builder.setInsertionPoint(op);
+    auto ptrType = pto::PtrType::get(builder.getContext(), valueTy,
+                                     memorySpace);
+    Value addr =
+        builder.create<pto::TileBufAddrOp>(loc, ptrType, tile).getDst();
+    if (auto setVal = dyn_cast<pto::TSetValOp>(op)) {
+      builder.create<pto::StoreScalarOp>(loc, addr, offset, setVal.getVal());
+    } else {
+      Value loaded =
+          builder.create<pto::LoadScalarOp>(loc, valueTy, addr, offset);
+      op->getResult(0).replaceAllUsesWith(loaded);
+    }
+    op->erase();
+  }
+  return success();
+}
+
 struct FoldTileBufIntrinsicsPass
     : public pto::impl::FoldTileBufIntrinsicsBase<FoldTileBufIntrinsicsPass> {
   using FoldTileBufIntrinsicsBase::FoldTileBufIntrinsicsBase;
@@ -706,6 +770,12 @@ struct FoldTileBufIntrinsicsPass
         func->hasAttr("pto.tilelib.impl")) {
       return;
     }
+
+    // Lower tile-world scalar element IO first so the emitted
+    // tile_buf_addr ops join the addr folding below instead of surviving
+    // to the VPTO LLVM emitters (which have no TSetVal/TGetVal pattern).
+    if (failed(rewriteTileScalarIO(func, builder)))
+      return signalPassFailure();
 
     SmallVector<pto::TileBufAddrOp, mlir::pto::kValue8> addrOps;
     SmallVector<pto::TileValidRowsOp, mlir::pto::kValue8> rowsOps;
